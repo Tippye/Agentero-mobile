@@ -1203,6 +1203,17 @@
 		"neverSynced": "Not synced yet.",
 		"done": "Sync complete: {{up}} uploaded, {{down}} downloaded",
 		"conflicts": "{{count}} conflict copy(ies) saved next to the originals",
+		"conflictTitle": "Both devices changed these files",
+		"conflictDescription": "Sync is paused and nothing has been overwritten yet. Choose what to keep for each of the {{count}} file(s).",
+		"conflictChoice": {
+			"keepLocal": "Keep local",
+			"keepCloud": "Keep cloud",
+			"keepBoth": "Keep both"
+		},
+		"conflictKeepBothAll": "Keep both for all",
+		"conflictLater": "Later",
+		"conflictApply": "Apply",
+		"conflictApplying": "Syncing...",
 		"phase": {
 			"scan": "Scanning vault…",
 			"pull": "Fetching remote state…",

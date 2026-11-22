@@ -372,6 +372,33 @@ async fn run_sync_requested<S: RemoteStore>(
         } else {
             &base_files
         };
+        // Steam-style ask policy: a paused pass left durable overrides; consume
+        // them for this attempt. Without overrides, divergent edits under Ask
+        // pause the whole pass before anything is applied or published.
+        let overrides = crate::features::sync::conflicts::read_overrides(vault)?
+            .filter(|ov| ov.store_id == store_id);
+        if cfg.conflict_policy == crate::features::sync::config::ConflictPolicy::Ask
+            && overrides.is_none()
+        {
+            let detected = crate::features::sync::conflicts::detect_conflicts(
+                merge_base,
+                &local_files,
+                remote_files,
+            );
+            if !detected.is_empty() {
+                crate::features::sync::conflicts::write_pending(
+                    vault,
+                    &crate::features::sync::conflicts::PendingConflicts {
+                        store_id: store_id.clone(),
+                        conflicts: detected,
+                    },
+                )?;
+                return Err(AppError::domain(
+                    "sync_conflict_pending",
+                    "Both devices edited the same files; choose which version to keep",
+                ));
+            }
+        }
         let mut plan = merge_with_paper_presence(
             merge_base,
             &local_files,
@@ -379,6 +406,7 @@ async fn run_sync_requested<S: RemoteStore>(
             &cfg.scope,
             &remote_scope,
             &paper_presence,
+            overrides.as_ref(),
         );
         resolve_marks(vault, client, &mut plan).await?;
         ensure_requested_asset(&plan.merged, &cfg.scope, requested)?;
@@ -528,6 +556,10 @@ async fn run_sync_requested<S: RemoteStore>(
         )?;
         record_sync(vault, &store_id, &accepted, &cfg.scope, plan.merged, false)?;
         recovery::finish(vault)?;
+        // A resolved (or conflict-free) pass published successfully: retire any
+        // durable ask-policy decision so the next divergence pauses again.
+        crate::features::sync::conflicts::clear_pending(vault)?;
+        crate::features::sync::conflicts::clear_overrides(vault)?;
         local::clear_pushed(vault);
         refresh_catalog_if_needed(vault)?;
         outcome.version = accepted.version;
@@ -801,18 +833,18 @@ fn plan_asset_downloads(
 }
 
 #[derive(Default)]
-struct MergePlan {
-    merged: BTreeMap<String, FileEntry>,
-    downloads: Vec<(String, FileEntry)>,
-    delete_local: Vec<String>,
+pub(super) struct MergePlan {
+    pub(super) merged: BTreeMap<String, FileEntry>,
+    pub(super) downloads: Vec<(String, FileEntry)>,
+    pub(super) delete_local: Vec<String>,
     /// `(original rel, conflict-copy rel)` — copy the local file aside before
     /// the remote version overwrites it.
-    preserve_local: Vec<(String, String)>,
-    conflict_copies: Vec<String>,
+    pub(super) preserve_local: Vec<(String, String)>,
+    pub(super) conflict_copies: Vec<String>,
     marks: Vec<MarkMerge>,
     /// Resolved semantic content and exact source conflict copies.
-    writes: BTreeMap<String, Vec<u8>>,
-    mark_conflicts: Vec<String>,
+    pub(super) writes: BTreeMap<String, Vec<u8>>,
+    pub(super) mark_conflicts: Vec<String>,
 }
 
 impl MergePlan {
@@ -976,7 +1008,7 @@ fn merge(
             .filter_map(|path| paper_id(path).map(str::to_owned))
             .collect(),
     };
-    merge_with_paper_presence(base, local, remote, local_scope, remote_scope, &presence)
+    merge_with_paper_presence(base, local, remote, local_scope, remote_scope, &presence, None)
 }
 
 fn merge_with_paper_presence(
@@ -986,6 +1018,7 @@ fn merge_with_paper_presence(
     local_scope: &SyncScope,
     remote_scope: &SyncScope,
     paper_presence: &PaperPresence,
+    resolutions: Option<&crate::features::sync::conflicts::ConflictOverrides>,
 ) -> MergePlan {
     let mut plan = MergePlan::default();
     let mut paths: Vec<&String> = base
@@ -1084,6 +1117,17 @@ fn merge_with_paper_presence(
             match (l, r) {
                 // Divergent edits.
                 (Some(le), Some(re)) => {
+                    if let Some(ov) = resolutions {
+                        let res = ov
+                            .resolutions
+                            .get(path)
+                            .copied()
+                            .unwrap_or(ov.default_resolution);
+                        crate::features::sync::conflicts::apply_resolution(
+                            &mut plan, path, le, re, res, base, remote,
+                        );
+                        continue;
+                    }
                     let remote_newer = re.mtime_ms >= le.mtime_ms;
                     if path.ends_with(".md") || path.to_ascii_lowercase().ends_with(".table.json") {
                         let loser = if remote_newer { le } else { re };
@@ -1489,7 +1533,7 @@ fn read_blob(vault: &Path, rel: &str, entry: &FileEntry) -> Result<Vec<u8>, AppE
     gzip(&raw)
 }
 
-fn conflict_name(path: &str, hash: &str, index: u64) -> String {
+pub(super) fn conflict_name(path: &str, hash: &str, index: u64) -> String {
     let stamp = &hash[..hash.len().min(12)];
     let stamp = if index == 1 {
         stamp.to_string()

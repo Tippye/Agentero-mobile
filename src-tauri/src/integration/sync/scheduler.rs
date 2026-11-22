@@ -117,6 +117,12 @@ impl SyncService {
                         if service.is_running(&key) {
                             return PassControl::Retry;
                         }
+                        // A paused ask-policy decision blocks automatic retries:
+                        // the user has not chosen yet, so a pass would only
+                        // re-detect the same conflicts and rewrite the prompt.
+                        if super::commands::has_pending_conflicts(&app, &key) {
+                            return PassControl::Retry;
+                        }
                         if let Err(error) =
                             super::commands::perform_sync(&app, &service, &key).await
                         {
@@ -355,6 +361,13 @@ async fn run_desktop_loop(app: AppHandle, vault_key: String, dir: PathBuf, inter
             _ = ticker.tick() => {},
             changed = rx.recv() => { if changed.is_none() { break; } }
             _ = sleep_until(retry_deadline), if retry_at.is_some() => {}
+        }
+        // A paused ask-policy decision blocks automatic retries: the user has
+        // not chosen yet, so a pass would only re-detect the same conflicts.
+        if super::commands::has_pending_conflicts(&app, &vault_key) {
+            failures = 0;
+            retry_at = None;
+            continue;
         }
         let outcome = {
             let service = app.state::<SyncService>();

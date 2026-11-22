@@ -751,6 +751,12 @@ export const commands = {
 	/**  One full sync pass (manual trigger from the settings pane). */
 	syncNow: (args: SyncVaultArgs) => typedError<ApiResult<SyncOutcome>, string>(__TAURI_INVOKE("sync_now", { args })),
 	/**
+	 *  Persist the user's per-file conflict decisions and re-run the paused pass.
+	 *  The override file is durable before the pass starts; a crash mid-pass leaves
+	 *  it in place so the next attempt resumes the same decision.
+	 */
+	syncResolveConflicts: (args: SyncResolveConflictsArgs) => typedError<ApiResult<SyncOutcome>, string>(__TAURI_INVOKE("sync_resolve_conflicts", { args })),
+	/**
 	 *  Local disk usage per bulky-asset category (bytes), for the sync-scope UI.
 	 *  The shared snapshot classifier covers all five categories (including the
 	 *  mobile ink / translated-PDF buckets); the app-aware vault guard keeps the
@@ -2911,6 +2917,19 @@ export type CompileLogEvent = {
 	rootPath: string,
 	line: string,
 };
+
+/**  How a sync pass resolves files edited on both devices. */
+export type ConflictPolicy =
+/**  Historical automatic behavior: newer mtime wins, loser kept as a copy. */
+"auto" |
+/**  Pause the whole pass and surface a per-file choice to the user. */
+"ask";
+
+/**
+ *  User's per-file decision. `keep_both` reproduces the historical automatic
+ *  behavior (newer wins the original path, older survives as a conflict copy).
+ */
+export type ConflictResolution = "keepLocal" | "keepCloud" | "keepBoth";
 
 export type ConnectionId = string;
 
@@ -5347,6 +5366,19 @@ export type PdfAskSettings = {
 	modelId?: string,
 };
 
+/**
+ *  Durable record of a paused pass. Written before `sync_conflict_pending`
+ *  returns; removed once the resolved pass publishes successfully.
+ */
+export type PendingConflicts = {
+	/**
+	 *  Store identity the conflicts were detected against. A retargeted store
+	 *  invalidates the pending decision instead of applying it blindly.
+	 */
+	storeId: string,
+	conflicts: SyncFileConflict[],
+};
+
 export type PermissionOptionView = {
 	optionId: string,
 	name: string,
@@ -6298,6 +6330,12 @@ export type SyncBackendConfig_Deserialize = {
 	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
 	 */
 	scope?: SyncScope,
+	/**
+	 *  Divergent-edit handling: `auto` keeps mtime last-writer-wins with
+	 *  conflict copies (desktop/CLI default); `ask` pauses the pass and asks
+	 *  the user which version to keep (mobile default).
+	 */
+	conflictPolicy?: ConflictPolicy,
 };
 
 export type SyncBackendConfig_Serialize = {
@@ -6369,6 +6407,12 @@ export type SyncBackendConfig_Serialize = {
 	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
 	 */
 	scope: SyncScope,
+	/**
+	 *  Divergent-edit handling: `auto` keeps mtime last-writer-wins with
+	 *  conflict copies (desktop/CLI default); `ask` pauses the pass and asks
+	 *  the user which version to keep (mobile default).
+	 */
+	conflictPolicy: ConflictPolicy,
 };
 
 /**
@@ -6425,6 +6469,18 @@ export type SyncDownloadPolicyArgs = {
 	policy: DownloadPolicy,
 };
 
+/**  One divergent-edit conflict surfaced to the user. */
+export type SyncFileConflict = {
+	/**  Vault-relative path both devices edited. */
+	path: string,
+	localHash: string,
+	localSize: number,
+	localMtimeMs: number,
+	remoteHash: string,
+	remoteSize: number,
+	remoteMtimeMs: number,
+};
+
 export type SyncOutcome = {
 	version: number,
 	uploaded: number,
@@ -6455,6 +6511,13 @@ export type SyncProgressEvent = {
 	phase: string,
 	current: number,
 	total: number,
+};
+
+export type SyncResolveConflictsArgs = {
+	vaultPath: string,
+	/**  Fallback for pending paths absent from `resolutions`. */
+	defaultResolution: ConflictResolution,
+	resolutions: { [key in string]: ConflictResolution },
 };
 
 /**
@@ -6523,6 +6586,11 @@ export type SyncStatus_Deserialize = {
 	running: boolean,
 	lastSyncAt: string | null,
 	lastVersion: number,
+	/**
+	 *  Divergent-edit conflicts awaiting a user decision (ask policy). Present
+	 *  after a paused pass until the resolved pass publishes successfully.
+	 */
+	pendingConflicts: PendingConflicts | null,
 };
 
 export type SyncStatus_Serialize = {
@@ -6532,6 +6600,11 @@ export type SyncStatus_Serialize = {
 	running: boolean,
 	lastSyncAt?: string | null,
 	lastVersion: number,
+	/**
+	 *  Divergent-edit conflicts awaiting a user decision (ask policy). Present
+	 *  after a paused pass until the resolved pass publishes successfully.
+	 */
+	pendingConflicts?: PendingConflicts | null,
 };
 
 export type SyncTexLocation = {

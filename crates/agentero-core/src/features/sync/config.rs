@@ -109,6 +109,22 @@ pub struct SyncBackendConfig {
     /// in sync. Notes, sidecars and marks always sync. Default: everything.
     #[serde(default)]
     pub scope: SyncScope,
+    /// Divergent-edit handling: `auto` keeps mtime last-writer-wins with
+    /// conflict copies (desktop/CLI default); `ask` pauses the pass and asks
+    /// the user which version to keep (mobile default).
+    #[serde(default)]
+    pub conflict_policy: ConflictPolicy,
+}
+
+/// How a sync pass resolves files edited on both devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictPolicy {
+    /// Historical automatic behavior: newer mtime wins, loser kept as a copy.
+    #[default]
+    Auto,
+    /// Pause the whole pass and surface a per-file choice to the user.
+    Ask,
 }
 
 fn default_region() -> String {

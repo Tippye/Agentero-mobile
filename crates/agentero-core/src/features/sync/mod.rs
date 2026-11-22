@@ -19,6 +19,7 @@ pub const SYNC_UNREACHABLE: &str = "sync_unreachable";
 mod agentero;
 pub mod availability;
 pub mod config;
+pub mod conflicts;
 pub mod engine;
 pub mod git;
 pub mod local;
