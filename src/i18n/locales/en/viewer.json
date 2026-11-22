@@ -45,6 +45,7 @@
 		"outline": "Outline",
 		"linkAria": "PDF link",
 		"linkUrl": "Link address",
+		"linkPreview": "Link preview",
 		"paperTone": "Page background",
 		"paperToneOption": {
 			"white": "White",
@@ -92,6 +93,8 @@
 			"hide": "Hide translations",
 			"show": "Show translations",
 			"dualPane": "Side-by-side translation",
+			"exportDualPdf": "Export bilingual PDF",
+			"exportPdf": "Export translated PDF",
 			"translatePage": "Translate this page",
 			"translatePageShort": "Translate",
 			"hidePage": "Hide this page translation",
@@ -143,7 +146,8 @@
 			"retranslateConfirmTitle": "Retranslate all?",
 			"retranslateConfirmDescription": "This requests every block again and replaces translations that succeed. Blocks that fail keep their previous translation.",
 			"retranslateConfirm": "Retranslate",
-			"pagesCount": "Completed {{done}}/{{total}} pages"
+			"pagesCount": "Completed {{done}}/{{total}} pages",
+			"pagesGenerated": "Generated {{done}}/{{total}} pages"
 		},
 		"translation": {
 			"title": "Translation",

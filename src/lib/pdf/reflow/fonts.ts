@@ -4,8 +4,11 @@ import { isMobileApp } from "@/lib/core/tauri";
 import { readVaultBytes, writeVaultBytes } from "@/lib/vault/fs";
 import type { FontKey } from "./types";
 export type ReflowFontBytes = Record<FontKey, Uint8Array>;
-/** Same OFL font assets across platforms; hashes pin content independently of hosting. */
-const revision = "1eeeec2a63b05fe6fe7a1f45f0955a8fa98793c4";
+/**
+ * Same OFL font assets across platforms, mirrored on ModelScope; the dataset
+ * revision pins the upstream commit while the hashes pin the content.
+ */
+const revision = "b956e9333a4e53ed9753c296877af6c7074d7b23";
 const assets: Record<FontKey, [string, string]> = {
 	regular: [
 		"NotoSerif-Regular.ttf",
@@ -79,7 +82,6 @@ export function loadReflowFonts(): Promise<ReflowFontBytes> {
 	clearTimeout(idle);
 	pending ??= logOp("pdf.reflow.fonts", undefined, async () => {
 		const root = await join(await appCacheDir(), "pdf-fonts", revision);
-		const fallback = await bundledFallback();
 		const entries = await Promise.all(
 			(Object.entries(assets) as [FontKey, [string, string]][]).map(
 				async ([key, [name, hash]]) => {
@@ -90,22 +92,28 @@ export function loadReflowFonts(): Promise<ReflowFontBytes> {
 					} catch {
 						/* Missing cache: fetch a pinned public font. */
 					}
-					// Without network the pinned host is unreachable on a phone.
-					// The bundled fallback keeps typesetting available offline.
-					if (fallback) return [key, fallback] as const;
-					const response = await fetch(
-						`https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/${revision}/fonts/${name}`,
-						{ credentials: "omit", signal: AbortSignal.timeout(60_000) },
-					);
-					if (!response.ok)
-						throw new Error(
-							`Font download failed: ${name} (${response.status})`,
+					// Cache miss: try the ModelScope mirror first (reachable on
+					// phones in CN networks), then fall back to the bundled CJK
+					// serif so offline typesetting still produces a PDF.
+					try {
+						const response = await fetch(
+							`https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/${revision}/fonts/${name}`,
+							{ credentials: "omit", signal: AbortSignal.timeout(60_000) },
 						);
-					const bytes = new Uint8Array(await response.arrayBuffer());
-					if ((await sha256(bytes)) !== hash)
-						throw new Error(`Font checksum mismatch: ${name}`);
-					await writeVaultBytes(path, bytes);
-					return [key, bytes] as const;
+						if (!response.ok)
+							throw new Error(
+								`Font download failed: ${name} (${response.status})`,
+							);
+						const bytes = new Uint8Array(await response.arrayBuffer());
+						if ((await sha256(bytes)) !== hash)
+							throw new Error(`Font checksum mismatch: ${name}`);
+						await writeVaultBytes(path, bytes);
+						return [key, bytes] as const;
+					} catch (error) {
+						const fallback = await bundledFallback();
+						if (fallback) return [key, fallback] as const;
+						throw error;
+					}
 				},
 			),
 		);

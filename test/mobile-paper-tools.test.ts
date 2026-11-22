@@ -24,7 +24,12 @@ const io = vi.hoisted(() => ({
 	imported: vi.fn(),
 	updated: vi.fn(),
 	changed: vi.fn(),
-	load: vi.fn(),
+	load: vi.fn(() => ({
+		easyScholarKey: "",
+		easyScholarRanks: ["if"],
+		batchImportConcurrency: 2,
+		locale: "en",
+	})),
 	save: vi.fn(),
 	subscribe: vi.fn(),
 	unsubscribe: vi.fn(),
@@ -259,12 +264,14 @@ beforeEach(() => {
 	io.tags.mockResolvedValue({ ok: true, data: paper() });
 	io.load.mockReturnValue({
 		easyScholarKey: "******",
+		easyScholarRanks: ["if"],
 		batchImportConcurrency: 2,
 		locale: "en",
 		unrelated: "preserved",
 	});
 	io.save.mockResolvedValue({
 		easyScholarKey: "********",
+		easyScholarRanks: ["if"],
 		batchImportConcurrency: 2,
 		locale: "en",
 		unrelated: "preserved",
@@ -624,6 +631,7 @@ describe("mobile paper info reuses catalog and business details", () => {
 		await click("general.easyScholar.confirm");
 		expect(io.save).toHaveBeenCalledExactlyOnceWith({
 			easyScholarKey: "user-supplied-key",
+			easyScholarRanks: ["if"],
 			batchImportConcurrency: 2,
 			locale: "en",
 			unrelated: "preserved",

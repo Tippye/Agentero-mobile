@@ -103,7 +103,20 @@ mod build_tesseract {
                             "#ifdef  NO_CONSOLE_IO",
                             "#define NO_CONSOLE_IO\n#ifdef  NO_CONSOLE_IO",
                         );
-                    std::fs::write(environ_h_path, environ_h).expect("Failed to write environ.h");
+                    // Security software may block writes into the cached
+                    // source tree. When the file already carries the patched
+                    // content, the blocked write is a no-op; only a genuinely
+                    // unpatched file must fail the build.
+                    if let Err(e) = std::fs::write(&environ_h_path, &environ_h) {
+                        let current = std::fs::read_to_string(&environ_h_path)
+                            .unwrap_or_default();
+                        if current != environ_h {
+                            panic!("Failed to write environ.h: {e}");
+                        }
+                        println!(
+                            "cargo:warning=environ.h write blocked ({e}); file already patched"
+                        );
+                    }
                 }
 
                 let makefile_static_path = leptonica_dir.join("prog").join("makefile.static");
@@ -116,8 +129,16 @@ mod build_tesseract {
                             "ALL_LIBS =	$(LEPTLIB) -ltiff -ljpeg -lpng -lz -lm",
                             "ALL_LIBS =	$(LEPTLIB) -lm",
                         );
-                    std::fs::write(makefile_static_path, makefile_static)
-                        .expect("Failed to write makefile.static");
+                    if let Err(e) = std::fs::write(&makefile_static_path, &makefile_static) {
+                        let current = std::fs::read_to_string(&makefile_static_path)
+                            .unwrap_or_default();
+                        if current != makefile_static {
+                            panic!("Failed to write makefile.static: {e}");
+                        }
+                        println!(
+                            "cargo:warning=makefile.static write blocked ({e}); file already patched"
+                        );
+                    }
                 }
 
                 // Configure build tools
@@ -481,6 +502,24 @@ mod build_tesseract {
         }
     }
 
+    /// Whether the installed library is byte-identical to the cached one,
+    /// so a blocked cache copy can fall back to it instead of rebuilding.
+    fn installed_matches_cache(cached: &Path, installed: &Path) -> bool {
+        let Ok(cached_meta) = fs::metadata(cached) else {
+            return false;
+        };
+        let Ok(installed_meta) = fs::metadata(installed) else {
+            return false;
+        };
+        if cached_meta.len() != installed_meta.len() {
+            return false;
+        }
+        match (fs::read(cached), fs::read(installed)) {
+            (Ok(c), Ok(i)) => c == i,
+            _ => false,
+        }
+    }
+
     fn build_or_use_cached<F>(name: &str, cache_dir: &Path, install_dir: &Path, build_fn: F)
     where
         F: FnOnce(),
@@ -523,9 +562,20 @@ mod build_tesseract {
         if cached_path.exists() {
             println!("Using cached {} library", name);
             if let Err(e) = fs::copy(&cached_path, &out_path) {
-                println!("cargo:warning=Failed to copy cached library: {}", e);
-                // If cache copy fails, rebuild
-                build_fn();
+                // Security software can block this unsigned build script's
+                // file writes even though the installed library is already
+                // valid. Rebuild only when the destination cannot serve as
+                // the cached library (missing or different content).
+                if installed_matches_cache(&cached_path, &out_path) {
+                    println!(
+                        "cargo:warning=Cache copy blocked ({}); using identical installed library",
+                        e
+                    );
+                } else {
+                    println!("cargo:warning=Failed to copy cached library: {}", e);
+                    // If cache copy fails, rebuild
+                    build_fn();
+                }
             }
         } else {
             println!("Building {} library", name);

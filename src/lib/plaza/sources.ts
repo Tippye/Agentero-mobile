@@ -4,8 +4,6 @@
  * Virtual tree/tab paths only; nothing here ever touches disk. Adding a source
  * is a single {@link PLAZA_SOURCES} entry — the sidebar child row and the
  * center panel both derive from this registry.
- *
- * @see docs/frontend/paper-import.md
  */
 
 import i18n from "@/i18n";
@@ -41,7 +39,7 @@ export type PlazaSource = {
 	/** Minimum virtual viewport for a fixed desktop layout; other sites reflow normally. */
 	desktopWidth?: number;
 	/** Native plaza panel (not an iframe). */
-	panel?: "skills" | "feeds" | "arxivRec" | "ccfDeadlines";
+	panel?: "skills" | "feeds" | "arxivRec" | "ccfDeadlines" | "huggingface";
 	/**
 	 * Host proxy scheme origin used for embedding. A cross-origin frame cannot
 	 * retarget the site's `target="_blank"` links or report its navigations, so
@@ -89,7 +87,8 @@ export const PLAZA_SOURCES: readonly PlazaSource[] = [
 		path: sourcePath("huggingface"),
 		label: "Hugging Face Daily Papers",
 		url: "https://huggingface.co/papers",
-		embedOrigin: () => schemeOrigin("agentero-huggingface"),
+		embedOrigin: null,
+		panel: "huggingface",
 		icon: "huggingFace",
 	},
 	{

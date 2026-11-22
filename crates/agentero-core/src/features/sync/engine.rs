@@ -38,7 +38,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
+mod apply;
+mod journal;
 mod recovery;
+use apply::prepare_local;
+pub use journal::configure_webdav_journal;
 
 pub const FORMAT_VERSION: u32 = 1;
 const HEAD_KEY: &str = "HEAD";
@@ -80,6 +84,12 @@ pub type Progress<'a> = &'a (dyn Fn(&str, usize, usize) + Send + Sync);
 /// Test the configured endpoint and its conditional-write semantics.
 pub async fn test_connection(vault: &Path, cfg: &SyncBackendConfig) -> Result<bool, AppError> {
     crate::features::sync::ensure_vault_sync_available(vault)?;
+    if let Some(state) = journal::binding(vault, cfg)? {
+        let client = super::webdav::WebdavClient::new(cfg)?;
+        state.verify_remote(&client).await?;
+        client.test_journal().await?;
+        return Ok(false);
+    }
     if cfg.backend == SyncBackendKind::Git {
         crate::features::sync::git::test_connection(vault, cfg).await?;
         return Ok(true);
@@ -101,6 +111,9 @@ async fn sync_vault(
     progress: Progress<'_>,
 ) -> Result<SyncOutcome, AppError> {
     crate::features::sync::ensure_vault_sync_available(vault)?;
+    if let Some(state) = journal::binding(vault, cfg)? {
+        return journal::run(vault, cfg, state, progress).await;
+    }
     if cfg.backend == SyncBackendKind::Git {
         if availability::read_policy(vault)?.mode == DownloadMode::OnDemand {
             return Err(AppError::domain(
@@ -202,22 +215,12 @@ async fn run_sync_requested<S: RemoteStore>(
     // base, so excluded files are inert — never uploaded, downloaded, or
     // mistaken for deletions. The remote manifest stays unfiltered below.
     let mut base_files = visible_files(base.files.clone(), &cfg.scope);
-    let mut physical_files = {
-        let vault = vault.to_path_buf();
-        let scope = cfg.scope;
-        let scan_cache = if meta.needs_merge {
-            Manifest::default()
-        } else {
-            base
-        };
-        tokio::task::spawn_blocking(move || {
-            crate::features::paper::catalog::sidecar::flush_pending(&vault)?;
-            refresh_catalog_if_needed(&vault)?;
-            snapshot::scan_vault(&vault, &scan_cache, &scope)
-        })
-        .await
-        .map_err(|e| AppError::message(format!("scan task: {e}")))??
+    let scan_cache = if meta.needs_merge {
+        Manifest::default()
+    } else {
+        base
     };
+    let mut physical_files = scan_local(vault, scan_cache, cfg.scope).await?;
 
     // A base reference is not proof this device ever cached the blob. Persist
     // actual observations, then virtualize only known/ambiguous deferrals.
@@ -535,6 +538,21 @@ async fn run_sync_requested<S: RemoteStore>(
     ))
 }
 
+async fn scan_local(
+    vault: &Path,
+    cache: Manifest,
+    scope: SyncScope,
+) -> Result<BTreeMap<String, FileEntry>, AppError> {
+    let dir = vault.to_owned();
+    tokio::task::spawn_blocking(move || {
+        crate::features::paper::catalog::sidecar::flush_pending(&dir)?;
+        refresh_catalog_if_needed(&dir)?;
+        snapshot::scan_vault(&dir, &cache, &scope)
+    })
+    .await
+    .map_err(|e| AppError::message(format!("scan task: {e}")))?
+}
+
 fn record_sync(
     vault: &Path,
     store_id: &str,
@@ -732,7 +750,7 @@ fn ensure_requested_asset(
     Ok(())
 }
 
-fn validate_tree(files: &BTreeMap<String, FileEntry>) -> Result<(), AppError> {
+fn validate_tree<T>(files: &BTreeMap<String, T>) -> Result<(), AppError> {
     for path in files.keys() {
         if path
             .match_indices('/')
@@ -826,31 +844,30 @@ impl MergePlan {
             if pushed.contains(&entry.hash) {
                 continue;
             }
-            // Resolved marks bytes are staged for post-CAS apply; upload them
-            // from the plan, not from disk. Conflict copies of local edits read
-            // the original file they preserve.
-            let raw = match self.writes.get(rel) {
-                Some(bytes) => bytes.clone(),
+            // Resolved marks bytes are staged in the plan: under the mobile
+            // apply-before-publish order the disk may already hold the merged
+            // bytes, so the plan's writes map is authoritative for them.
+            // Conflict copies of local edits read the original they preserve.
+            let blob = match self.writes.get(rel) {
+                Some(bytes) => {
+                    if snapshot::hash_bytes(bytes) != entry.hash {
+                        return Err(AppError::message(format!(
+                            "{rel} changed during sync; run sync again"
+                        )));
+                    }
+                    gzip(bytes)?
+                }
                 None => {
                     let source = self
                         .preserve_local
                         .iter()
                         .find(|(_, copy)| copy == rel)
                         .map_or(rel, |(from, _)| from);
-                    fs::read(vault.join(source))?
+                    read_blob(vault, source, entry)?
                 }
             };
-            if snapshot::hash_bytes(&raw) != entry.hash {
-                return Err(AppError::message(format!(
-                    "{rel} changed during sync; run sync again"
-                )));
-            }
             client
-                .put(
-                    &blob_key(&entry.hash),
-                    gzip(&raw)?,
-                    PutCondition::IfNoneMatch,
-                )
+                .put(&blob_key(&entry.hash), blob, PutCondition::IfNoneMatch)
                 .await?;
             pushed.insert(entry.hash.clone());
             local::record_pushed(vault, store_id, &entry.hash);
@@ -942,7 +959,6 @@ fn mark_kind(path: &str) -> Option<MarkKind> {
 ///
 /// A local exclusion preserves the remote entry without transferring bytes.
 /// A legacy remote omission in a filtered category cannot delete local data.
-#[cfg(test)]
 fn merge(
     base: &BTreeMap<String, FileEntry>,
     local: &BTreeMap<String, FileEntry>,
@@ -1461,6 +1477,16 @@ pub(super) fn refresh_catalog_if_needed(vault: &Path) -> Result<(), AppError> {
 
 fn blob_key(hash: &str) -> String {
     format!("blobs/{}/{hash}", &hash[..2])
+}
+
+fn read_blob(vault: &Path, rel: &str, entry: &FileEntry) -> Result<Vec<u8>, AppError> {
+    let raw = fs::read(vault.join(rel))?;
+    if snapshot::hash_bytes(&raw) != entry.hash {
+        return Err(AppError::message(format!(
+            "{rel} changed during sync; run sync again"
+        )));
+    }
+    gzip(&raw)
 }
 
 fn conflict_name(path: &str, hash: &str, index: u64) -> String {

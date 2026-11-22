@@ -62,7 +62,6 @@ export type LayoutAnalysisTask = Awaited<
 export type StartLayoutAnalysisOptions = {
 	/** Re-run PP-DocLayoutV3 (PDF→JSON) even when `source/layout.json` exists. */
 	force?: boolean;
-	openFigures?: boolean;
 	showOverlay?: boolean;
 	/** Surface progress in the IDE background-tasks panel. */
 	asBackgroundTask?: boolean;
@@ -160,7 +159,7 @@ export function usePdfLayoutRun({
 	 * Run layout analysis for this document.
 	 * - force: re-run PP-DocLayoutV3 (PDF→JSON) even when source/layout.json exists
 	 * - without force: prefer layout.json → merge → sidebar when paper has a sidecar
-	 * - openFigures / showOverlay: UI side-effects for the manual Figures button
+	 * - showOverlay: UI side-effect for the manual Figures button
 	 * - asBackgroundTask: surface progress in the IDE background-tasks panel
 	 */
 	const startLayoutAnalysis = useCallback(
@@ -253,10 +252,6 @@ export function usePdfLayoutRun({
 							if (opts?.showOverlay) {
 								setLayoutOverlayVisible(docId, true);
 							}
-							// Note: figures now lives in the PDF viewer left overlay, not
-							// the right sidebar. Callers that want the panel visible after
-							// analysis should toggle it themselves (the panel button is
-							// inside the viewer, so this is normally already open).
 							finish(() => resolve());
 						},
 						onError: (message, aborted) => {
@@ -455,7 +450,6 @@ export function usePdfLayoutRun({
 			}
 			startLayoutAnalysis({
 				force: false,
-				openFigures: false,
 				showOverlay: false,
 				asBackgroundTask: false,
 				notifyOnError: false,
@@ -479,7 +473,6 @@ export function usePdfLayoutRun({
 				layoutAutoStartedForDocRef.current = docId;
 				startLayoutAnalysis({
 					force: false,
-					openFigures: false,
 					showOverlay: false,
 					asBackgroundTask: true,
 					notifyOnError: false,

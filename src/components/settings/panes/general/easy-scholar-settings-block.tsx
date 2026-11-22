@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { EasyScholarRanksPicker } from "@/components/settings/panes/general/easy-scholar-ranks-picker";
 import {
 	PROVIDER_INPUT_CLASS,
 	ProbeDot,
@@ -21,6 +22,7 @@ import {
 	type EasyScholarProbeStatus,
 	probeEasyScholarKey,
 } from "@/lib/easyscholar";
+import type { EasyScholarRankId } from "@/lib/paper/easy-scholar-ranks";
 
 export function EasyScholarSettingsBlock({
 	savedKey,
@@ -28,6 +30,8 @@ export function EasyScholarSettingsBlock({
 	onKeyDraftChange,
 	onCommitKey,
 	onOpenKeyPage,
+	ranks,
+	onRanksChange,
 }: {
 	savedKey: string;
 	keyDraft: string;
@@ -35,6 +39,9 @@ export function EasyScholarSettingsBlock({
 	onCommitKey: (value: string) => Promise<void>;
 	/** Mobile may supply its guarded native opener without a WebView fallback. */
 	onOpenKeyPage?: () => void;
+	/** EasyScholar rank systems currently shown in the Library/Paper Info. */
+	ranks: readonly EasyScholarRankId[];
+	onRanksChange: (next: EasyScholarRankId[]) => void | Promise<void>;
 }) {
 	const { t } = useTranslation("settings");
 	const [status, setStatus] = useState<EasyScholarProbeStatus>("idle");
@@ -165,6 +172,15 @@ export function EasyScholarSettingsBlock({
 									void handleConfirm();
 								}
 							}}
+						/>
+					</ProviderFieldRow>
+					<ProviderFieldRow
+						label={t("general.easyScholar.ranksLabel")}
+						htmlFor="easy-scholar-ranks"
+					>
+						<EasyScholarRanksPicker
+							ranks={ranks}
+							onChange={(next) => void onRanksChange(next)}
 						/>
 					</ProviderFieldRow>
 				</div>

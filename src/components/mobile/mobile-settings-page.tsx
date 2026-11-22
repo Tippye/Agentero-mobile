@@ -161,6 +161,12 @@ export function MobileSettingsPage({
 								showEditorToolbar={settings.showEditorToolbar}
 								wikiEmbedFontSize={settings.wikiEmbedFontSize}
 								markdownMaxWidth={settings.markdownMaxWidth}
+								plazaEnabled={settings.plazaEnabled}
+								pdfScrollStrategy={settings.pdfScrollStrategy}
+								pdfVimKeys={settings.pdfVimKeys}
+								pdfSpreadMode={settings.pdfSpreadMode}
+								pdfTranslateTab={settings.pdfTranslateTab}
+								vimMode={settings.vimMode}
 								patch={patch}
 							/>
 						) : section === "translate" ? (

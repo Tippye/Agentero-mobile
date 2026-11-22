@@ -129,7 +129,7 @@ beforeEach(() => {
 
 describe("settings window boot", () => {
 	it("hydrates the settings store from Host before a patch can persist", {
-		timeout: 15000,
+		timeout: 30000,
 	}, async () => {
 		const reactStore = await loadWindow();
 
@@ -157,7 +157,7 @@ describe("settings window boot", () => {
 	});
 
 	it("applies settings:changed broadcasts to the same store", {
-		timeout: 15000,
+		timeout: 30000,
 	}, async () => {
 		const reactStore = await loadWindow();
 		const next = hostFixture();

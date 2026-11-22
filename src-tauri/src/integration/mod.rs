@@ -6,11 +6,7 @@ pub mod bridge;
 #[cfg(feature = "desktop")]
 pub mod connector;
 #[cfg(feature = "desktop")]
-pub mod context_mcp;
-#[cfg(feature = "desktop")]
 pub mod credentials;
-#[cfg(feature = "desktop")]
-pub mod delegate_mcp;
 #[cfg(feature = "desktop")]
 pub mod dsh_remote;
 #[cfg(feature = "desktop")]
