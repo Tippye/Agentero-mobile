@@ -81,6 +81,7 @@ export type MobileSettingsPageProps = {
 	onClose: () => void;
 	vaultPath: string | null;
 	onSynced?: () => void | Promise<void>;
+	onReviewSyncConflicts: () => void;
 };
 
 /** Full-screen in-shell settings surface — aggregates every mobile option. */
@@ -91,6 +92,7 @@ export function MobileSettingsPage({
 	onClose,
 	vaultPath,
 	onSynced,
+	onReviewSyncConflicts,
 }: MobileSettingsPageProps) {
 	const { t } = useTranslation(["settings", "mobile", "common"]);
 	const [settings, setSettings] = useState(loadSettings);
@@ -373,6 +375,7 @@ export function MobileSettingsPage({
 										vaultPath={vaultPath}
 										mobile
 										onSynced={onSynced ?? noop}
+										onReviewConflicts={onReviewSyncConflicts}
 									/>
 								</Suspense>
 								<MobileDownloadSettings vaultPath={vaultPath} />

@@ -1,32 +1,23 @@
-//! Steam-style sync conflict resolution: when both devices edited the same
-//! file, pause the whole pass and ask the user which version to keep instead
-//! of silently applying mtime last-writer-wins.
-//!
-//! Two-phase protocol (the vault lock is never held while waiting for UI):
-//! 1. A pass that finds divergent edits under `conflict_policy = "ask"` writes
-//!    `.agentero/sync/pending-conflicts.json` and returns `sync_conflict_pending`
-//!    without applying or publishing anything.
-//! 2. The UI lists the conflicts, the user picks per file (keep local / keep
-//!    cloud / keep both), and `sync_resolve_conflicts` persists the choices as
-//!    an override file and re-runs the pass. The merge consumes the override,
-//!    applies the chosen direction, and clears both files on success.
-//!
-//! Crash safety: both files are durable before the pass returns; a restart
-//! re-reads them through `sync_get_status` so the dialog can resume. Until the
-//! user decides, neither side is overwritten.
+//! Durable review of ordinary files edited on both devices. A review and its
+//! accepted choices share one atomic file, and the sync lock protects every
+//! update. The engine verifies the complete reviewed set before applying it.
 
 use crate::error::AppError;
 use crate::features::sync::local;
-use crate::features::sync::snapshot::FileEntry;
+use crate::features::sync::lock::SyncLock;
+use crate::features::sync::snapshot::{self, FileEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+const REVIEW_FILE: &str = "pending-conflicts.json";
+const LEGACY_OVERRIDES_FILE: &str = "conflict-overrides.json";
+pub const PENDING_CODE: &str = "sync_conflict_pending";
 
 /// One divergent-edit conflict surfaced to the user.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncFileConflict {
-    /// Vault-relative path both devices edited.
     pub path: String,
     pub local_hash: String,
     pub local_size: u64,
@@ -36,19 +27,32 @@ pub struct SyncFileConflict {
     pub remote_mtime_ms: i64,
 }
 
-/// Durable record of a paused pass. Written before `sync_conflict_pending`
-/// returns; removed once the resolved pass publishes successfully.
+impl SyncFileConflict {
+    pub(super) fn new(path: &str, local: &FileEntry, remote: &FileEntry) -> Self {
+        Self {
+            path: path.to_owned(),
+            local_hash: local.hash.clone(),
+            local_size: local.size,
+            local_mtime_ms: local.mtime_ms,
+            remote_hash: remote.hash.clone(),
+            remote_size: remote.size,
+            remote_mtime_ms: remote.mtime_ms,
+        }
+    }
+}
+
+/// Durable record of a paused pass. A review ID identifies the exact set of
+/// local and cloud file versions presented for confirmation.
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingConflicts {
-    /// Store identity the conflicts were detected against. A retargeted store
-    /// invalidates the pending decision instead of applying it blindly.
     pub store_id: String,
+    pub review_id: String,
     pub conflicts: Vec<SyncFileConflict>,
 }
 
-/// User's per-file decision. `keep_both` reproduces the historical automatic
-/// behavior (newer wins the original path, older survives as a conflict copy).
+/// Which file version takes the original path. The other version is preserved
+/// as a conflict copy. `KeepBoth` uses the newer version at the original path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ConflictResolution {
@@ -57,132 +61,149 @@ pub enum ConflictResolution {
     KeepBoth,
 }
 
-/// Durable overrides consumed by the next pass. Paths absent from the map fall
-/// back to `default_resolution` so a partial UI submission is still complete.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConflictOverrides {
-    pub store_id: String,
-    pub default_resolution: ConflictResolution,
-    pub resolutions: BTreeMap<String, ConflictResolution>,
+pub(super) struct Review {
+    pub(super) store_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(super) review_id: String,
+    pub(super) conflicts: Vec<SyncFileConflict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) choices: Option<ConflictChoices>,
 }
 
-fn pending_path(vault: &Path) -> std::path::PathBuf {
-    local::sync_dir(vault).join("pending-conflicts.json")
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ConflictChoices {
+    default_resolution: ConflictResolution,
+    resolutions: BTreeMap<String, ConflictResolution>,
 }
 
-fn overrides_path(vault: &Path) -> std::path::PathBuf {
-    local::sync_dir(vault).join("conflict-overrides.json")
+impl ConflictChoices {
+    pub(super) fn for_path(&self, path: &str) -> ConflictResolution {
+        self.resolutions
+            .get(path)
+            .copied()
+            .unwrap_or(self.default_resolution)
+    }
+}
+
+fn versions(conflicts: &[SyncFileConflict]) -> BTreeMap<&str, (&str, &str)> {
+    conflicts
+        .iter()
+        .map(|c| {
+            (
+                c.path.as_str(),
+                (c.local_hash.as_str(), c.remote_hash.as_str()),
+            )
+        })
+        .collect()
+}
+
+impl Review {
+    pub(super) fn matches(&self, store_id: &str, conflicts: &[SyncFileConflict]) -> bool {
+        self.store_id == store_id && versions(&self.conflicts) == versions(conflicts)
+    }
+
+    fn write(&self, vault: &Path) -> Result<(), AppError> {
+        local::write_sync_json(vault, REVIEW_FILE, self)
+    }
+}
+
+pub(super) fn read_review(vault: &Path) -> Result<Option<Review>, AppError> {
+    let Some(mut review) = local::read_json::<Review>(&local::sync_dir(vault).join(REVIEW_FILE))?
+    else {
+        return Ok(None);
+    };
+    // Older clients persisted the shown versions but accepted unbound choices in
+    // a separate file. The versions can be reviewed again under a stable ID.
+    if review.review_id.is_empty() {
+        review.choices = None;
+        review.review_id = snapshot::hash_bytes(&serde_json::to_vec(&(
+            "legacy-sync-review-v1",
+            &review.store_id,
+            versions(&review.conflicts),
+        ))?);
+    }
+    Ok(Some(review))
 }
 
 pub fn read_pending(vault: &Path) -> Result<Option<PendingConflicts>, AppError> {
-    local::read_json(&pending_path(vault))
+    Ok(read_review(vault)?
+        .filter(|review| review.choices.is_none())
+        .map(|review| PendingConflicts {
+            store_id: review.store_id,
+            review_id: review.review_id,
+            conflicts: review.conflicts,
+        }))
 }
 
-pub(super) fn write_pending(vault: &Path, pending: &PendingConflicts) -> Result<(), AppError> {
-    local::write_json(&pending_path(vault), pending)
-}
-
-pub fn clear_pending(vault: &Path) -> Result<(), AppError> {
-    let path = pending_path(vault);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(AppError::message(format!("clear pending conflicts: {e}"))),
+pub(super) fn pause(
+    vault: &Path,
+    store_id: &str,
+    conflicts: Vec<SyncFileConflict>,
+) -> Result<AppError, AppError> {
+    Review {
+        store_id: store_id.to_owned(),
+        review_id: uuid::Uuid::new_v4().to_string(),
+        conflicts,
+        choices: None,
     }
+    .write(vault)?;
+    Ok(pending_error())
 }
 
-pub fn read_overrides(vault: &Path) -> Result<Option<ConflictOverrides>, AppError> {
-    local::read_json(&overrides_path(vault))
+pub(super) fn pending_error() -> AppError {
+    AppError::domain(
+        PENDING_CODE,
+        "Both devices edited the same files; choose which version to keep",
+    )
 }
 
-pub fn write_overrides(vault: &Path, overrides: &ConflictOverrides) -> Result<(), AppError> {
-    local::write_json(&overrides_path(vault), overrides)
-}
-
-pub fn clear_overrides(vault: &Path) -> Result<(), AppError> {
-    let path = overrides_path(vault);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(AppError::message(format!("clear conflict overrides: {e}"))),
+pub(super) fn accept(
+    lock: &SyncLock,
+    review_id: &str,
+    default_resolution: ConflictResolution,
+    resolutions: BTreeMap<String, ConflictResolution>,
+) -> Result<(), AppError> {
+    let vault = lock.vault();
+    let mut review = read_review(vault)?
+        .filter(|review| review.review_id == review_id && review.choices.is_none())
+        .ok_or_else(pending_error)?;
+    let reviewed = versions(&review.conflicts);
+    if let Some(path) = resolutions
+        .keys()
+        .find(|path| !reviewed.contains_key(path.as_str()))
+    {
+        return Err(AppError::message(format!(
+            "{path} is not a pending sync conflict"
+        )));
     }
+    review.choices = Some(ConflictChoices {
+        default_resolution,
+        resolutions,
+    });
+    review.write(vault)
 }
 
-/// Collect divergent-edit conflicts from a merge plan's inputs. Structured
-/// marks (ink/annotations) merge losslessly by ID and never reach this path;
-/// delete-vs-modify keeps the modification and is not a user decision either.
-pub(super) fn detect_conflicts(
-    base: &BTreeMap<String, FileEntry>,
-    local: &BTreeMap<String, FileEntry>,
-    remote: &BTreeMap<String, FileEntry>,
-) -> Vec<SyncFileConflict> {
-    let mut out = Vec::new();
-    for (path, le) in local {
-        let Some(re) = remote.get(path) else { continue };
-        if le.hash == re.hash {
-            continue;
+pub(super) fn clear(vault: &Path) -> Result<(), AppError> {
+    clear_file(vault, LEGACY_OVERRIDES_FILE)?;
+    clear_file(vault, REVIEW_FILE)
+}
+
+pub fn clear_locked(lock: &SyncLock) -> Result<(), AppError> {
+    clear(lock.vault())
+}
+
+fn clear_file(vault: &Path, name: &str) -> Result<(), AppError> {
+    let dir = local::sync_dir(vault);
+    match std::fs::remove_file(dir.join(name)) {
+        Ok(()) => {
+            #[cfg(unix)]
+            std::fs::File::open(&dir)?.sync_all()?;
+            Ok(())
         }
-        // Only true three-way divergence: both sides changed from the base.
-        // A missing base with differing content is a first-sync add/add race;
-        // treat it as a conflict too so neither device silently loses bytes.
-        if let Some(be) = base.get(path) {
-            if be.hash == le.hash || be.hash == re.hash {
-                continue;
-            }
-        }
-        out.push(SyncFileConflict {
-            path: path.clone(),
-            local_hash: le.hash.clone(),
-            local_size: le.size,
-            local_mtime_ms: le.mtime_ms,
-            remote_hash: re.hash.clone(),
-            remote_size: re.size,
-            remote_mtime_ms: re.mtime_ms,
-        });
-    }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
-}
-
-/// Apply a user resolution to one divergent path inside the merge. Mirrors the
-/// automatic keep-both branch but with an explicit winner; keep-local uploads
-/// the local bytes, keep-cloud downloads the remote ones, and both variants
-/// preserve the loser as a conflict copy so no data is destroyed.
-pub(super) fn apply_resolution(
-    plan: &mut super::engine::MergePlan,
-    path: &str,
-    local: &FileEntry,
-    remote: &FileEntry,
-    resolution: ConflictResolution,
-    base: &BTreeMap<String, FileEntry>,
-    remote_files: &BTreeMap<String, FileEntry>,
-) {
-    let keep_both_newer_remote = remote.mtime_ms >= local.mtime_ms;
-    let (winner_is_remote, preserve_loser) = match resolution {
-        ConflictResolution::KeepLocal => (false, true),
-        ConflictResolution::KeepCloud => (true, true),
-        ConflictResolution::KeepBoth => (keep_both_newer_remote, true),
-    };
-    let _ = preserve_loser;
-    let loser = if winner_is_remote { local } else { remote };
-    let copy = (1..)
-        .map(|index| super::engine::conflict_name(path, &loser.hash, index))
-        .find(|name| {
-            ![base, remote_files, &plan.merged]
-                .iter()
-                .any(|files| files.contains_key(name))
-        })
-        .expect("unbounded conflict names");
-    plan.conflict_copies.push(copy.clone());
-    if winner_is_remote {
-        plan.preserve_local.push((path.to_string(), copy.clone()));
-        plan.merged.insert(copy, local.clone());
-        plan.downloads.push((path.to_string(), remote.clone()));
-        plan.merged.insert(path.to_string(), remote.clone());
-    } else {
-        plan.downloads.push((copy.clone(), remote.clone()));
-        plan.merged.insert(copy, remote.clone());
-        plan.merged.insert(path.to_string(), local.clone());
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }

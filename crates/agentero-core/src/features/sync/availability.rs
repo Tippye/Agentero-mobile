@@ -162,14 +162,25 @@ pub async fn fetch_paper(
     paper_id: &str,
     progress: Progress<'_>,
 ) -> Result<SyncOutcome, AppError> {
+    let lock = acquire(vault)?;
+    fetch_paper_locked(&lock, cfg, paper_id, progress).await
+}
+
+pub async fn fetch_paper_locked(
+    lock: &SyncLock,
+    cfg: &SyncBackendConfig,
+    paper_id: &str,
+    progress: Progress<'_>,
+) -> Result<SyncOutcome, AppError> {
     validate_paper_id(paper_id)?;
-    if cfg.backend == SyncBackendKind::Git {
+    let vault = lock.vault();
+    crate::features::sync::ensure_vault_sync_available(vault)?;
+    if cfg.backend == SyncBackendKind::Git || engine::uses_webdav_journal(vault, cfg)? {
         return Err(AppError::domain(
             "sync_on_demand_unsupported",
-            "Git sync does not support on-demand paper downloads",
+            "This sync backend does not support on-demand paper downloads",
         ));
     }
-    let _lock = acquire(vault)?;
     let result = engine::materialize_paper(vault, cfg, paper_id, progress).await;
     if let Err(error) = &result {
         local::record_error(vault, &error.to_string());

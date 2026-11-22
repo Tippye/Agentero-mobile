@@ -112,7 +112,7 @@ pub struct SyncBackendConfig {
     /// Divergent-edit handling: `auto` keeps mtime last-writer-wins with
     /// conflict copies (desktop/CLI default); `ask` pauses the pass and asks
     /// the user which version to keep (mobile default).
-    #[serde(default)]
+    #[serde(default = "default_conflict_policy")]
     pub conflict_policy: ConflictPolicy,
 }
 
@@ -125,6 +125,14 @@ pub enum ConflictPolicy {
     Auto,
     /// Pause the whole pass and surface a per-file choice to the user.
     Ask,
+}
+
+fn default_conflict_policy() -> ConflictPolicy {
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        ConflictPolicy::Ask
+    } else {
+        ConflictPolicy::Auto
+    }
 }
 
 fn default_region() -> String {

@@ -44,8 +44,9 @@ pub(super) fn save(
         .chain(plan.writes.keys())
         .map(|path| (path.clone(), scanned.get(path).cloned()))
         .collect();
-    local::write_json(
-        &local::sync_dir(vault).join(if accepted { ACCEPTED } else { PENDING }),
+    local::write_sync_json(
+        vault,
+        if accepted { ACCEPTED } else { PENDING },
         &Intent {
             store: store.into(),
             head: head.clone(),
@@ -57,7 +58,10 @@ pub(super) fn save(
 
 pub(super) fn accept(vault: &Path) -> Result<(), AppError> {
     let dir = local::sync_dir(vault);
-    Ok(fs::rename(dir.join(PENDING), dir.join(ACCEPTED))?)
+    fs::rename(dir.join(PENDING), dir.join(ACCEPTED))?;
+    #[cfg(unix)]
+    fs::File::open(&dir)?.sync_all()?;
+    Ok(())
 }
 
 pub(super) fn finish(vault: &Path) -> Result<(), AppError> {
@@ -121,5 +125,6 @@ pub(super) async fn resume(
         }
     }
     record_sync(vault, store, &intent.head, &intent.scope, files, true)?;
+    super::conflicts::clear(vault)?;
     finish(vault)
 }

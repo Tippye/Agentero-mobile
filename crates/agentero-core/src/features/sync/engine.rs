@@ -25,7 +25,10 @@
 
 use crate::error::AppError;
 use crate::features::sync::availability::{self, AvailabilityState, DownloadMode};
-use crate::features::sync::config::{SyncBackendConfig, SyncBackendKind};
+use crate::features::sync::config::{ConflictPolicy, SyncBackendConfig, SyncBackendKind};
+use crate::features::sync::conflicts::{
+    self, ConflictChoices, ConflictResolution, SyncFileConflict,
+};
 use crate::features::sync::local::{self, SyncMeta};
 use crate::features::sync::scope;
 use crate::features::sync::snapshot::{self, FileEntry, Manifest, SyncScope};
@@ -43,6 +46,10 @@ mod journal;
 mod recovery;
 use apply::prepare_local;
 pub use journal::configure_webdav_journal;
+
+pub fn uses_webdav_journal(vault: &Path, cfg: &SyncBackendConfig) -> Result<bool, AppError> {
+    Ok(journal::binding(vault, cfg)?.is_some())
+}
 
 pub const FORMAT_VERSION: u32 = 1;
 const HEAD_KEY: &str = "HEAD";
@@ -154,6 +161,25 @@ pub async fn sync_vault_locked(
     }
 }
 
+/// Confirm a specific review and continue with the vault lock still held.
+pub async fn resolve_conflicts_locked(
+    lock: &super::lock::SyncLock,
+    cfg: &SyncBackendConfig,
+    review_id: &str,
+    default_resolution: ConflictResolution,
+    resolutions: BTreeMap<String, ConflictResolution>,
+    progress: Progress<'_>,
+) -> Result<SyncOutcome, AppError> {
+    if cfg.conflict_policy != ConflictPolicy::Ask
+        || cfg.backend == SyncBackendKind::Git
+        || journal::binding(lock.vault(), cfg)?.is_some()
+    {
+        return Err(conflicts::pending_error());
+    }
+    conflicts::accept(lock, review_id, default_resolution, resolutions)?;
+    sync_vault_locked(lock, cfg, progress).await
+}
+
 /// Caller owns SyncLock; use the ordinary engine with a one-pass paper override.
 pub(super) async fn materialize_paper(
     vault: &Path,
@@ -185,6 +211,18 @@ async fn run_sync_requested<S: RemoteStore>(
     progress: Progress<'_>,
     requested: Option<&str>,
 ) -> Result<SyncOutcome, AppError> {
+    let ask = cfg.conflict_policy == ConflictPolicy::Ask;
+    let review = if ask {
+        conflicts::read_review(vault)?
+    } else {
+        None
+    };
+    if review
+        .as_ref()
+        .is_some_and(|review| review.choices.is_none())
+    {
+        return Err(conflicts::pending_error());
+    }
     progress("scan", 0, 0);
     // Store ownership is established before hash-cache reuse, virtual deferrals,
     // idle detection, or remote IO. Retargeting never treats old history as a
@@ -200,6 +238,11 @@ async fn run_sync_requested<S: RemoteStore>(
     // finish (or discard) any pass interrupted around its HEAD publication.
     local::clear_staged(vault)?;
     recovery::resume(vault, &store_id, client).await?;
+    let mut review = if ask {
+        conflicts::read_review(vault)?
+    } else {
+        None
+    };
     let base = local::read_base_strict(vault)?;
     validate_manifest(&base)?;
     let mut asset_state = availability::read_state(vault)?;
@@ -215,7 +258,7 @@ async fn run_sync_requested<S: RemoteStore>(
     // base, so excluded files are inert — never uploaded, downloaded, or
     // mistaken for deletions. The remote manifest stays unfiltered below.
     let mut base_files = visible_files(base.files.clone(), &cfg.scope);
-    let scan_cache = if meta.needs_merge {
+    let scan_cache = if review.is_some() || meta.needs_merge {
         Manifest::default()
     } else {
         base
@@ -248,10 +291,17 @@ async fn run_sync_requested<S: RemoteStore>(
     let mut ancestor_manifest_key = agreed_manifest_key.clone();
     for attempt in 0..MAX_CAS_RETRIES {
         if attempt > 0 {
-            // Ink writes publish before upload; the rest stage for post-CAS
-            // apply. Recheck the scan before reusing it against a new HEAD.
-            for (path, entry) in &physical_files {
-                ensure_current(vault, path, Some(entry))?;
+            if ask {
+                // Local apply already ran. Re-scan the actual bytes and keep the
+                // agreed ancestor so a competing HEAD cannot inherit old choices.
+                physical_files = scan_local(vault, Manifest::default(), cfg.scope).await?;
+                let local_papers = local_paper_directories(vault)?;
+                local_files =
+                    virtual_local_files(&base_files, &physical_files, &asset_state, &local_papers);
+            } else {
+                for (path, entry) in &physical_files {
+                    ensure_current(vault, path, Some(entry))?;
+                }
             }
         }
         progress("pull", 0, 0);
@@ -311,6 +361,7 @@ async fn run_sync_requested<S: RemoteStore>(
                     cleared.last_error = None;
                     local::write_meta(vault, &cleared)?;
                 }
+                conflicts::clear(vault)?;
                 return Ok(outcome);
             }
             if !client.probe_conditional_writes().await? {
@@ -372,42 +423,35 @@ async fn run_sync_requested<S: RemoteStore>(
         } else {
             &base_files
         };
-        // Steam-style ask policy: a paused pass left durable overrides; consume
-        // them for this attempt. Without overrides, divergent edits under Ask
-        // pause the whole pass before anything is applied or published.
-        let overrides = crate::features::sync::conflicts::read_overrides(vault)?
-            .filter(|ov| ov.store_id == store_id);
-        if cfg.conflict_policy == crate::features::sync::config::ConflictPolicy::Ask
-            && overrides.is_none()
-        {
-            let detected = crate::features::sync::conflicts::detect_conflicts(
+        let plan_for = |handling| {
+            merge_with_paper_presence(
                 merge_base,
                 &local_files,
                 remote_files,
-            );
-            if !detected.is_empty() {
-                crate::features::sync::conflicts::write_pending(
-                    vault,
-                    &crate::features::sync::conflicts::PendingConflicts {
-                        store_id: store_id.clone(),
-                        conflicts: detected,
-                    },
-                )?;
-                return Err(AppError::domain(
-                    "sync_conflict_pending",
-                    "Both devices edited the same files; choose which version to keep",
-                ));
+                &cfg.scope,
+                &remote_scope,
+                &paper_presence,
+                handling,
+            )
+        };
+        let mut plan = plan_for(if ask {
+            ConflictHandling::Review
+        } else {
+            ConflictHandling::Auto
+        });
+        if !plan.conflicts.is_empty() {
+            let choices = review
+                .as_ref()
+                .filter(|review| review.matches(&store_id, &plan.conflicts))
+                .and_then(|review| review.choices.as_ref());
+            match choices {
+                Some(choices) => plan = plan_for(ConflictHandling::Resolve(choices)),
+                None => return Err(conflicts::pause(vault, &store_id, plan.conflicts)?),
             }
+        } else if review.take().is_some() {
+            // Once the reviewed set diverges, a later retry cannot resurrect it.
+            conflicts::clear(vault)?;
         }
-        let mut plan = merge_with_paper_presence(
-            merge_base,
-            &local_files,
-            remote_files,
-            &cfg.scope,
-            &remote_scope,
-            &paper_presence,
-            overrides.as_ref(),
-        );
         resolve_marks(vault, client, &mut plan).await?;
         ensure_requested_asset(&plan.merged, &cfg.scope, requested)?;
         let deferred = plan_asset_downloads(
@@ -441,7 +485,15 @@ async fn run_sync_requested<S: RemoteStore>(
                 &physical_files,
                 true,
             )?;
-            apply_local(vault, client, &plan, &physical_files, &mut outcome, progress).await?;
+            apply_local(
+                vault,
+                client,
+                &plan,
+                &physical_files,
+                &mut outcome,
+                progress,
+            )
+            .await?;
             head.clone()
         } else {
             progress("finalize", 0, 0);
@@ -473,8 +525,15 @@ async fn run_sync_requested<S: RemoteStore>(
             // HEAD CAS discards the pending journal so recovery does not treat an
             // unpublished pass as accepted (local edits already landed durably
             // and re-merge on the next pass).
-            if let Err(e) =
-                apply_local(vault, client, &plan, &physical_files, &mut outcome, progress).await
+            if let Err(e) = apply_local(
+                vault,
+                client,
+                &plan,
+                &physical_files,
+                &mut outcome,
+                progress,
+            )
+            .await
             {
                 recovery::discard(vault)?;
                 return Err(e);
@@ -497,23 +556,34 @@ async fn run_sync_requested<S: RemoteStore>(
                 scope: remote_scope,
             };
             validate_manifest(&manifest)?;
-            if client
-                .put(
-                    &manifest_key,
-                    gzip(&serde_json::to_vec(&manifest)?)?,
-                    PutCondition::IfNoneMatch,
-                )
-                .await?
-                != PutOutcome::Ok
-            {
+            let manifest_put = async {
+                client
+                    .put(
+                        &manifest_key,
+                        gzip(&serde_json::to_vec(&manifest)?)?,
+                        PutCondition::IfNoneMatch,
+                    )
+                    .await
+            }
+            .await;
+            let manifest_put = match manifest_put {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    recovery::discard(vault)?;
+                    return Err(error);
+                }
+            };
+            if manifest_put != PutOutcome::Ok {
                 recovery::discard(vault)?;
-                base_files = remote_files.clone();
-                local_files = merged.clone();
-                physical_files = merged
-                    .iter()
-                    .filter(|(path, _)| !deferred.contains(*path))
-                    .map(|(path, entry)| (path.clone(), entry.clone()))
-                    .collect();
+                if !ask {
+                    base_files = remote_files.clone();
+                    local_files = merged.clone();
+                    physical_files = merged
+                        .iter()
+                        .filter(|(path, _)| !deferred.contains(*path))
+                        .map(|(path, entry)| (path.clone(), entry.clone()))
+                        .collect();
+                }
                 continue;
             }
             let condition = match head_etag {
@@ -529,15 +599,19 @@ async fn run_sync_requested<S: RemoteStore>(
                 // the lane become the new local truth for the retry; the winner's
                 // manifest is the new remote baseline.
                 recovery::discard(vault)?;
-                base_files = remote_files.clone();
-                local_files = merged.clone();
-                physical_files = merged
-                    .iter()
-                    .filter(|(path, _)| !deferred.contains(*path))
-                    .map(|(path, entry)| (path.clone(), entry.clone()))
-                    .collect();
-                ancestor_version = head_ptr.as_ref().map_or(0, |ptr| ptr.version);
-                ancestor_manifest_key = head_ptr.as_ref().map(|ptr| ptr.manifest_key.clone());
+                if !ask {
+                    base_files = remote_files.clone();
+                    local_files = merged.clone();
+                    physical_files = merged
+                        .iter()
+                        .filter(|(path, _)| !deferred.contains(*path))
+                        .map(|(path, entry)| (path.clone(), entry.clone()))
+                        .collect();
+                }
+                if !ask {
+                    ancestor_version = head_ptr.as_ref().map_or(0, |ptr| ptr.version);
+                    ancestor_manifest_key = head_ptr.as_ref().map(|ptr| ptr.manifest_key.clone());
+                }
                 continue;
             }
             recovery::accept(vault)?;
@@ -555,11 +629,10 @@ async fn run_sync_requested<S: RemoteStore>(
             &cfg.scope,
         )?;
         record_sync(vault, &store_id, &accepted, &cfg.scope, plan.merged, false)?;
+        // Keep the accepted journal until the review is retired. If cleanup is
+        // interrupted, recovery can finish it before the next merge.
+        conflicts::clear(vault)?;
         recovery::finish(vault)?;
-        // A resolved (or conflict-free) pass published successfully: retire any
-        // durable ask-policy decision so the next divergence pauses again.
-        crate::features::sync::conflicts::clear_pending(vault)?;
-        crate::features::sync::conflicts::clear_overrides(vault)?;
         local::clear_pushed(vault);
         refresh_catalog_if_needed(vault)?;
         outcome.version = accepted.version;
@@ -814,7 +887,7 @@ fn plan_asset_downloads(
         // An explicit fetch verifies the requested paper's blobs even when the
         // asset is already materialized, so a corrupt remote blob is caught.
         let forced = requested.is_some_and(|id| paper == id);
-        if physical.contains_key(path) && !forced {
+        if plan.conflict_copies.contains(path) || (physical.contains_key(path) && !forced) {
             continue;
         }
         if snapshot::is_scope_excluded(sync_scope, path) {
@@ -845,6 +918,7 @@ pub(super) struct MergePlan {
     /// Resolved semantic content and exact source conflict copies.
     pub(super) writes: BTreeMap<String, Vec<u8>>,
     pub(super) mark_conflicts: Vec<String>,
+    conflicts: Vec<SyncFileConflict>,
 }
 
 impl MergePlan {
@@ -876,10 +950,8 @@ impl MergePlan {
             if pushed.contains(&entry.hash) {
                 continue;
             }
-            // Resolved marks bytes are staged in the plan: under the mobile
-            // apply-before-publish order the disk may already hold the merged
-            // bytes, so the plan's writes map is authoritative for them.
-            // Conflict copies of local edits read the original they preserve.
+            // Local apply already installed conflict copies. Their original
+            // paths may now contain the cloud winner, so read the copy itself.
             let blob = match self.writes.get(rel) {
                 Some(bytes) => {
                     if snapshot::hash_bytes(bytes) != entry.hash {
@@ -889,14 +961,7 @@ impl MergePlan {
                     }
                     gzip(bytes)?
                 }
-                None => {
-                    let source = self
-                        .preserve_local
-                        .iter()
-                        .find(|(_, copy)| copy == rel)
-                        .map_or(rel, |(from, _)| from);
-                    read_blob(vault, source, entry)?
-                }
+                None => read_blob(vault, rel, entry)?,
             };
             client
                 .put(&blob_key(&entry.hash), blob, PutCondition::IfNoneMatch)
@@ -1008,7 +1073,22 @@ fn merge(
             .filter_map(|path| paper_id(path).map(str::to_owned))
             .collect(),
     };
-    merge_with_paper_presence(base, local, remote, local_scope, remote_scope, &presence, None)
+    merge_with_paper_presence(
+        base,
+        local,
+        remote,
+        local_scope,
+        remote_scope,
+        &presence,
+        ConflictHandling::Auto,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ConflictHandling<'a> {
+    Auto,
+    Review,
+    Resolve(&'a ConflictChoices),
 }
 
 fn merge_with_paper_presence(
@@ -1018,7 +1098,7 @@ fn merge_with_paper_presence(
     local_scope: &SyncScope,
     remote_scope: &SyncScope,
     paper_presence: &PaperPresence,
-    resolutions: Option<&crate::features::sync::conflicts::ConflictOverrides>,
+    handling: ConflictHandling<'_>,
 ) -> MergePlan {
     let mut plan = MergePlan::default();
     let mut paths: Vec<&String> = base
@@ -1117,40 +1197,45 @@ fn merge_with_paper_presence(
             match (l, r) {
                 // Divergent edits.
                 (Some(le), Some(re)) => {
-                    if let Some(ov) = resolutions {
-                        let res = ov
-                            .resolutions
-                            .get(path)
-                            .copied()
-                            .unwrap_or(ov.default_resolution);
-                        crate::features::sync::conflicts::apply_resolution(
-                            &mut plan, path, le, re, res, base, remote,
-                        );
-                        continue;
-                    }
                     let remote_newer = re.mtime_ms >= le.mtime_ms;
-                    if path.ends_with(".md") || path.to_ascii_lowercase().ends_with(".table.json") {
-                        let loser = if remote_newer { le } else { re };
+                    let (cloud_wins, preserve) = match handling {
+                        ConflictHandling::Review => {
+                            plan.conflicts.push(SyncFileConflict::new(path, le, re));
+                            continue;
+                        }
+                        ConflictHandling::Resolve(choices) => {
+                            let cloud_wins = match choices.for_path(path) {
+                                ConflictResolution::KeepCloud => true,
+                                ConflictResolution::KeepLocal => false,
+                                ConflictResolution::KeepBoth => remote_newer,
+                            };
+                            (cloud_wins, true)
+                        }
+                        ConflictHandling::Auto => (
+                            remote_newer,
+                            path.ends_with(".md")
+                                || path.to_ascii_lowercase().ends_with(".table.json"),
+                        ),
+                    };
+                    if preserve {
+                        let loser = if cloud_wins { le } else { re };
                         let copy = (1..)
                             .map(|index| conflict_name(path, &loser.hash, index))
                             .find(|name| {
                                 ![base, local, remote, &plan.merged]
                                     .iter()
-                                    .any(|files| files.contains_key(name))
+                                    .any(|files| occupies_path(files, name))
                             })
                             .expect("unbounded conflict names");
                         plan.conflict_copies.push(copy.clone());
-                        if remote_newer {
+                        if cloud_wins {
                             plan.preserve_local.push((path.clone(), copy.clone()));
-                            plan.merged.insert(copy, le.clone());
-                            plan.downloads.push((path.clone(), re.clone()));
-                            plan.merged.insert(path.clone(), re.clone());
                         } else {
                             plan.downloads.push((copy.clone(), re.clone()));
-                            plan.merged.insert(copy, re.clone());
-                            plan.merged.insert(path.clone(), le.clone());
                         }
-                    } else if remote_newer {
+                        plan.merged.insert(copy, loser.clone());
+                    }
+                    if cloud_wins {
                         plan.downloads.push((path.clone(), re.clone()));
                         plan.merged.insert(path.clone(), re.clone());
                     } else {
@@ -1425,11 +1510,26 @@ async fn apply_local<S: RemoteStore>(
     for (from, to) in &plan.preserve_local {
         crate::fs::with_file_mutation(|| {
             ensure_current(vault, from, scanned.get(from))?;
-            ensure_current(vault, to, scanned.get(to))?;
-            fs::copy(vault.join(from), vault.join(to))?;
+            ensure_current(vault, to, None)?;
+            let target = vault.join(to);
+            let parent = target
+                .parent()
+                .expect("conflict copy is a vault descendant");
+            let staged = tempfile::Builder::new()
+                .suffix(".tmp")
+                .tempfile_in(parent)?;
+            fs::copy(vault.join(from), staged.path())?;
+            if snapshot::hash_file(staged.path())? != plan.merged[to].hash {
+                return Err(changed_during_sync(from));
+            }
+            staged.as_file().sync_all()?;
+            staged
+                .persist_noclobber(&target)
+                .map_err(|error| error.error)?;
+            #[cfg(unix)]
+            fs::File::open(parent)?.sync_all()?;
             Ok(())
         })?;
-        outcome.conflict_copies.push(to.clone());
     }
     let total = plan.downloads.len();
     for (i, (rel, entry)) in plan.downloads.iter().enumerate() {
@@ -1451,7 +1551,7 @@ async fn apply_local<S: RemoteStore>(
         })?;
         outcome.downloaded += 1;
     }
-    for copy in &plan.mark_conflicts {
+    for copy in plan.conflict_copies.iter().chain(&plan.mark_conflicts) {
         if !outcome.conflict_copies.contains(copy) {
             outcome.conflict_copies.push(copy.clone());
         }
@@ -1533,6 +1633,15 @@ fn read_blob(vault: &Path, rel: &str, entry: &FileEntry) -> Result<Vec<u8>, AppE
     gzip(&raw)
 }
 
+fn occupies_path(files: &BTreeMap<String, FileEntry>, path: &str) -> bool {
+    let children = format!("{path}/");
+    files.contains_key(path)
+        || files
+            .range(children.clone()..)
+            .next()
+            .is_some_and(|(name, _)| name.starts_with(&children))
+}
+
 pub(super) fn conflict_name(path: &str, hash: &str, index: u64) -> String {
     let stamp = &hash[..hash.len().min(12)];
     let stamp = if index == 1 {
@@ -1545,8 +1654,8 @@ pub(super) fn conflict_name(path: &str, hash: &str, index: u64) -> String {
         return format!("{stem} (conflict {stamp}).table.json");
     }
     match path.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem} (conflict {stamp}).{ext}"),
-        None => format!("{path} (conflict {stamp})"),
+        Some((stem, ext)) if !ext.contains('/') => format!("{stem} (conflict {stamp}).{ext}"),
+        _ => format!("{path} (conflict {stamp})"),
     }
 }
 
