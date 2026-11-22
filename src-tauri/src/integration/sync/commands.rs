@@ -9,6 +9,7 @@ use super::snapshot;
 use super::SyncService;
 use crate::core::error::{map_err, ApiResult, AppError};
 use agentero_core::features::sync::availability::{self, DownloadPolicy, PaperAvailability};
+use agentero_core::features::sync::conflicts::{self, ConflictResolution, PendingConflicts};
 use agentero_core::features::sync::lock::SyncLock;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -38,10 +39,9 @@ pub struct SyncStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<String>,
     pub last_version: u64,
-    /// Divergent-edit conflicts awaiting a user decision (ask policy). Present
-    /// after a paused pass until the resolved pass publishes successfully.
+    /// Divergent edits awaiting confirmation under the ask policy.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_conflicts: Option<agentero_core::features::sync::conflicts::PendingConflicts>,
+    pub pending_conflicts: Option<PendingConflicts>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,8 +152,15 @@ pub async fn sync_get_status(
         let dir = vault_dir(&app, &args.vault_path)?;
         let status = super::credentials::status(&app, args.vault_path.trim()).await?;
         let meta = local::read_meta(&dir)?;
-        let pending_conflicts =
-            agentero_core::features::sync::conflicts::read_pending(&dir)?;
+        let pending_conflicts = if status
+            .config
+            .as_ref()
+            .is_some_and(|cfg| asks_for_conflicts(&dir, cfg))
+        {
+            conflicts::read_pending(&dir)?
+        } else {
+            None
+        };
         Ok::<_, AppError>(SyncStatus {
             configured: status.config.is_some(),
             config: status.config,
@@ -187,9 +194,23 @@ pub async fn sync_configure(
             .ok_or_else(|| AppError::message("sync already running"))?;
         let _lock = SyncLock::try_acquire(&dir)?
             .ok_or_else(|| AppError::message("another vault sync is running"))?;
+        let previous = super::config::try_get(&key)?;
         let mut candidate = args.config.normalized();
         attach_agentero_session(&app, &mut candidate).await;
         let configured = super::credentials::configure(&app, &key, &dir, candidate).await?;
+        let config = &configured.config;
+        let keep_review = asks_for_conflicts(&dir, config)
+            && previous.as_ref().is_some_and(|old| {
+                old.conflict_policy == config.conflict_policy
+                    && old.scope == config.scope
+                    && old.remote_identity() == config.remote_identity()
+            });
+        let pending_conflicts = if keep_review {
+            conflicts::read_pending(&dir)?
+        } else {
+            conflicts::clear_locked(&_lock)?;
+            None
+        };
         let meta = local::read_meta(&dir)?;
         Ok::<_, AppError>(SyncStatus {
             configured: true,
@@ -205,7 +226,7 @@ pub async fn sync_configure(
             running: false,
             last_sync_at: meta.last_sync_at,
             last_version: meta.last_version,
-            pending_conflicts: agentero_core::features::sync::conflicts::read_pending(&dir)?,
+            pending_conflicts,
         })
     };
     let result = inner.await;
@@ -314,7 +335,13 @@ pub async fn sync_fetch_paper(
     args: SyncPaperArgs,
 ) -> Result<ApiResult<SyncOutcome>, String> {
     Ok(
-        match perform_sync_task(&app, &service, args.vault_path.trim(), Some(&args.paper_id)).await
+        match perform_sync_task(
+            &app,
+            &service,
+            args.vault_path.trim(),
+            SyncTask::FetchPaper(&args.paper_id),
+        )
+        .await
         {
             Ok(value) => ApiResult::ok(value),
             Err(error) => map_err(error),
@@ -387,19 +414,27 @@ pub async fn perform_sync(
     service: &SyncService,
     vault_key: &str,
 ) -> Result<SyncOutcome, AppError> {
-    perform_sync_task(app, service, vault_key, None).await
+    perform_sync_task(app, service, vault_key, SyncTask::Sync).await
 }
+
+enum SyncTask<'a> {
+    Sync,
+    FetchPaper(&'a str),
+    Resolve(SyncResolveConflictsArgs),
+}
+
 async fn perform_sync_task(
     app: &AppHandle,
     service: &SyncService,
     vault_key: &str,
-    requested: Option<&str>,
+    task: SyncTask<'_>,
 ) -> Result<SyncOutcome, AppError> {
     let dir = vault_dir(app, vault_key)?;
     prepare_download_policy(&dir)?;
     let lease = service
         .try_begin(vault_key)
         .ok_or_else(|| AppError::message("sync already running"))?;
+    let lock = SyncLock::acquire(&dir)?;
     let mut cfg = super::credentials::load(app, vault_key)
         .await?
         .ok_or_else(|| AppError::message("sync is not configured"))?;
@@ -418,22 +453,33 @@ async fn perform_sync_task(
             },
         );
     };
-    let reason = if requested.is_some() {
+    let reason = if matches!(task, SyncTask::FetchPaper(_)) {
         crate::features::mobile_background::BackgroundReason::Transfer
     } else {
         crate::features::mobile_background::BackgroundReason::Sync
     };
     let result = crate::features::mobile_background::with_work(app, reason, async {
-        if let Some(paper) = requested {
-            // fetch_paper acquires its own vault lock for the one-pass override.
-            availability::fetch_paper(&dir, &cfg, paper, &progress).await
-        } else {
-            let lock = SyncLock::acquire(&dir)?;
-            engine::sync_vault_locked(&lock, &cfg, &progress).await
+        match task {
+            SyncTask::FetchPaper(paper) => {
+                availability::fetch_paper_locked(&lock, &cfg, paper, &progress).await
+            }
+            SyncTask::Sync => engine::sync_vault_locked(&lock, &cfg, &progress).await,
+            SyncTask::Resolve(args) => {
+                engine::resolve_conflicts_locked(
+                    &lock,
+                    &cfg,
+                    &args.review_id,
+                    args.default_resolution,
+                    args.resolutions,
+                    &progress,
+                )
+                .await
+            }
         }
     })
     .await;
     // Terminal event consumers immediately re-read status; release first.
+    drop(lock);
     drop(lease);
     match result {
         Ok(outcome) => {
@@ -441,7 +487,11 @@ async fn perform_sync_task(
             Ok(outcome)
         }
         Err(e) => {
-            emit_state(app, vault_key, "error", Some(e.to_string()));
+            if e.code() == conflicts::PENDING_CODE {
+                emit_state(app, vault_key, "conflict", None);
+            } else {
+                emit_state(app, vault_key, "error", Some(e.to_string()));
+            }
             Err(e)
         }
     }
@@ -477,19 +527,24 @@ pub async fn sync_now(
     }
 }
 
-/// True while a paused ask-policy pass still waits for a per-file choice.
-///
-/// Automatic sync consults this so it stops retrying a vault whose conflicts
-/// only the user can resolve; a manual pass keeps returning
-/// `sync_conflict_pending` so the prompt stays reachable.
+fn asks_for_conflicts(vault: &std::path::Path, config: &SyncBackendConfig) -> bool {
+    config.conflict_policy == super::config::ConflictPolicy::Ask
+        && config.backend != super::config::SyncBackendKind::Git
+        && matches!(engine::uses_webdav_journal(vault, config), Ok(false))
+}
+
+/// Automatic sync waits only for unanswered reviews. A submitted review may
+/// resume after a failure or restart, subject to the same version validation.
 pub(super) fn has_pending_conflicts(app: &AppHandle, vault_path: &str) -> bool {
     let Ok(dir) = vault_dir(app, vault_path) else {
         return false;
     };
-    agentero_core::features::sync::conflicts::read_pending(&dir)
+    super::config::try_get(vault_path)
         .ok()
         .flatten()
-        .is_some()
+        .as_ref()
+        .is_some_and(|cfg| asks_for_conflicts(&dir, cfg))
+        && conflicts::read_pending(&dir).ok().flatten().is_some()
 }
 
 /// Persist the user's per-file conflict decisions and re-run the paused pass.
@@ -509,30 +564,7 @@ pub async fn sync_resolve_conflicts(
         "sync_resolve_conflicts",
         format!("vault={vault_key} resolutions={}", args.resolutions.len()),
     );
-    let inner = async {
-        let dir = vault_dir(&app, &vault_key)?;
-        let pending = agentero_core::features::sync::conflicts::read_pending(&dir)?
-            .ok_or_else(|| AppError::message("no pending sync conflicts to resolve"))?;
-        let mut resolutions = std::collections::BTreeMap::new();
-        for (path, resolution) in &args.resolutions {
-            if !pending.conflicts.iter().any(|c| &c.path == path) {
-                return Err(AppError::message(format!(
-                    "{path} is not a pending sync conflict"
-                )));
-            }
-            resolutions.insert(path.clone(), *resolution);
-        }
-        agentero_core::features::sync::conflicts::write_overrides(
-            &dir,
-            &agentero_core::features::sync::conflicts::ConflictOverrides {
-                store_id: pending.store_id.clone(),
-                default_resolution: args.default_resolution,
-                resolutions,
-            },
-        )?;
-        perform_sync(&app, &service, &vault_key).await
-    };
-    match inner.await {
+    match perform_sync_task(&app, &service, &vault_key, SyncTask::Resolve(args)).await {
         Ok(outcome) => {
             op.finish_ok_extra(format!(
                 "version={} up={} down={} conflicts={}",
@@ -554,12 +586,10 @@ pub async fn sync_resolve_conflicts(
 #[serde(rename_all = "camelCase")]
 pub struct SyncResolveConflictsArgs {
     pub vault_path: String,
-    /// Fallback for pending paths absent from `resolutions`.
-    pub default_resolution: agentero_core::features::sync::conflicts::ConflictResolution,
-    pub resolutions: std::collections::BTreeMap<
-        String,
-        agentero_core::features::sync::conflicts::ConflictResolution,
-    >,
+    pub review_id: String,
+    /// Fallback for reviewed paths absent from `resolutions`.
+    pub default_resolution: ConflictResolution,
+    pub resolutions: std::collections::BTreeMap<String, ConflictResolution>,
 }
 
 #[derive(Debug, Deserialize, specta::Type)]

@@ -15,7 +15,7 @@ import {
 	type SyncStateEvent_Deserialize,
 	type SyncStatus_Serialize,
 } from "@/lib/core/bindings";
-import { callApiResult } from "@/lib/core/ipc";
+import { type ApiError, callApiResult } from "@/lib/core/ipc";
 
 /**
  * Which optional paper assets take part in sync. Notes, metadata sidecars,
@@ -190,6 +190,7 @@ function statusFromWire(status: SyncStatus_Serialize): SyncStatus {
 		running: status.running,
 		lastSyncAt: status.lastSyncAt ?? undefined,
 		lastVersion: status.lastVersion,
+		pendingConflicts: status.pendingConflicts,
 	};
 }
 
@@ -252,19 +253,26 @@ export async function syncDisconnect(vaultPath: string): Promise<void> {
 	await callApiResult(() => commands.syncDisconnect({ vaultPath }));
 }
 
-export async function syncResolveConflicts(
+export function isSyncConflictPending(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		(error as ApiError).code === "sync_conflict_pending"
+	);
+}
+
+export function syncResolveConflicts(
 	vaultPath: string,
+	reviewId: string,
 	resolutions: Record<string, ConflictResolution>,
-	defaultResolution: ConflictResolution = "keepBoth",
 ): Promise<SyncOutcome> {
-	const res = await callApiResult(() =>
+	return callApiResult(() =>
 		commands.syncResolveConflicts({
 			vaultPath,
-			defaultResolution,
+			reviewId,
+			defaultResolution: "keepBoth",
 			resolutions,
 		}),
 	);
-	return res;
 }
 
 export function syncNow(vaultPath: string): Promise<SyncOutcome> {

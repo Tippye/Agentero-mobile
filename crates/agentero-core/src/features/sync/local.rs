@@ -344,6 +344,7 @@ pub(super) fn write_sync_json<T: Serialize>(
 pub fn clear(lock: &super::lock::SyncLock) -> Result<(), AppError> {
     let vault = lock.vault();
     clear_staged(vault)?;
+    super::conflicts::clear(vault)?;
     for name in [
         "base.json",
         "state.json",

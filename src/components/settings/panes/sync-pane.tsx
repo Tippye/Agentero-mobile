@@ -61,6 +61,7 @@ import { toSafeDisposer } from "@/lib/core/tauri-events";
 import { cn } from "@/lib/core/utils";
 import {
 	emptySyncConfig,
+	isSyncConflictPending,
 	isSyncProgressPhase,
 	SYNC_INTERVAL_CHOICES,
 	type SyncBackendConfig,
@@ -73,13 +74,13 @@ import {
 	syncDisconnect,
 	syncGetStatus,
 	syncNow,
-	syncResolveConflicts,
 	syncScopeSizes,
 } from "@/lib/sync/api";
 import { vaultDisplayName } from "@/lib/vault/path";
 import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { getRecentVaults } from "@/lib/vault/session";
 import { SyncConflictDialog } from "./sync-conflict-dialog";
+import { useSyncConflictReview } from "./use-sync-conflict-review";
 
 type SyncProviderLink = {
 	id: string;
@@ -193,11 +194,13 @@ export function SyncPane({
 	vaultPath,
 	mobile = false,
 	onSynced,
+	onReviewConflicts,
 }: {
 	vaultPath: string | null;
 	mobile?: boolean;
 	/** Refresh the caller's local catalog after a successful manual sync. */
 	onSynced?: () => void | Promise<void>;
+	onReviewConflicts?: () => void;
 }) {
 	const [vaults, setVaults] = useState(() =>
 		localVaultChoices(vaultPath, mobile),
@@ -235,6 +238,7 @@ export function SyncPane({
 			setSelectedVault={setSelectedVault}
 			mobile={mobile}
 			onSynced={onSynced}
+			onReviewConflicts={onReviewConflicts}
 		/>
 	);
 }
@@ -245,12 +249,14 @@ function VaultSyncForm({
 	setSelectedVault,
 	mobile = false,
 	onSynced,
+	onReviewConflicts,
 }: {
 	localVault: string | null;
 	vaults: string[];
 	setSelectedVault: (vault: string | null) => void;
 	mobile?: boolean;
 	onSynced?: () => void | Promise<void>;
+	onReviewConflicts?: () => void;
 }) {
 	const { t } = useTranslation("settings");
 	const { t: tm } = useTranslation("mobile");
@@ -280,11 +286,7 @@ function VaultSyncForm({
 	const cloudSubject =
 		form.agenteroSubject === "organization" ? "organization" : "user";
 	const [cloudUsage, setCloudUsage] = useState<SyncCloudUsage | null>(null);
-	/** Divergent-edit files awaiting a per-file choice (ask policy). */
-	const [conflictDialogOpen, setConflictDialogOpen] = useState(false);
-	/** Auto-open the prompt once per mount; a later dismissal stays dismissed. */
-	const conflictPrompted = useRef(false);
-	const [resolvingConflicts, setResolvingConflicts] = useState(false);
+	const pendingConflicts = status?.pendingConflicts ?? null;
 
 	const refresh = useCallback(async () => {
 		if (!localVault) return;
@@ -293,12 +295,6 @@ function VaultSyncForm({
 		if (id !== requestId.current) return;
 		setStatus(next);
 		setSyncing(next.running);
-		// A pass that paused on a previous visit left the prompt durable; show it
-		// once the pane opens instead of waiting for another failed sync.
-		if (next.pendingConflicts && !conflictPrompted.current) {
-			conflictPrompted.current = true;
-			setConflictDialogOpen(true);
-		}
 		// Preserve an in-progress draft across background status updates; only
 		// the first load seeds the form (upstream draft-preservation guard).
 		if (formVersion.current !== 0) return;
@@ -328,6 +324,17 @@ function VaultSyncForm({
 			setAdvancedOpen(false);
 		}
 	}, [localVault, mobile, newConfig]);
+	const conflictReview = useSyncConflictReview({
+		vaultPath: localVault,
+		pending: onReviewConflicts ? null : pendingConflicts,
+		refresh,
+		onSynced: async () => {
+			setSyncError(null);
+			await onSynced?.();
+		},
+		onError: reportSyncError,
+	});
+	const reviewPending = onReviewConflicts ?? conflictReview.reopen;
 
 	const loadStatus = useCallback(async () => {
 		setLoading(true);
@@ -370,7 +377,7 @@ function VaultSyncForm({
 							? (payload.error ?? t("sync.statusError"))
 							: null,
 					);
-					if (payload.status === "error") {
+					if (payload.status === "error" && !onReviewConflicts) {
 						// The Host retries transport failures on its own; telling
 						// the user what to check beats reqwest's error chain.
 						const detail = payload.error ?? t("sync.statusError");
@@ -382,7 +389,9 @@ function VaultSyncForm({
 					}
 					if (payload.status !== "syncing") {
 						setProgress(null);
-						void refresh().catch(() => undefined);
+						void refresh().catch((error) =>
+							notifyError(errorMessage(error), { id: `sync:${localVault}` }),
+						);
 					}
 				}),
 			),
@@ -398,7 +407,7 @@ function VaultSyncForm({
 		return () => {
 			for (const off of offs) off();
 		};
-	}, [localVault, refresh, t]);
+	}, [localVault, onReviewConflicts, refresh, t]);
 
 	useEffect(() => {
 		if (!localVault) return;
@@ -470,47 +479,7 @@ function VaultSyncForm({
 			cloudUsage.limit === 0 ||
 			(cloudSubject === "organization" && !activeOrgId));
 
-	/** Pending divergent edits, if the last pass paused under the ask policy. */
-	const pendingConflicts = status?.pendingConflicts ?? null;
-
-	const resolveConflicts = async (
-		resolutions: Record<string, import("@/lib/sync/api").ConflictResolution>,
-		defaultResolution: import("@/lib/sync/api").ConflictResolution,
-	) => {
-		if (!localVault) return;
-		setResolvingConflicts(true);
-		try {
-			const outcome = await syncResolveConflicts(
-				localVault,
-				resolutions,
-				defaultResolution,
-			);
-			setConflictDialogOpen(false);
-			await onSynced?.();
-			setSyncError(null);
-			notifySuccess(
-				t("sync.done", {
-					up: outcome.uploaded,
-					down: outcome.downloaded,
-				}),
-			);
-		} catch (error) {
-			const code =
-				error instanceof Error ? (error as ApiError).code : undefined;
-			// Still paused on a later conflict set: keep the dialog on the fresh
-			// list instead of reporting a failure the user has to clear by hand.
-			if (code === "sync_conflict_pending") {
-				await refresh().catch(() => undefined);
-				return;
-			}
-			reportSyncError(error);
-		} finally {
-			setResolvingConflicts(false);
-			void refresh().catch(() => undefined);
-		}
-	};
-
-	const reportSyncError = (error: unknown) => {
+	function reportSyncError(error: unknown) {
 		const detail = errorMessage(error);
 		const code = error instanceof Error ? (error as ApiError).code : undefined;
 		if (code === "git_auth_failed" || code === "git_tls_failed") {
@@ -519,7 +488,7 @@ function VaultSyncForm({
 					? t("sync.gitAuthFailed", { detail })
 					: t("sync.gitTlsFailed", { detail });
 			setSyncError(message);
-			notifyError(message);
+			notifyError(message, { id: `sync:${localVault}` });
 			return;
 		}
 		// DNS / connection / timeout failures are retried by the Host and can
@@ -527,12 +496,15 @@ function VaultSyncForm({
 		// the raw chain as the secondary line for diagnostics.
 		if (code === "sync_unreachable" || isLikelyNetworkFailure(detail)) {
 			setSyncError(detail);
-			notifyError(t("sync.unreachable"), { description: detail });
+			notifyError(t("sync.unreachable"), {
+				id: `sync:${localVault}`,
+				description: detail,
+			});
 			return;
 		}
 		setSyncError(detail);
-		notifyError(detail);
-	};
+		notifyError(detail, { id: `sync:${localVault}` });
+	}
 
 	const save = async () => {
 		if (credentialBlocked || (credentialNeedsInput && !secretEntered)) return;
@@ -574,21 +546,16 @@ function VaultSyncForm({
 				);
 			}
 		} catch (error) {
-			const code =
-				error instanceof Error ? (error as ApiError).code : undefined;
-			// Ask policy paused the pass: nothing was applied or published, so
-			// surface the per-file prompt instead of an error the user cannot act
-			// on. Status is refreshed so the dialog reads the durable list.
-			if (code === "sync_conflict_pending") {
-				await refresh().catch(() => undefined);
-				setConflictDialogOpen(true);
+			if (isSyncConflictPending(error)) {
+				setSyncError(null);
+				reviewPending();
 			} else {
 				reportSyncError(error);
 			}
 		} finally {
 			setSyncing(false);
 			setProgress(null);
-			void refresh().catch(() => undefined);
+			void refresh().catch(reportSyncError);
 		}
 	};
 
@@ -653,13 +620,15 @@ function VaultSyncForm({
 					current: progress.current,
 					total: progress.total,
 				})
-			: status?.lastSyncAt
-				? t("sync.lastSync", {
-						time: formatLocaleTimestamp(status.lastSyncAt),
-					})
-				: status?.configured
-					? t("sync.neverSynced")
-					: null;
+			: !syncing && pendingConflicts
+				? t("sync.statusConflict")
+				: status?.lastSyncAt
+					? t("sync.lastSync", {
+							time: formatLocaleTimestamp(status.lastSyncAt),
+						})
+					: status?.configured
+						? t("sync.neverSynced")
+						: null;
 	const syncStatusLabel =
 		syncError || credentialNotice
 			? t("sync.statusError")
@@ -674,7 +643,9 @@ function VaultSyncForm({
 			: syncing
 				? "bg-sky-500"
 				: status?.configured
-					? "bg-emerald-500"
+					? pendingConflicts
+						? "bg-amber-500"
+						: "bg-emerald-500"
 					: "bg-muted-foreground/35";
 	const configChanged = JSON.stringify(form) !== JSON.stringify(status?.config);
 	const primaryAction = !status ? (
@@ -767,6 +738,17 @@ function VaultSyncForm({
 				}
 				actions={primaryAction}
 			/>
+			{pendingConflicts && !syncing ? (
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					className="mb-4"
+					onClick={reviewPending}
+				>
+					{t("sync.conflictReview")}
+				</Button>
+			) : null}
 			{syncing && progress ? (
 				<progress
 					className="mb-4 h-1.5 w-full accent-primary"
@@ -1310,16 +1292,15 @@ function VaultSyncForm({
 					</Button>
 				) : null}
 			</div>
-			{/* Ask policy: the paused pass left both sides untouched, so the reader
-			    picks per file before anything is applied or published. */}
-			<SyncConflictDialog
-				pending={conflictDialogOpen ? pendingConflicts : null}
-				resolving={resolvingConflicts}
-				onResolve={(resolutions, defaultResolution) =>
-					void resolveConflicts(resolutions, defaultResolution)
-				}
-				onDismiss={() => setConflictDialogOpen(false)}
-			/>
+			{!mobile ? (
+				<SyncConflictDialog
+					pending={pendingConflicts}
+					open={conflictReview.open}
+					resolving={conflictReview.resolving}
+					onResolve={conflictReview.apply}
+					onDismiss={conflictReview.dismiss}
+				/>
+			) : null}
 		</section>
 	);
 }
