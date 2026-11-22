@@ -56,6 +56,8 @@ import { MobileSettingsPage } from "@/components/mobile/mobile-settings-page";
 import { MobileSidebar } from "@/components/mobile/mobile-sidebar";
 import { MobileRemoteAgentPage } from "@/components/mobile/remote/mobile-remote-agent-page";
 import type { MobileReaderMode } from "@/components/mobile/types";
+import { SyncConflictDialog } from "@/components/settings/panes/sync-conflict-dialog";
+import { useSyncConflictReview } from "@/components/settings/panes/use-sync-conflict-review";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -288,6 +290,20 @@ export default function MobileApp() {
 		active: !settingsOpen,
 		onChanged: refreshAfterDownload,
 	});
+	const syncConflictReview = useSyncConflictReview({
+		vaultPath,
+		pending: paperSync.pendingConflicts,
+		refresh: paperSync.refresh,
+		onSynced: rescanAfterSync,
+	});
+	const reviewSyncConflicts = () => {
+		syncConflictReview.reopen();
+		void paperSync
+			.refresh()
+			.catch((error) =>
+				notifyError(errorText(error), { id: `sync:${vaultPath}` }),
+			);
+	};
 	const {
 		agents,
 		loading: agentsLoading,
@@ -1118,6 +1134,7 @@ export default function MobileApp() {
 				onClose={() => setSettingsOpen(false)}
 				vaultPath={vaultPath}
 				onSynced={rescanAfterSync}
+				onReviewSyncConflicts={reviewSyncConflicts}
 			/>
 			<MobileSidebar
 				onSettings={() => {
@@ -1162,6 +1179,14 @@ export default function MobileApp() {
 					setPendingOffer(null);
 					setPairingRequested(true);
 				}}
+			/>
+			<SyncConflictDialog
+				mobile
+				pending={paperSync.pendingConflicts}
+				open={syncConflictReview.open}
+				resolving={syncConflictReview.resolving}
+				onResolve={syncConflictReview.apply}
+				onDismiss={syncConflictReview.dismiss}
 			/>
 		</div>
 	);

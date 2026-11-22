@@ -2926,8 +2926,8 @@ export type ConflictPolicy =
 "ask";
 
 /**
- *  User's per-file decision. `keep_both` reproduces the historical automatic
- *  behavior (newer wins the original path, older survives as a conflict copy).
+ *  Which file version takes the original path. The other version is preserved
+ *  as a conflict copy. `KeepBoth` uses the newer version at the original path.
  */
 export type ConflictResolution = "keepLocal" | "keepCloud" | "keepBoth";
 
@@ -5367,15 +5367,12 @@ export type PdfAskSettings = {
 };
 
 /**
- *  Durable record of a paused pass. Written before `sync_conflict_pending`
- *  returns; removed once the resolved pass publishes successfully.
+ *  Durable record of a paused pass. A review ID identifies the exact set of
+ *  local and cloud file versions presented for confirmation.
  */
 export type PendingConflicts = {
-	/**
-	 *  Store identity the conflicts were detected against. A retargeted store
-	 *  invalidates the pending decision instead of applying it blindly.
-	 */
 	storeId: string,
+	reviewId: string,
 	conflicts: SyncFileConflict[],
 };
 
@@ -6471,7 +6468,6 @@ export type SyncDownloadPolicyArgs = {
 
 /**  One divergent-edit conflict surfaced to the user. */
 export type SyncFileConflict = {
-	/**  Vault-relative path both devices edited. */
 	path: string,
 	localHash: string,
 	localSize: number,
@@ -6515,7 +6511,8 @@ export type SyncProgressEvent = {
 
 export type SyncResolveConflictsArgs = {
 	vaultPath: string,
-	/**  Fallback for pending paths absent from `resolutions`. */
+	reviewId: string,
+	/**  Fallback for reviewed paths absent from `resolutions`. */
 	defaultResolution: ConflictResolution,
 	resolutions: { [key in string]: ConflictResolution },
 };
@@ -6586,10 +6583,7 @@ export type SyncStatus_Deserialize = {
 	running: boolean,
 	lastSyncAt: string | null,
 	lastVersion: number,
-	/**
-	 *  Divergent-edit conflicts awaiting a user decision (ask policy). Present
-	 *  after a paused pass until the resolved pass publishes successfully.
-	 */
+	/**  Divergent edits awaiting confirmation under the ask policy. */
 	pendingConflicts: PendingConflicts | null,
 };
 
@@ -6600,10 +6594,7 @@ export type SyncStatus_Serialize = {
 	running: boolean,
 	lastSyncAt?: string | null,
 	lastVersion: number,
-	/**
-	 *  Divergent-edit conflicts awaiting a user decision (ask policy). Present
-	 *  after a paused pass until the resolved pass publishes successfully.
-	 */
+	/**  Divergent edits awaiting confirmation under the ask policy. */
 	pendingConflicts?: PendingConflicts | null,
 };
 

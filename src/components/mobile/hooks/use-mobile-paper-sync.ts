@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { events } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
-import { notifyError } from "@/lib/core/notify";
+import { isLikelyNetworkFailure, notifyError } from "@/lib/core/notify";
 import { toSafeDisposer } from "@/lib/core/tauri-events";
 import {
 	fetchMobilePaperIfDeferred,
@@ -13,6 +13,7 @@ import type { PaperMetadata } from "@/lib/paper/types";
 import {
 	isSyncProgressPhase,
 	type PaperAvailability,
+	type PendingConflicts,
 	type SyncProgressEvent,
 	syncGetStatus,
 	syncListPaperAvailability,
@@ -44,6 +45,10 @@ export function useMobilePaperSync({
 	const generation = useRef(0);
 	const requestId = useRef(0);
 	const [progress, setProgress] = useState<SyncProgressEvent | null>(null);
+	const [pending, setPending] = useState<{
+		vaultPath: string;
+		conflicts: PendingConflicts;
+	} | null>(null);
 	const refresh = useCallback(async () => {
 		if (!vaultPath) return;
 		const request = generation.current;
@@ -52,8 +57,9 @@ export function useMobilePaperSync({
 		const supported =
 			status.configured &&
 			(status.config?.backend === "s3" || status.config?.backend === "webdav");
-		const next = supported ? await syncListPaperAvailability(vaultPath) : [];
 		if (request !== generation.current || ticket !== requestId.current) return;
+		const conflicts = supported ? status.pendingConflicts : null;
+		setPending(conflicts?.conflicts.length ? { vaultPath, conflicts } : null);
 		setEnabled(
 			Boolean(
 				supported &&
@@ -62,7 +68,9 @@ export function useMobilePaperSync({
 					),
 			),
 		);
-		setInventory(next);
+		const next = supported ? await syncListPaperAvailability(vaultPath) : [];
+		if (request === generation.current && ticket === requestId.current)
+			setInventory(next);
 	}, [vaultPath]);
 	useEffect(() => {
 		void vaultPath; // Clear inventory and invalidate old requests when the Vault changes.
@@ -70,6 +78,7 @@ export function useMobilePaperSync({
 		setInventory([]);
 		setEnabled(false);
 		setProgress(null);
+		setPending(null);
 		return () => {
 			generation.current += 1;
 		};
@@ -79,21 +88,41 @@ export function useMobilePaperSync({
 	}, [active, refresh]);
 	useEffect(() => {
 		if (!vaultPath) return;
+		let listening = true;
+		const report = (error: unknown) => {
+			if (listening) notifyError(errorText(error), { id: `sync:${vaultPath}` });
+		};
 		const visible = () => {
-			if (document.visibilityState === "visible")
-				void refresh().catch((error) => notifyError(errorText(error)));
+			if (document.visibilityState === "visible") void refresh().catch(report);
 		};
 		window.addEventListener("focus", visible);
+		document.addEventListener("visibilitychange", visible);
+		const stateListener = events.syncState.listen(({ payload }) => {
+			if (
+				!listening ||
+				payload.vaultPath !== vaultPath ||
+				payload.status === "syncing"
+			)
+				return;
+			setProgress(null);
+			if (payload.status === "error") {
+				const detail = payload.error ?? t("sync.statusError");
+				const unreachable = isLikelyNetworkFailure(detail);
+				notifyError(unreachable ? t("sync.unreachable") : detail, {
+					id: `sync:${vaultPath}`,
+					description: unreachable ? detail : undefined,
+				});
+			}
+			void refresh().catch(report);
+		});
+		// Read after subscribing so a pause during startup cannot slip between the read and the listener.
+		void stateListener
+			.then(() => {
+				if (listening) return refresh();
+			})
+			.catch(report);
 		const offs = [
-			toSafeDisposer(
-				events.syncState.listen(({ payload }) => {
-					if (payload.vaultPath !== vaultPath) return;
-					if (payload.status !== "syncing") {
-						setProgress(null);
-						void refresh().catch((error) => notifyError(errorText(error)));
-					}
-				}),
-			),
+			toSafeDisposer(stateListener),
 			toSafeDisposer(
 				events.syncProgress.listen(({ payload }) => {
 					if (
@@ -105,10 +134,12 @@ export function useMobilePaperSync({
 			),
 		];
 		return () => {
+			listening = false;
 			window.removeEventListener("focus", visible);
+			document.removeEventListener("visibilitychange", visible);
 			for (const off of offs) off();
 		};
-	}, [vaultPath, refresh]);
+	}, [vaultPath, refresh, t]);
 	const setPinned = useCallback(
 		async (paper: PaperMetadata, pinned: boolean) => {
 			if (!vaultPath || busyRef.current.has(paper.id)) return;
@@ -163,6 +194,9 @@ export function useMobilePaperSync({
 		states,
 		setPinned,
 		fetchMissing,
+		pendingConflicts:
+			pending?.vaultPath === vaultPath ? pending.conflicts : null,
+		refresh,
 		progressText: progress
 			? t(`sync.phase.${progress.phase}`, {
 					current: progress.current,
