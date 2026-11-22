@@ -1,6 +1,6 @@
 [workspace]
 members = ["src-tauri", "src-tauri/plugins/agentero-mobile", "cli", "crates/agentero-core", "crates/agentero-mcp"]
-exclude = ["patches/tesseract-rs"]
+exclude = ["patches/tesseract-rs", "vendor/android-native-keyring-store"]
 resolver = "2"
 
 # Upstream tesseract-rs 0.2.0 (liteparse's OCR build dependency) pins zip 2,
@@ -8,6 +8,8 @@ resolver = "2"
 # The vendored copy only bumps zip to the patched 9.x line.
 [patch.crates-io]
 tesseract-rs = { path = "patches/tesseract-rs" }
+# Explicit AES-256, durable commit errors and fail-closed credential decoding.
+android-native-keyring-store = { path = "vendor/android-native-keyring-store" }
 
 # Shared dependencies declared once for both members (src-tauri / cli).
 # Only version + common features live here; `optional`, target-specific

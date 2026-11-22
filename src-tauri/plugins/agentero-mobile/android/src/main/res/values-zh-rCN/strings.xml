@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agentero_webview_guard_title">请更新 Android WebView</string>
+    <string name="agentero_webview_guard_description">此设备使用 Chromium %1$d，Agentero 需要 Chromium %2$d 或更新版本。请通过设备的应用更新设置更新系统 WebView 或浏览器，然后重新打开 Agentero。</string>
+    <string name="agentero_webview_guard_settings">打开设置</string>
+    <string name="agentero_webview_guard_close">关闭</string>
+    <string name="agentero_webview_guard_settings_unavailable">无法打开系统设置。</string>
+    <string name="agentero_external_pdf_busy">已有一份 PDF 等待打开，请在完成后重试。</string>
+</resources>

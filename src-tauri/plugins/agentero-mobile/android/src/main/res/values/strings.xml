@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agentero_webview_guard_title">Update Android WebView</string>
+    <string name="agentero_webview_guard_description">This device uses Chromium %1$d. Agentero needs Chromium %2$d or newer. Update your system WebView or browser through your device’s app update settings, then reopen Agentero.</string>
+    <string name="agentero_webview_guard_settings">Open settings</string>
+    <string name="agentero_webview_guard_close">Close</string>
+    <string name="agentero_webview_guard_settings_unavailable">System settings are unavailable.</string>
+    <string name="agentero_external_pdf_busy">A PDF is already waiting to open. Try again after it finishes.</string>
+</resources>

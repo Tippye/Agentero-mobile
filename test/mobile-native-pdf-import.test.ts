@@ -277,6 +277,8 @@ it("opens the real settings page from the real Sidebar while keeping runtime own
 	if (!page) throw Error("Real settings page missing");
 	expect(page.textContent).toContain("settings:title");
 	const navButtons = [...page.querySelectorAll("nav button")];
+	// Android adds a dedicated EasyScholar settings pane between translate and
+	// layout (mobile-settings-page NAV); the shared mobile surface has six.
 	expect(navButtons.map((item) => item.textContent)).toEqual([
 		"settings:nav.appearance",
 		"settings:nav.reading",

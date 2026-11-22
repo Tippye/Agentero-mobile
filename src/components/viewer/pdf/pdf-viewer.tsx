@@ -57,6 +57,8 @@ import { PdfOutlinePanel } from "@/components/viewer/pdf/chrome/pdf-outline-pane
 import { PdfReferencesPanel } from "@/components/viewer/pdf/chrome/pdf-references-panel";
 import { PdfToolbar } from "@/components/viewer/pdf/chrome/pdf-toolbar";
 import { usePdfEngineContext } from "@/components/viewer/pdf/engine-provider";
+import { EPHEMERAL_PREVIEW_OPEN_MS } from "@/components/viewer/pdf/floating-hover";
+import { useHoverIntent } from "@/components/viewer/pdf/hooks/use-hover-intent";
 import { usePdfActiveAnchors } from "@/components/viewer/pdf/hooks/use-pdf-active-anchors";
 import { usePdfAskThreads } from "@/components/viewer/pdf/hooks/use-pdf-ask-threads";
 import { usePdfBookmarkEditor } from "@/components/viewer/pdf/hooks/use-pdf-bookmark-editor";
@@ -70,6 +72,7 @@ import { usePdfImmersivePosition } from "@/components/viewer/pdf/hooks/use-pdf-i
 import { usePdfInk } from "@/components/viewer/pdf/hooks/use-pdf-ink";
 import { usePdfJumpBack } from "@/components/viewer/pdf/hooks/use-pdf-jump-back";
 import { usePdfLayoutCluster } from "@/components/viewer/pdf/hooks/use-pdf-layout-cluster";
+import { usePdfLeftPanels } from "@/components/viewer/pdf/hooks/use-pdf-left-panels";
 import { usePdfLinkInk } from "@/components/viewer/pdf/hooks/use-pdf-link-ink";
 import { usePdfLinkUrlTip } from "@/components/viewer/pdf/hooks/use-pdf-link-url-tip";
 import { usePdfMarkActions } from "@/components/viewer/pdf/hooks/use-pdf-mark-actions";
@@ -89,7 +92,6 @@ import { usePdfScrollSync } from "@/components/viewer/pdf/hooks/use-pdf-scroll-s
 import { usePdfSelectionActions } from "@/components/viewer/pdf/hooks/use-pdf-selection-actions";
 import { usePdfSelectionTranslate } from "@/components/viewer/pdf/hooks/use-pdf-selection-translate";
 import { useSentenceGlyphRects } from "@/components/viewer/pdf/hooks/use-pdf-sentence-glyph-rects";
-import { usePdfSidebarPanels } from "@/components/viewer/pdf/hooks/use-pdf-sidebar-panels";
 import { usePdfSmartHighlights } from "@/components/viewer/pdf/hooks/use-pdf-smart-highlights";
 import { usePdfSyncTex } from "@/components/viewer/pdf/hooks/use-pdf-synctex";
 import { usePdfViewerHandle } from "@/components/viewer/pdf/hooks/use-pdf-viewer-handle";
@@ -119,6 +121,7 @@ import {
 import {
 	bindLayoutSentenceGlyphs,
 	publishLayoutSentenceCatalog,
+	publishLayoutSentencePageAnalysis,
 } from "@/components/viewer/pdf/layout-sentence-hover";
 import { usePdfSentenceInteraction } from "@/components/viewer/pdf/layout-sentence-pairing";
 import { buildMarksIndex } from "@/components/viewer/pdf/marks-index";
@@ -184,10 +187,17 @@ import {
 	layoutAnalysisStore,
 	layoutDocumentKey,
 	layoutSentenceScope,
+	type PdfLayoutRegion,
 	setFocusedLayoutRegion,
 } from "@/lib/pdf/layout";
-import { isLayoutElementTextKind } from "@/lib/pdf/layout/labels";
-import { splitLayoutSentences } from "@/lib/pdf/layout/layout-sentences";
+import {
+	splitLayoutSentences,
+	withHoverSentences,
+} from "@/lib/pdf/layout/layout-sentences";
+import {
+	isInsideVisualLayoutRegion,
+	sentenceHoverTextRegions,
+} from "@/lib/pdf/layout/translatable";
 import {
 	clearTranslatedLinkSource,
 	publishTranslatedLinkSource,
@@ -345,8 +355,8 @@ export const PdfViewer = memo(function PdfViewer(props: PdfViewerProps) {
 				// Skip PNG encoding for opaque page rasters; crops explicitly use PNG.
 				defaultImageType: "image/bmp",
 			}),
-			// Bound each non-preemptible PDFium render without lowering pixel density.
-			// Measured tradeoff: docs/test/pdf-tiling-performance.md.
+			// Smaller tiles bound non-preemptible PDFium renders on heavy pages
+			// without lowering pixel density.
 			createPluginRegistration(TilingPluginPackage, { tileSize: 512 }),
 			createPluginRegistration(ZoomPluginPackage, {
 				defaultZoomLevel: ZoomMode.FitWidth,
@@ -553,6 +563,9 @@ function PdfViewerInner({
 }: PdfViewerInnerProps) {
 	const capabilities = pdfViewerCapabilities(runtime);
 	const { t } = useTranslation("viewer");
+	// Writing previews own the hover affordance via SyncTeX; the reader's
+	// sentence wash (and its whole-page text fallback) stays off there.
+	const sentenceHover = syncTexScope !== "writing";
 	const [importBusy, setImportBusy] = useState(false);
 	// Parent often passes inline lambdas; keep latest in refs so data effects
 	// do not re-fire every parent render (was Maximum update depth exceeded).
@@ -751,6 +764,37 @@ function PdfViewerInner({
 			undefined
 		);
 	}, [paperMeta]);
+	/**
+	 * eLife figure supplements live on the web, not in the PDF. Their link text
+	 * still names the main figure ("Figure 5—figure supplement 1"), so resolve
+	 * the supplement to the publisher's direct image instead of cropping the
+	 * main Figure 5.
+	 */
+	const supplementFigureUrl = useMemo(() => {
+		if (!paperMeta) return undefined;
+		const articleId =
+			paperMeta.doi?.match(/^10\.7554\/e?life\.(\d+)/i)?.[1] ??
+			(paperMeta.source_url ?? paperMeta.html_url ?? "").match(
+				/elifesciences\.org\/articles\/(\d+)/i,
+			)?.[1];
+		if (!articleId) return undefined;
+		return (figure: number, supplement: number) =>
+			`https://elifesciences.org/articles/${articleId}/figures#fig${figure}s${supplement}`;
+	}, [paperMeta]);
+	/**
+	 * The supplement URL is shown through the shared external-link preview card;
+	 * its hook is created below the cross-reference preview, so route through a
+	 * ref (same pattern as the sibling `clear*Ref` callbacks).
+	 */
+	const showSupplementUrlRef = useRef<
+		(url: string, clientPoint?: ScreenPoint | null) => void
+	>(() => {});
+	const showSupplementUrl = useCallback(
+		(url: string, clientPoint?: ScreenPoint | null) => {
+			showSupplementUrlRef.current(url, clientPoint ?? null);
+		},
+		[],
+	);
 
 	const handleImportToLibrary = useCallback(async () => {
 		if (!importIdentifier || importBusy) return;
@@ -1101,8 +1145,7 @@ function PdfViewerInner({
 	clearAskErrorRef.current = clearAskError;
 	closeAskChromeRef.current = closeAskChrome;
 
-	const { outline, outlineReady, showOutline, toggleOutline } = usePdfOutline({
-		pdfPath,
+	const { outline, outlineReady } = usePdfOutline({
 		bookmarkCap,
 		docId,
 		totalPages,
@@ -1117,15 +1160,14 @@ function PdfViewerInner({
 		ready: outlineReady,
 	});
 
-	const {
-		showReferences,
-		showFigures,
-		hoveredCommentId,
-		setHoveredCommentId,
-		handleToggleOutline,
-		handleToggleReferences,
-		handleToggleFigures,
-	} = usePdfSidebarPanels({ showOutline, toggleOutline });
+	// Outline / references / figures own one left rail. The slot key is the PDF
+	// path (embed id for loose PDFs), so the viewer remount caused by a bookmark
+	// write keeps the panel the reader had open.
+	const { activePanel, openPanel, togglePanel, closePanel } = usePdfLeftPanels(
+		pdfPath ?? docId,
+	);
+	const showOutline = activePanel === "outline";
+	const [hoveredCommentId, setHoveredCommentId] = useState<string | null>(null);
 
 	const bookmarkedPages = useMemo(() => {
 		const pages = new Set<number>();
@@ -1285,6 +1327,8 @@ function PdfViewerInner({
 			clearLinkUrlTipRef.current();
 		},
 		hasCitationMatch,
+		supplementImageUrl: supplementFigureUrl,
+		onSupplementPreview: showSupplementUrl,
 	});
 
 	const {
@@ -1298,6 +1342,51 @@ function PdfViewerInner({
 	clearCitationPreviewRef.current = clearCitationPreview;
 	clearCrossrefPreviewRef.current = clearCrossrefPreview;
 	clearLinkUrlTipRef.current = clearLinkUrlTip;
+	showSupplementUrlRef.current = hoverLinkUrl;
+
+	// Hover intent (#1213): a card opens only after the pointer has rested on a
+	// link. Crossing dense citation / figure links on the way somewhere else
+	// must not flash a card or start the async crop behind it; leaving cancels
+	// the pending open. Hiding stays with the cards' sticky-hover timers.
+	const showLinkPreview = useCallback(
+		(payload: {
+			link: PdfLinkAnnoObject;
+			clientPoint?: ScreenPoint | null;
+		}) => {
+			handleCitationLinkHover(payload.link, payload.clientPoint);
+			handleCrossrefLinkHover(payload.link, payload.clientPoint);
+		},
+		[handleCitationLinkHover, handleCrossrefLinkHover],
+	);
+	const hideLinkPreview = useCallback(() => {
+		handleCitationLinkHover(null);
+		handleCrossrefLinkHover(null);
+	}, [handleCitationLinkHover, handleCrossrefLinkHover]);
+	const linkHoverIntent = useHoverIntent({
+		delayMs: EPHEMERAL_PREVIEW_OPEN_MS,
+		onOpen: showLinkPreview,
+		onLeave: hideLinkPreview,
+	});
+	const showUrlTip = useCallback(
+		(payload: { url: string; clientPoint: ScreenPoint }) => {
+			hoverLinkUrl(payload.url, payload.clientPoint);
+		},
+		[hoverLinkUrl],
+	);
+	const hideUrlTip = useCallback(() => {
+		hoverLinkUrl(null);
+	}, [hoverLinkUrl]);
+	const urlHoverIntent = useHoverIntent({
+		delayMs: EPHEMERAL_PREVIEW_OPEN_MS,
+		onOpen: showUrlTip,
+		onLeave: hideUrlTip,
+	});
+	// A pending open belongs to the document it was started on.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: docId is the effect trigger.
+	useEffect(() => {
+		linkHoverIntent.cancel();
+		urlHoverIntent.cancel();
+	}, [docId]);
 
 	const visibleAskThreads = useMemo(
 		() => (capabilities.ask ? threads : []),
@@ -1365,6 +1454,7 @@ function PdfViewerInner({
 	const {
 		layoutOverlayVisible,
 		layoutRawRegions,
+		layoutDocRegions,
 		selectableRegionsByPage,
 		rawRegionsByPage,
 		startLayoutAnalysisRef,
@@ -1413,13 +1503,22 @@ function PdfViewerInner({
 	});
 
 	useEffect(() => {
-		const translated = [...layoutTranslateItemsByPage.values()].flat();
-		const translatedIds = new Set(translated.map((item) => item.id));
-		const source = (layoutRawRegions ?? [])
-			.filter(
-				(region) =>
-					isLayoutElementTextKind(region.kind) && !translatedIds.has(region.id),
-			)
+		if (!sentenceHover) {
+			publishLayoutSentenceCatalog(docId, []);
+			publishLayoutSentencePageAnalysis(docId, []);
+			return;
+		}
+		const rawRegions = layoutRawRegions ?? [];
+		const allTranslated = [...layoutTranslateItemsByPage.values()].flat();
+		const translatedIds = new Set(allTranslated.map((item) => item.id));
+		// The model also detects the text inside vector figures / tables as prose
+		// blocks. Those runs are part of the graphic, so they never hover as
+		// sentences; the whole element is the hover target instead.
+		const translated = allTranslated
+			.filter((item) => !isInsideVisualLayoutRegion(item, rawRegions))
+			.map((item) => withHoverSentences(item));
+		const source = sentenceHoverTextRegions(rawRegions)
+			.filter((region) => !translatedIds.has(region.id))
 			.map((region) => ({
 				id: region.id,
 				pageIndex: region.pageIndex,
@@ -1430,13 +1529,28 @@ function PdfViewerInner({
 					translated: "",
 				})),
 			}));
+		// Analysed pages keep sentence hover on their text regions only; the
+		// whole-page text fallback is reserved for pages without analysis.
+		publishLayoutSentencePageAnalysis(docId, [
+			...rawRegions.map((region) => region.pageIndex),
+			...(layoutDocRegions ?? []).map((region) => region.pageIndex),
+		]);
 		publishLayoutSentenceCatalog(docId, [...source, ...translated]);
-	}, [docId, layoutTranslateItemsByPage, layoutRawRegions]);
+	}, [
+		docId,
+		layoutTranslateItemsByPage,
+		layoutRawRegions,
+		layoutDocRegions,
+		sentenceHover,
+	]);
 	// Clear only when the document changes. Declared after the publish effect so
 	// its cleanup runs first and the next publish restores the new document's
 	// pairs. An items-only update must not flash an empty catalog.
 	useEffect(() => {
-		return () => publishLayoutSentenceCatalog(docId, []);
+		return () => {
+			publishLayoutSentenceCatalog(docId, []);
+			publishLayoutSentencePageAnalysis(docId, []);
+		};
 	}, [docId]);
 
 	const reflowDisplayDocument = useReflowDisplayDocument(
@@ -1600,6 +1714,13 @@ function PdfViewerInner({
 		closeFindRef.current();
 	}, []);
 
+	// The meter's stop square ends the whole visible run: a live Host job, a
+	// queued wait, and — once the job has settled — the local page generation
+	// that is still producing the corrected pages.
+	const stopLayoutTranslateWithTypeset = useCallback(() => {
+		cancelLayoutTranslate({ stopTypeset: true });
+	}, [cancelLayoutTranslate]);
+
 	// The view switch owns the single-pane / compare choice. The toolbar's task
 	// surface (the expanding meter) only stops or cancels, never toggles views.
 	const hasAnyTranslation = useMemo(
@@ -1612,21 +1733,39 @@ function PdfViewerInner({
 	const ensureLayoutTranslateRef = useRef(ensureLayoutTranslate);
 	ensureLayoutTranslateRef.current = ensureLayoutTranslate;
 
-	const ensureTranslationForReading = useCallback(() => {
-		if (hasAnyTranslation || layoutTranslateRunning) return;
-		if (layoutTranslateWaiting || layoutTranslatePreparing) return;
-		// The toolbar click and the mount effect can race within one tick; the
-		// short window keeps one start while still allowing a later retry.
-		const now = Date.now();
-		if (now - translationEnsureAtRef.current < 1000) return;
-		translationEnsureAtRef.current = now;
-		ensureLayoutTranslateRef.current();
-	}, [
-		hasAnyTranslation,
-		layoutTranslateRunning,
-		layoutTranslateWaiting,
-		layoutTranslatePreparing,
-	]);
+	const ensureTranslationForReading = useCallback(
+		(options?: { completePending?: boolean }) => {
+			// A live task already owns the paper. Showing the view is enough.
+			if (
+				layoutTranslateRunning ||
+				layoutTranslateWaiting ||
+				layoutTranslatePreparing ||
+				layoutTranslateQueued
+			) {
+				return;
+			}
+			// Entering 译文 from a user gesture fills gaps after the cache paints.
+			// The 1000ms window stays on restore only, so a gesture is not dropped.
+			if (options?.completePending) {
+				ensureLayoutTranslateRef.current({ completePending: true });
+				return;
+			}
+			if (hasAnyTranslation) return;
+			// The toolbar click and the mount effect can race within one tick; the
+			// short window keeps one start while still allowing a later retry.
+			const now = Date.now();
+			if (now - translationEnsureAtRef.current < 1000) return;
+			translationEnsureAtRef.current = now;
+			ensureLayoutTranslateRef.current();
+		},
+		[
+			hasAnyTranslation,
+			layoutTranslateRunning,
+			layoutTranslateWaiting,
+			layoutTranslatePreparing,
+			layoutTranslateQueued,
+		],
+	);
 
 	const handleSelectViewMode = useCallback(
 		(next: PdfViewMode) => {
@@ -1650,6 +1789,11 @@ function PdfViewerInner({
 					writePdfViewMode(paperKey, "original");
 					onOpenTranslationTab?.(baseDocId, paperAbsPath, paperTitle ?? null);
 				}
+				// 对照 reads the same translation as 译文: validate the cache / start
+				// the shared job from the source pane too, so the split pane always
+				// opens onto a live job or completed cache. The pane's own
+				// auto-start stays as the fallback when the source cannot start it.
+				ensureTranslationForReading();
 				return;
 			}
 			if (next === "original") {
@@ -1679,7 +1823,7 @@ function PdfViewerInner({
 			setSingleViewMode("translated");
 			writePdfViewMode(paperKey, "translated");
 			showLayoutTranslate();
-			ensureTranslationForReading();
+			ensureTranslationForReading({ completePending: true });
 		},
 		[
 			translationOnly,
@@ -1759,7 +1903,7 @@ function PdfViewerInner({
 	const handleToggleLayoutTranslateWithDualPane = useCallback(() => {
 		if (!capabilities.layoutTranslation || plainViewer) return;
 		if (layoutTranslateRunning || layoutTranslateWaiting) {
-			toggleLayoutTranslate();
+			stopLayoutTranslateWithTypeset();
 			return;
 		}
 		if (translationCompanionOpen) {
@@ -1778,7 +1922,7 @@ function PdfViewerInner({
 		onCloseTranslationPane,
 		handleSelectViewMode,
 		handleToggleTranslationView,
-		toggleLayoutTranslate,
+		stopLayoutTranslateWithTypeset,
 	]);
 
 	/** Desktop layout control: open / close the side-by-side translation pane. */
@@ -1861,19 +2005,31 @@ function PdfViewerInner({
 
 	useEffect(() => {
 		return subscribeLinkPreviewDrag(() => {
+			linkHoverIntent.cancel();
+			urlHoverIntent.cancel();
 			clearCitationPreview();
 			clearCrossrefPreview();
 			clearLinkUrlTip();
 		});
-	}, [clearCitationPreview, clearCrossrefPreview, clearLinkUrlTip]);
+	}, [
+		linkHoverIntent,
+		urlHoverIntent,
+		clearCitationPreview,
+		clearCrossrefPreview,
+		clearLinkUrlTip,
+	]);
 
 	useEffect(() => {
 		if (!suppressLinkPreviews) return;
+		linkHoverIntent.cancel();
+		urlHoverIntent.cancel();
 		clearCitationPreview();
 		clearCrossrefPreview();
 		clearLinkUrlTip();
 	}, [
 		suppressLinkPreviews,
+		linkHoverIntent,
+		urlHoverIntent,
 		clearCitationPreview,
 		clearCrossrefPreview,
 		clearLinkUrlTip,
@@ -1882,33 +2038,44 @@ function PdfViewerInner({
 	const handleLinkHover = useCallback(
 		(link: PdfLinkAnnoObject | null, clientPoint?: ScreenPoint | null) => {
 			if (suppressLinkPreviews || linkPreviewDragActive()) {
+				linkHoverIntent.cancel();
+				urlHoverIntent.cancel();
 				clearCitationPreview();
 				clearCrossrefPreview();
 				clearLinkUrlTip();
 				return;
 			}
-			handleCitationLinkHover(link, clientPoint);
-			handleCrossrefLinkHover(link, clientPoint);
+			if (!link) {
+				linkHoverIntent.leave();
+				return;
+			}
+			linkHoverIntent.enter({ link, clientPoint });
 		},
 		[
 			suppressLinkPreviews,
+			linkHoverIntent,
+			urlHoverIntent,
 			clearCitationPreview,
 			clearCrossrefPreview,
 			clearLinkUrlTip,
-			handleCitationLinkHover,
-			handleCrossrefLinkHover,
 		],
 	);
 
 	const handleLinkUrlHover = useCallback(
 		(url: string | null, clientPoint?: ScreenPoint | null) => {
 			if (suppressLinkPreviews || linkPreviewDragActive()) {
+				urlHoverIntent.cancel();
 				clearLinkUrlTip();
 				return;
 			}
-			hoverLinkUrl(url, clientPoint);
+			const trimmed = url?.trim() ?? "";
+			if (!trimmed || !clientPoint) {
+				urlHoverIntent.leave();
+				return;
+			}
+			urlHoverIntent.enter({ url: trimmed, clientPoint });
 		},
-		[suppressLinkPreviews, clearLinkUrlTip, hoverLinkUrl],
+		[suppressLinkPreviews, urlHoverIntent, clearLinkUrlTip],
 	);
 
 	// ---- Visual marks ----
@@ -2382,7 +2549,7 @@ function PdfViewerInner({
 			inkEditing: inkEditable && inkMode !== "read",
 			translationOnly,
 			plainViewer,
-			sentencePairing: true,
+			sentencePairing: sentenceHover,
 		}),
 		[
 			regionSelecting,
@@ -2393,6 +2560,7 @@ function PdfViewerInner({
 			insetCommentCards,
 			inkEditable,
 			inkMode,
+			sentenceHover,
 		],
 	);
 
@@ -2469,7 +2637,13 @@ function PdfViewerInner({
 				const pageHasTranslation = (
 					layoutTranslateItemsByPage.get(pageIndex) ?? []
 				).some((item) => Boolean(item.translated?.trim()));
-				if (pageHasTranslation) return;
+				// The tag is entering 译文. A page that already has text reveals
+				// the view and fills the other missing blocks; an untranslated
+				// page still starts that page only.
+				if (pageHasTranslation) {
+					ensureTranslationForReading({ completePending: true });
+					return;
+				}
 			}
 			togglePageLayoutTranslate(pageIndex);
 		},
@@ -2478,6 +2652,7 @@ function PdfViewerInner({
 			paperKey,
 			showLayoutTranslate,
 			layoutTranslateItemsByPage,
+			ensureTranslationForReading,
 			togglePageLayoutTranslate,
 		],
 	);
@@ -2537,7 +2712,6 @@ function PdfViewerInner({
 			handleCopyCommentLink,
 			handleCopyCommentEmbed,
 			handleAddCommentToChat,
-			setHoveredCommentId,
 			handleCommitSelectionComment,
 			handleDismissSelectionComment,
 		],
@@ -2608,7 +2782,7 @@ function PdfViewerInner({
 		hostRef,
 		scrollRef,
 		scrollReady,
-		sticky: showOutline || showReferences || showFigures || findOpen,
+		sticky: activePanel !== null || findOpen,
 	});
 
 	// ---- Floating card stack props ----
@@ -2653,9 +2827,9 @@ function PdfViewerInner({
 					children: [],
 				},
 			]);
-			if (!showOutline) handleToggleOutline();
+			if (!showOutline) openPanel("outline");
 		},
-		[t, canBookmark, bookmarkEditor, showOutline, handleToggleOutline],
+		[t, canBookmark, bookmarkEditor, showOutline, openPanel],
 	);
 	const cardCitationPreview = useMemo(
 		() => ({
@@ -2824,6 +2998,16 @@ function PdfViewerInner({
 		requestFitWidth();
 	}, [pdfScrollStrategy]);
 
+	// A thumbnail jumps to its page and closes the rail: the panel overlays the
+	// reading surface, so leaving it open would cover the figure just jumped to.
+	const handleFiguresJump = useCallback(
+		(region: PdfLayoutRegion) => {
+			handleJumpToLayoutRegion(region);
+			closePanel();
+		},
+		[handleJumpToLayoutRegion, closePanel],
+	);
+
 	return (
 		<div
 			ref={hostRef}
@@ -2834,13 +3018,9 @@ function PdfViewerInner({
 				<PdfLeftToolbar
 					canEditBookmarks={bookmarkEditor.canEdit}
 					outline={outline}
-					showOutline={showOutline}
-					onToggleOutline={handleToggleOutline}
+					activePanel={activePanel}
+					onTogglePanel={togglePanel}
 					paperPath={paperRelPath}
-					showReferences={showReferences}
-					onToggleReferences={handleToggleReferences}
-					showFigures={showFigures}
-					onToggleFigures={handleToggleFigures}
 					visible={leftChromeVisible}
 					isRemotePaper={isRemotePaper}
 					plainViewer={plainViewer}
@@ -2848,35 +3028,6 @@ function PdfViewerInner({
 			)}
 			{!translationOnly && !immersiveReading && jumpBackTarget && (
 				<PdfJumpBackChip onGoBack={goBackToJumpOrigin} />
-			)}
-			{!translationOnly && !immersiveReading && (
-				<PdfOutlinePanel
-					editor={bookmarkEditor}
-					currentPage={currentPage}
-					outline={outline}
-					showOutline={showOutline}
-					onGoToPage={handleGoToPage}
-				/>
-			)}
-			{!translationOnly && !immersiveReading && (
-				<PdfReferencesPanel
-					vaultPath={vaultPath}
-					paperPath={paperRelPath}
-					showReferences={showReferences}
-				/>
-			)}
-			{!translationOnly && !plainViewer && !immersiveReading && (
-				<PdfFiguresPanel
-					documentId={docId}
-					paperAbsPath={paperAbsPath}
-					paperRelPath={paperRelPath}
-					showFigures={showFigures}
-					canAnalyze={capabilities.layoutAnalysis}
-					isRemotePaper={isRemotePaper}
-					onAnalyze={handleAnalyzeLayout}
-					onJump={handleJumpToLayoutRegion}
-					onRenderThumb={handleRenderLayoutThumb}
-				/>
 			)}
 			{!translationOnly && (
 				<PdfFindBar
@@ -2933,18 +3084,20 @@ function PdfViewerInner({
 			<DockviewViewport
 				documentId={docId}
 				hostRef={hostRef}
-				className="agentero-scroll-both min-h-0 min-w-0 flex-1"
+				className="min-h-0 min-w-0 flex-1"
 				onClickCapture={(event) => {
 					const target = event.target;
-					// Observe the reading surface without swallowing its click. Portaled
-					// menus and page controls keep their own interaction unchanged.
+					// Observe the reading surface without swallowing its click. A
+					// click on the pages dismisses whichever left rail is open (same
+					// for outline / references / figures); portaled menus, cards and
+					// page controls keep their own interaction unchanged.
 					if (
-						showOutline &&
+						activePanel &&
 						target instanceof Element &&
 						event.currentTarget.contains(target) &&
 						!target.closest("[data-pdf-chrome]")
 					)
-						toggleOutline();
+						closePanel();
 				}}
 			>
 				<InkInputBridge
@@ -3085,6 +3238,38 @@ function PdfViewerInner({
 					onExitImmersive={immersiveReading ? exitImmersiveReading : undefined}
 				/>
 			)}
+
+			{/* Left rails paint last: they are full-height overlays, so they cover
+			    the bottom page / zoom bar and the jump-back chip instead of
+			    reserving a lane for them. One slot, so at most one is mounted. */}
+			{!translationOnly && !immersiveReading && activePanel === "outline" && (
+				<PdfOutlinePanel
+					editor={bookmarkEditor}
+					currentPage={currentPage}
+					outline={outline}
+					onGoToPage={handleGoToPage}
+				/>
+			)}
+			{!translationOnly &&
+				!immersiveReading &&
+				activePanel === "references" && (
+					<PdfReferencesPanel vaultPath={vaultPath} paperPath={paperRelPath} />
+				)}
+			{!translationOnly &&
+				!plainViewer &&
+				!immersiveReading &&
+				activePanel === "figures" && (
+					<PdfFiguresPanel
+						documentId={docId}
+						paperAbsPath={paperAbsPath}
+						paperRelPath={paperRelPath}
+						canAnalyze={capabilities.layoutAnalysis}
+						isRemotePaper={isRemotePaper}
+						onAnalyze={handleAnalyzeLayout}
+						onJump={handleFiguresJump}
+						onRenderThumb={handleRenderLayoutThumb}
+					/>
+				)}
 		</div>
 	);
 }

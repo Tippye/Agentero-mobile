@@ -73,11 +73,13 @@ import {
 	syncDisconnect,
 	syncGetStatus,
 	syncNow,
+	syncResolveConflicts,
 	syncScopeSizes,
 } from "@/lib/sync/api";
 import { vaultDisplayName } from "@/lib/vault/path";
 import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 import { getRecentVaults } from "@/lib/vault/session";
+import { SyncConflictDialog } from "./sync-conflict-dialog";
 
 type SyncProviderLink = {
 	id: string;
@@ -254,7 +256,12 @@ function VaultSyncForm({
 	const { t: tm } = useTranslation("mobile");
 	const newConfig = useCallback(() => {
 		const config = emptySyncConfig(mobile ? "s3" : "agentero");
-		if (mobile) config.scope.source = false;
+		if (mobile) {
+			config.scope.source = false;
+			// Tablet readers edit the same notes offline: a divergent file is a
+			// decision they can act on, not a silent mtime overwrite.
+			config.conflictPolicy = "ask";
+		}
 		return config;
 	}, [mobile]);
 	const formVersion = useRef(0);
@@ -273,6 +280,11 @@ function VaultSyncForm({
 	const cloudSubject =
 		form.agenteroSubject === "organization" ? "organization" : "user";
 	const [cloudUsage, setCloudUsage] = useState<SyncCloudUsage | null>(null);
+	/** Divergent-edit files awaiting a per-file choice (ask policy). */
+	const [conflictDialogOpen, setConflictDialogOpen] = useState(false);
+	/** Auto-open the prompt once per mount; a later dismissal stays dismissed. */
+	const conflictPrompted = useRef(false);
+	const [resolvingConflicts, setResolvingConflicts] = useState(false);
 
 	const refresh = useCallback(async () => {
 		if (!localVault) return;
@@ -281,6 +293,12 @@ function VaultSyncForm({
 		if (id !== requestId.current) return;
 		setStatus(next);
 		setSyncing(next.running);
+		// A pass that paused on a previous visit left the prompt durable; show it
+		// once the pane opens instead of waiting for another failed sync.
+		if (next.pendingConflicts && !conflictPrompted.current) {
+			conflictPrompted.current = true;
+			setConflictDialogOpen(true);
+		}
 		// Preserve an in-progress draft across background status updates; only
 		// the first load seeds the form (upstream draft-preservation guard).
 		if (formVersion.current !== 0) return;
@@ -452,6 +470,46 @@ function VaultSyncForm({
 			cloudUsage.limit === 0 ||
 			(cloudSubject === "organization" && !activeOrgId));
 
+	/** Pending divergent edits, if the last pass paused under the ask policy. */
+	const pendingConflicts = status?.pendingConflicts ?? null;
+
+	const resolveConflicts = async (
+		resolutions: Record<string, import("@/lib/sync/api").ConflictResolution>,
+		defaultResolution: import("@/lib/sync/api").ConflictResolution,
+	) => {
+		if (!localVault) return;
+		setResolvingConflicts(true);
+		try {
+			const outcome = await syncResolveConflicts(
+				localVault,
+				resolutions,
+				defaultResolution,
+			);
+			setConflictDialogOpen(false);
+			await onSynced?.();
+			setSyncError(null);
+			notifySuccess(
+				t("sync.done", {
+					up: outcome.uploaded,
+					down: outcome.downloaded,
+				}),
+			);
+		} catch (error) {
+			const code =
+				error instanceof Error ? (error as ApiError).code : undefined;
+			// Still paused on a later conflict set: keep the dialog on the fresh
+			// list instead of reporting a failure the user has to clear by hand.
+			if (code === "sync_conflict_pending") {
+				await refresh().catch(() => undefined);
+				return;
+			}
+			reportSyncError(error);
+		} finally {
+			setResolvingConflicts(false);
+			void refresh().catch(() => undefined);
+		}
+	};
+
 	const reportSyncError = (error: unknown) => {
 		const detail = errorMessage(error);
 		const code = error instanceof Error ? (error as ApiError).code : undefined;
@@ -516,7 +574,17 @@ function VaultSyncForm({
 				);
 			}
 		} catch (error) {
-			reportSyncError(error);
+			const code =
+				error instanceof Error ? (error as ApiError).code : undefined;
+			// Ask policy paused the pass: nothing was applied or published, so
+			// surface the per-file prompt instead of an error the user cannot act
+			// on. Status is refreshed so the dialog reads the durable list.
+			if (code === "sync_conflict_pending") {
+				await refresh().catch(() => undefined);
+				setConflictDialogOpen(true);
+			} else {
+				reportSyncError(error);
+			}
 		} finally {
 			setSyncing(false);
 			setProgress(null);
@@ -1242,6 +1310,16 @@ function VaultSyncForm({
 					</Button>
 				) : null}
 			</div>
+			{/* Ask policy: the paused pass left both sides untouched, so the reader
+			    picks per file before anything is applied or published. */}
+			<SyncConflictDialog
+				pending={conflictDialogOpen ? pendingConflicts : null}
+				resolving={resolvingConflicts}
+				onResolve={(resolutions, defaultResolution) =>
+					void resolveConflicts(resolutions, defaultResolution)
+				}
+				onDismiss={() => setConflictDialogOpen(false)}
+			/>
 		</section>
 	);
 }

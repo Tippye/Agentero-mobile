@@ -1,16 +1,13 @@
 /**
- * 广场（Plaza）center panel: one embedded source per tab.
- *
- * The tree root node is a plain virtual folder (expand/collapse only) with no
- * page of its own; each child row opens its source's tab. Everything is
- * derived from the {@link PLAZA_SOURCES} registry, so a new source needs no
- * changes here.
+ * 广场（Plaza）center panel: one native view or embedded source per tab.
+ * Each child row opens its source's tab. The Plaza root only expands or collapses.
  */
 
 import { useTranslation } from "react-i18next";
 import { PlazaArxivRecView } from "@/components/plaza/plaza-arxiv-rec-view";
 import { PlazaCcfDeadlinesView } from "@/components/plaza/plaza-ccf-deadlines-view";
 import { PlazaFeedsView } from "@/components/plaza/plaza-feeds-view";
+import { PlazaHuggingFaceView } from "@/components/plaza/plaza-huggingface-view";
 import { PlazaSkillsView } from "@/components/plaza/plaza-skills-view";
 import { PlazaWebFrame } from "@/components/plaza/plaza-web-frame";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -45,6 +42,10 @@ export function PlazaView({
 				mobile={mobile}
 			/>
 		);
+	}
+
+	if (source?.panel === "huggingface") {
+		return <PlazaHuggingFaceView className={className} />;
 	}
 
 	if (source?.panel === "ccfDeadlines") {

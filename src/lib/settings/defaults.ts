@@ -1,3 +1,4 @@
+import { DEFAULT_EASY_SCHOLAR_RANKS } from "@/lib/paper/easy-scholar-ranks";
 import { DEFAULT_LAYOUT_SETTINGS } from "@/lib/pdf/layout/settings";
 import type {
 	AppSettings,
@@ -147,10 +148,13 @@ export function clampEditorLineHeight(value: number): number {
 export const DEFAULT_SETTINGS: AppSettings = {
 	shortcutOverrides: {},
 	easyScholarKey: "",
+	easyScholarRanks: [...DEFAULT_EASY_SCHOLAR_RANKS],
 	zhihuAccessSecret: "",
 	institutionProxyPrefix: "",
 	institutionProxyCookie: "",
 	institutionProxyType: "auto",
+	openreviewCookie: "",
+	openreviewCookieExpiresAt: 0,
 	networkProxyEnabled: false,
 	networkProxyUrl: DEFAULT_NETWORK_PROXY_URL,
 	paperTreeLabelMode: "title-author",
@@ -163,7 +167,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	pdfInertiaFriction: 0.005,
 	pdfInertiaMinVelocity: 0.015,
 	pdfInertiaSpeedScale: 1,
-	vimMode: true,
+	vimMode: false,
 	hintModeEnabled: true,
 	soundEnabled: true,
 	pdfSpreadMode: "none",
@@ -178,6 +182,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	mcpEnabled: false,
 	mcpPort: 8765,
 	mcpExposePaperText: false,
+	mcpAllowWrite: false,
+	mcpAllowOnline: false,
 	mcpTunnelId: "",
 	mcpTunnelApiKey: "",
 	zoteroSyncDir: "",

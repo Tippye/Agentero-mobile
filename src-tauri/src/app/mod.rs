@@ -23,10 +23,14 @@ mod mobile_documents;
 mod mobile_webview;
 pub(crate) mod remote_agent;
 pub mod vault_session;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod workspace_cli;
 
 #[cfg(desktop)]
 pub mod finder_service;
 pub use crate::features::open_request;
+#[cfg(desktop)]
+pub mod open_with;
 #[cfg(desktop)]
 pub mod terminal;
 #[cfg(desktop)]
@@ -489,6 +493,14 @@ pub fn run() {
             settings.network_proxy_enabled,
             &settings.network_proxy_url,
         )?;
+        // A page fetch or PDF download that hits an interactive verification
+        // wall (OpenReview Turnstile, Cloudflare) asks this hook to open the
+        // blocked URL in a window (#1157). Mobile has no such window, and the
+        // CLI has no Host at all; both report the wall as a readable error.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::features::system::settings::commands::install_web_verification_hook(
+            app.handle().clone(),
+        );
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         crate::features::paper::import::refresh_parser_config(&settings_store);
         #[cfg(desktop)]
@@ -594,6 +606,10 @@ pub fn run() {
             if let Some(req) = crate::app::open_request::take_cli_ui_request_file() {
                 let _ = crate::app::open_request::handle_ui_request(app.handle(), req);
             }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if let Err(error) = workspace_cli::start(app.handle().clone()) {
+                log::warn!(target:"agentero::cli","desktop command channel unavailable: {error}");
+            }
             crate::app::open_request::spawn_cli_open_request_watcher(app.handle().clone());
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -647,8 +663,7 @@ pub fn run() {
                 return;
             }
             // Remaining menu ids are renderer actions: broadcast one
-            // `menu:invoked` event with the action id (naming per
-            // docs/architecture.md).
+            // `menu:invoked` event with the action id.
             let _ = app.emit(
                 crate::app::menu::MENU_INVOKED_EVENT,
                 serde_json::json!({ "action": id }),
@@ -667,6 +682,7 @@ pub fn run() {
                 // Host resources (see `VaultHolders`). The global release
                 // sequence is async; spawn it so this synchronous event
                 // callback never blocks the event loop.
+                crate::features::agent::hosted_turn::revoke_window(window.label(), None);
                 let drained = window
                     .state::<vault_session::VaultHolders>()
                     .drain_window(window.label());

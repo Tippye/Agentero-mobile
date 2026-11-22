@@ -32,12 +32,22 @@ import {
 } from "@/lib/bridge/recovery";
 import { notifyError } from "@/lib/core/notify";
 
+function isAndroid(): boolean {
+	return /Android/i.test(navigator.userAgent);
+}
+
+function mobileDeviceName(): string {
+	if (isAndroid()) return "Android";
+	if (navigator.userAgent.includes("iPad")) return "iPad";
+	return "iPhone";
+}
+
 function describeBridgeError(
 	message: string | undefined,
 	networkPermissionMessage: string,
 ): string | null {
 	if (!message) return null;
-	if (/operation not permitted/i.test(message)) {
+	if (!isAndroid() && /operation not permitted/i.test(message)) {
 		return networkPermissionMessage;
 	}
 	return message;
@@ -99,7 +109,7 @@ export function MobilePairing({
 			try {
 				const next = await bridgeConnect({
 					offerUrl: offer,
-					deviceName: "Agentero",
+					deviceName: mobileDeviceName(),
 				});
 				setLinkOpen(false);
 				onStatus(next);
@@ -110,7 +120,11 @@ export function MobilePairing({
 				const message = recovery
 					? t(recovery)
 					: (describeBridgeError(
-							cause instanceof Error ? cause.message : undefined,
+							cause instanceof Error
+								? cause.message
+								: typeof cause === "string"
+									? cause
+									: undefined,
 							t("errors.networkPermission"),
 						) ?? t("errors.connect"));
 				setError(message);

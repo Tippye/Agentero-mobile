@@ -27,13 +27,20 @@ let root: Root, container: HTMLDivElement;
 let ink: ReturnType<typeof usePdfInk>;
 const dirty = vi.fn(),
 	mode = vi.fn();
-function Reader({ folder = "papers/ink-viewer" }: { folder?: string } = {}) {
+function Reader({
+	folder = "papers/ink-viewer",
+	shared = false,
+}: {
+	folder?: string;
+	shared?: boolean;
+} = {}) {
 	ink = usePdfInk({
 		vaultPath: "/vault",
 		paperRelPath: folder,
 		enabled: true,
 		editable: true,
 		isActive: true,
+		sharedEditor: shared,
 		onInkDirtyChange: dirty,
 		onInkModeChange: mode,
 	});
@@ -64,6 +71,40 @@ afterEach(async () => {
 	container.remove();
 	vi.unstubAllGlobals();
 });
+it("shares one editable editor between the original and translated panes", async () => {
+	await act(() =>
+		root.render(
+			createElement(Reader, { folder: "papers/shared-pane", shared: true }),
+		),
+	);
+	await act(async () => {
+		await ink.editor?.controller.load(1);
+	});
+	await act(() => ink.editor?.setMode("pen"));
+	const original = ink.editor;
+	let companion: typeof original = null;
+	function Translated() {
+		companion = usePdfInk({
+			vaultPath: "/vault",
+			paperRelPath: "papers/shared-pane",
+			enabled: true,
+			editable: true,
+			isActive: true,
+			sharedEditor: true,
+			controlsMode: false,
+		}).editor;
+		return null;
+	}
+	const node = document.createElement("div");
+	document.body.append(node);
+	const companionRoot = createRoot(node);
+	await act(() => companionRoot.render(createElement(Translated)));
+	expect(companion).toBe(original);
+	expect(companion?.getState().mode).toBe("pen");
+	await act(() => companionRoot.unmount());
+	node.remove();
+});
+
 it("shares saved ink with a read-only embed without sharing or disarming reader tools", async () => {
 	await act(() => ink.editor?.setMode("pen"));
 	const active = ink.editor;

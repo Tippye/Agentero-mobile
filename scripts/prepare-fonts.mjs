@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const out = path.join(root, "src-tauri/fonts");
 // Mirrors the pinned revision in src/lib/pdf/reflow/fonts.ts.
-const revision = "1eeeec2a63b05fe6fe7a1f45f0955a8fa98793c4";
+const revision = "b956e9333a4e53ed9753c296877af6c7074d7b23";
 const name = "SourceHanSerifCN-Regular.ttf";
 const sha256 =
 	"8ba5ec09db04b1d1599edeff3fb5627ca11eaaf85e339e5c32684cb94e806993";
@@ -26,9 +26,9 @@ const stamp = path.join(out, "version.txt");
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const version = `${revision}:${name}:${sha256}`;
 const sources = [
+	`https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/${revision}/fonts/${name}`,
 	`https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/${revision}/fonts/${name}`,
 	`https://cdn.jsdelivr.net/gh/funstory-ai/BabelDOC-Assets@${revision}/fonts/${name}`,
-	`https://fastly.jsdelivr.net/gh/funstory-ai/BabelDOC-Assets@${revision}/fonts/${name}`,
 ];
 
 function verify() {

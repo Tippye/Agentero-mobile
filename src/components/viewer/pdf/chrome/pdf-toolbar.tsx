@@ -1,4 +1,4 @@
-import type { PdfEngine } from "@embedpdf/models";
+﻿import type { PdfEngine } from "@embedpdf/models";
 import {
 	Columns2,
 	Highlighter,
@@ -40,11 +40,11 @@ type PdfToolbarProps = {
 	/** Partial-translation entry; hidden while the meter is running. */
 	layoutTranslatePartial?: PdfLayoutTranslatePartial | null;
 	/**
-	 * 0–1 fill. Stays under full while the reflow preview is still blank.
+	 * 0鈥? fill. Stays under full while the reflow preview is still blank.
 	 * Null before the total is known.
 	 */
 	layoutTranslateProgress?: number | null;
-	/** Pages done ÷ pages in the current stage, when the stage has a count. */
+	/** Pages done 梅 pages in the current stage, when the stage has a count. */
 	layoutTranslatePageCounts?: { done: number; total: number } | null;
 	onToggleLayoutTranslate?: () => void;
 	/** Desktop dual-pane layout control: open / close the translation pane. */
@@ -86,9 +86,13 @@ export const PdfToolbar = memo(function PdfToolbar({
 	importBusy = false,
 }: PdfToolbarProps) {
 	const { t } = useTranslation("viewer");
-	// 原文 has no translation task, so none of its progress / failure /
-	// export surfaces belong there. They appear only in 译文 and 对照.
+	// 鍘熸枃 has no translation task, so none of its progress / failure /
+	// export surfaces belong there. They appear only in 璇戞枃 and 瀵圭収.
 	const translationView = viewMode !== "original";
+	// 对照 splits the translation pane out beside the reader, and that pane owns
+	// the job: its capsule shows the stage, the page count and the export menu.
+	// Keeping a second meter here restarted at 0% beside the pane's real one.
+	const jobChrome = translationView && viewMode !== "dual";
 
 	const translateMeter = useTranslateMeter({
 		layoutTranslateRunning,
@@ -113,16 +117,17 @@ export const PdfToolbar = memo(function PdfToolbar({
 	const translateAriaLabel = layoutTranslateWaiting
 		? t("pdf.layoutTranslate.waiting")
 		: t("pdf.layoutTranslate.stop");
+	const meterActive = meterOpen && jobChrome;
 	const asideClass = cn(
 		"grid min-w-0 transition-[grid-template-columns,opacity] duration-300 ease-out motion-reduce:transition-none",
-		meterOpen
+		meterActive
 			? "pointer-events-none grid-cols-[0fr] opacity-0"
 			: "grid-cols-[1fr] opacity-100",
 	);
 
 	return (
 		<div className="pointer-events-none absolute top-2 right-3 z-20 flex origin-top-right items-center gap-1">
-			{meterOpen && translationView ? (
+			{meterOpen && jobChrome ? (
 				<span
 					role="progressbar"
 					className="sr-only"
@@ -144,9 +149,7 @@ export const PdfToolbar = memo(function PdfToolbar({
 				>
 					{/* Partial-translation warning sits first: it is a document-level
 					    state, so it stays put when the translate button expands. */}
-					{translationView &&
-					!isRemotePaper &&
-					layoutTranslatePartial?.visible ? (
+					{jobChrome && !isRemotePaper && layoutTranslatePartial?.visible ? (
 						<div className="shrink-0">
 							<PdfTranslatePartialButton partial={layoutTranslatePartial} />
 						</div>
@@ -195,7 +198,7 @@ export const PdfToolbar = memo(function PdfToolbar({
 							</TooltipContent>
 						</Tooltip>
 					) : null}
-					{translationView && !isRemotePaper ? (
+					{jobChrome && !isRemotePaper ? (
 						/* Progress sits left of the view switch so the reader can still
 						   change views while the translation runs. The running surface is
 						   a readout, not a control: only the trailing square cancels. */
@@ -203,13 +206,15 @@ export const PdfToolbar = memo(function PdfToolbar({
 							data-translate-meter
 							inert={!meterOpen}
 							className={cn(
-								"relative flex h-6 shrink-0 items-center justify-end overflow-hidden transition-[width,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+								"grid min-w-0 shrink-0 transition-[grid-template-columns,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
 								meterOpen
-									? "w-44 rounded-lg opacity-100"
-									: "pointer-events-none w-0 opacity-0",
+									? "grid-cols-[1fr] opacity-100"
+									: "pointer-events-none grid-cols-[0fr] opacity-0",
 							)}
 						>
-							{meterOpen ? (
+							<div className="min-w-0 overflow-hidden">
+								{/* Stays mounted while collapsed so the grid track can
+								    animate both ways; `inert` keeps it untabbable. */}
 								<PdfTranslateMeterReadout
 									stage={meterStage}
 									pagesLabel={meterPagesLabel}
@@ -223,7 +228,7 @@ export const PdfToolbar = memo(function PdfToolbar({
 									onStop={() => onToggleLayoutTranslate?.()}
 									stopDisabled={!engine}
 								/>
-							) : null}
+							</div>
 						</div>
 					) : null}
 					{!isRemotePaper && onToggleLayoutTranslate ? (
@@ -265,7 +270,7 @@ export const PdfToolbar = memo(function PdfToolbar({
 						</div>
 					) : null}
 					{!isRemotePaper && onSmartHighlight ? (
-						<div className={asideClass} inert={meterOpen}>
+						<div className={asideClass} inert={meterActive}>
 							<div className="min-w-0 overflow-hidden">
 								<Tooltip>
 									<TooltipTrigger asChild>

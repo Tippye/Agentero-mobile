@@ -1,6 +1,6 @@
 import type { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
 import { useInteractionManagerCapability } from "@embedpdf/plugin-interaction-manager/react";
-import { useSelectionCapability } from "@embedpdf/plugin-selection/react";
+import type { useSelectionCapability } from "@embedpdf/plugin-selection/react";
 import {
 	useViewportCapability,
 	useViewportElement,
@@ -27,6 +27,7 @@ export function InkInputBridge({
 	documentId,
 	enabled,
 	docCapRef,
+	selection: suppliedSelection,
 	onLongPressNote,
 }: {
 	editor: InkEditor | null;
@@ -35,6 +36,8 @@ export function InkInputBridge({
 	docCapRef: RefObject<
 		ReturnType<typeof useDocumentManagerCapability>["provides"]
 	>;
+	/** Missing in the slim translated companion runtime. */
+	selection?: ReturnType<typeof useSelectionCapability>["provides"] | null;
 	onLongPressNote?: (
 		page: InkInputPage,
 		point: InkPosition,
@@ -45,7 +48,7 @@ export function InkInputBridge({
 	const viewportRef = useViewportElement();
 	const { provides: viewport } = useViewportCapability();
 	const { provides: zoom } = useZoomCapability();
-	const { provides: selection } = useSelectionCapability();
+	const selection = suppliedSelection;
 	const { provides: interaction } = useInteractionManagerCapability();
 	const inertiaWindow = useSettings((s) => s.pdfInertiaVelocityWindowMs);
 	const inertiaFriction = useSettings((s) => s.pdfInertiaFriction);

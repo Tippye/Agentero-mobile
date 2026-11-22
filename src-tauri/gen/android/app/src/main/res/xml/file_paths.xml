@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-  <external-path name="my_images" path="." />
-  <cache-path name="my_cache_images" path="." />
+  <!-- Wry's native HTML camera capture stores temporary photos here. -->
+  <external-files-path name="camera_images" path="Pictures/" />
+  <!-- Outbound copies must be staged explicitly; never map the whole cache. -->
+  <cache-path name="export_files" path="exports/" />
 </paths>

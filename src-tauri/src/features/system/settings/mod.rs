@@ -80,6 +80,11 @@ pub struct AppSettings {
     /// EasyScholar key for journal ranking and impact-factor lookups.
     #[serde(default)]
     pub easy_scholar_key: String,
+    /// EasyScholar rank systems the Library table and Paper Info may display,
+    /// in canonical order. Every supported system is on by default; an empty
+    /// list hides the metrics without clearing the stored `#easyscholar:` tags.
+    #[serde(default = "default_easy_scholar_ranks")]
+    pub easy_scholar_ranks: Vec<String>,
     /// 知乎开放平台 Access Secret（内置「知乎」Agent 的直答 / 检索凭证）。
     #[serde(default)]
     pub zhihu_access_secret: String,
@@ -100,6 +105,16 @@ pub struct AppSettings {
     /// `subdomain` (Astraeus-style host mapping). Empty/unknown means `auto`.
     #[serde(default)]
     pub institution_proxy_type: String,
+    /// Cookie captured by the OpenReview verification window (`openreview.*`
+    /// cookies, notably the short-lived `clearanceToken`). Empty = verified by
+    /// nobody yet. Redacted to the frontend and attached only to OpenReview
+    /// hosts by the download layer.
+    #[serde(default)]
+    pub openreview_cookie: String,
+    /// Unix seconds when the captured OpenReview credential expires; `0` when
+    /// the cookie carries no readable expiry. Drives the Settings status dot.
+    #[serde(default)]
+    pub openreview_cookie_expires_at: i64,
     #[serde(default = "default_paper_tree_label_mode")]
     pub paper_tree_label_mode: String,
     #[serde(default = "default_paper_tree_sort_mode")]
@@ -172,10 +187,15 @@ pub struct AppSettings {
     pub mcp_enabled: bool,
     #[serde(default = "default_mcp_port")]
     pub mcp_port: u16,
-    /// Opt-in: expose paper full text (`paper_text_get`) through the MCP
-    /// server. Default off — external clients only see metadata and NOTES.
+    /// Allow external MCP clients to read complete paper text.
     #[serde(default)]
     pub mcp_expose_paper_text: bool,
+    /// Allow external MCP clients to modify the Vault.
+    #[serde(default)]
+    pub mcp_allow_write: bool,
+    /// Allow external MCP clients to use operations that contact online services.
+    #[serde(default)]
+    pub mcp_allow_online: bool,
     /// OpenAI Secure MCP Tunnel id (`tunnel_` + 32 hex) for the built-in
     /// `tunnel-client` supervisor. Empty = never configured.
     #[serde(default)]
@@ -566,12 +586,15 @@ impl Default for AppSettings {
         Self {
             shortcut_overrides: HashMap::new(),
             easy_scholar_key: String::new(),
+            easy_scholar_ranks: default_easy_scholar_ranks(),
             zhihu_access_secret: String::new(),
             network_proxy_enabled: false,
             network_proxy_url: default_network_proxy_url(),
             institution_proxy_prefix: String::new(),
             institution_proxy_cookie: String::new(),
             institution_proxy_type: "auto".to_string(),
+            openreview_cookie: String::new(),
+            openreview_cookie_expires_at: 0,
             paper_tree_label_mode: default_paper_tree_label_mode(),
             paper_tree_sort_mode: default_paper_tree_sort_mode(),
             paper_note_mode: default_paper_note_mode(),
@@ -586,7 +609,7 @@ impl Default for AppSettings {
             pdf_inertia_friction: default_pdf_inertia_friction(),
             pdf_inertia_min_velocity: default_pdf_inertia_min_velocity(),
             pdf_inertia_speed_scale: default_pdf_inertia_speed_scale(),
-            vim_mode: true,
+            vim_mode: false,
             hint_mode_enabled: true,
             sound_enabled: true,
             pdf_spread_mode: default_pdf_spread_mode(),
@@ -596,6 +619,8 @@ impl Default for AppSettings {
             connector_port: default_connector_port(),
             mcp_enabled: false,
             mcp_expose_paper_text: false,
+            mcp_allow_write: false,
+            mcp_allow_online: false,
             mcp_port: default_mcp_port(),
             mcp_tunnel_id: String::new(),
             mcp_tunnel_api_key: String::new(),
@@ -638,6 +663,30 @@ fn default_true() -> bool {
 }
 fn default_network_proxy_url() -> String {
     DEFAULT_NETWORK_PROXY_URL.to_string()
+}
+/// Selectable EasyScholar rank-system ids. Keep in sync with the renderer
+/// registry (`src/lib/paper/easy-scholar-ranks.ts`) and the Host tag projection
+/// in `features/paper/scholar_api/sources/easy_scholar.rs`.
+pub const EASY_SCHOLAR_RANK_IDS: &[&str] = &[
+    "if", "if5", "jci", "sci", "ssci", "eii", "cssci", "pku", "ccf", "fms", "utd24",
+];
+fn default_easy_scholar_ranks() -> Vec<String> {
+    EASY_SCHOLAR_RANK_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect()
+}
+/// Trim, drop unknown ids, and dedupe while keeping the configured order.
+/// An empty input stays empty: the user chose to hide every rank metric.
+fn normalize_easy_scholar_ranks(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw_id in raw {
+        let id = raw_id.trim().to_ascii_lowercase();
+        if EASY_SCHOLAR_RANK_IDS.contains(&id.as_str()) && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 fn default_decision_provider() -> String {
     "jev".to_string()
@@ -755,7 +804,7 @@ fn default_ai_response_language() -> String {
     "auto".into()
 }
 fn default_translate_provider() -> String {
-    "tencenttransmart".into()
+    "indextranslate2b".into()
 }
 fn default_connector_port() -> u16 {
     DEFAULT_CONNECTOR_PORT
@@ -861,6 +910,17 @@ impl AppSettingsStore {
 
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    pub(crate) fn mcp_permissions(&self) -> agentero_mcp::Permissions {
+        self.inner
+            .lock()
+            .map(|settings| agentero_mcp::Permissions {
+                write: settings.mcp_allow_write,
+                online: settings.mcp_allow_online,
+                full_text: settings.mcp_expose_paper_text,
+            })
+            .unwrap_or_default()
     }
 
     pub fn get(&self) -> Result<SettingsGetResult, AppError> {
@@ -1230,6 +1290,45 @@ impl AppSettingsStore {
         Ok(Some(redacted))
     }
 
+    /// Stored OpenReview verification cookie. `None` when the user has not
+    /// completed the browser check yet.
+    pub fn openreview_cookie(&self) -> Option<String> {
+        let guard = self.inner.lock().ok()?;
+        let cookie = guard.openreview_cookie.trim();
+        if cookie.is_empty() || is_translate_api_key_mask(cookie) {
+            None
+        } else {
+            Some(cookie.to_string())
+        }
+    }
+
+    /// Persist the credential captured by the OpenReview verification window
+    /// without overwriting settings another window changed meanwhile. Mirrors
+    /// [`Self::update_institution_proxy_cookie`]: persist, sync the process-wide
+    /// download credential, then notify settings listeners.
+    pub fn update_openreview_auth(
+        &self,
+        cookie: String,
+        expires_at: i64,
+    ) -> Result<Option<AppSettings>, AppError> {
+        let cookie = cookie.trim().to_string();
+        let redacted = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| AppError::message("settings lock poisoned"))?;
+            let mut next = guard.clone();
+            next.openreview_cookie = cookie.clone();
+            next.openreview_cookie_expires_at = expires_at.max(0);
+            persist(&self.path, &next)?;
+            *guard = next.clone();
+            redact_secrets(next)
+        };
+        agentero_core::features::paper::import::openreview::set_openreview_cookie(&cookie);
+        self.notify(&redacted);
+        Ok(Some(redacted))
+    }
+
     /// Resolve the configured EasyScholar key. Returns None when unset or when
     /// the stored value is a UI mask (`*`-only), so probes never send masks.
     pub fn easy_scholar_key(&self) -> Option<String> {
@@ -1342,6 +1441,9 @@ fn redact_secrets(mut settings: AppSettings) -> AppSettings {
     if !settings.decision.api_key.trim().is_empty() {
         settings.decision.api_key = mask_translate_api_key(&settings.decision.api_key);
     }
+    if !settings.openreview_cookie.trim().is_empty() {
+        settings.openreview_cookie = mask_translate_api_key(&settings.openreview_cookie);
+    }
     settings
 }
 
@@ -1381,6 +1483,14 @@ fn merge_secrets(incoming: &mut AppSettings, previous: &AppSettings) {
     if is_translate_api_key_mask(&incoming.decision.api_key) {
         incoming.decision.api_key = previous.decision.api_key.clone();
     }
+    if is_translate_api_key_mask(&incoming.openreview_cookie) {
+        incoming.openreview_cookie = previous.openreview_cookie.clone();
+        // The expiry travels with the cookie so the status cannot claim a
+        // fresh credential while the old one is still in place.
+        incoming.openreview_cookie_expires_at = previous.openreview_cookie_expires_at;
+    } else if incoming.openreview_cookie.trim().is_empty() {
+        incoming.openreview_cookie_expires_at = 0;
+    }
 }
 
 /// Cap a translate template and drop placeholders other than
@@ -1406,6 +1516,7 @@ fn normalize(s: &mut AppSettings) {
         .to_ascii_lowercase();
     s.mcp_tunnel_api_key = s.mcp_tunnel_api_key.trim().to_string();
     s.easy_scholar_key = s.easy_scholar_key.trim().to_string();
+    s.easy_scholar_ranks = normalize_easy_scholar_ranks(&s.easy_scholar_ranks);
     s.zhihu_access_secret = s.zhihu_access_secret.trim().to_string();
     s.decision.api_key = s.decision.api_key.trim().to_string();
     let provider = s.decision.provider.trim().to_ascii_lowercase();
@@ -1475,6 +1586,13 @@ fn normalize(s: &mut AppSettings) {
         &s.institution_proxy_prefix,
         &s.institution_proxy_cookie,
     );
+    s.openreview_cookie = s.openreview_cookie.trim().to_string();
+    s.openreview_cookie_expires_at = if s.openreview_cookie.is_empty() {
+        0
+    } else {
+        s.openreview_cookie_expires_at.max(0)
+    };
+    agentero_core::features::paper::import::openreview::set_openreview_cookie(&s.openreview_cookie);
 
     const LABEL_MODES: &[&str] = &["title-author", "title", "author-year-title", "folder"];
     if !LABEL_MODES.contains(&s.paper_tree_label_mode.as_str()) {
@@ -1802,6 +1920,40 @@ mod tests {
     }
 
     #[test]
+    fn captured_openreview_cookie_is_masked_but_kept_across_echoes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppSettingsStore {
+            inner: Mutex::new(AppSettings {
+                openreview_cookie: "old=1".into(),
+                openreview_cookie_expires_at: 1,
+                theme: "dark".into(),
+                ..AppSettings::default()
+            }),
+            path: dir.path().join("settings.json"),
+            listeners: Mutex::new(Vec::new()),
+        };
+        let snapshot = store
+            .update_openreview_auth("openreview.clearanceToken=fresh".into(), 1_800_000_000)
+            .unwrap()
+            .expect("settings snapshot");
+        // The WebView only sees the mask; the durable file keeps the cookie.
+        assert!(is_translate_api_key_mask(&snapshot.openreview_cookie));
+        assert_eq!(snapshot.openreview_cookie_expires_at, 1_800_000_000);
+        let (saved, _) = read_file(&store.path);
+        assert_eq!(saved.openreview_cookie, "openreview.clearanceToken=fresh");
+        assert_eq!(saved.openreview_cookie_expires_at, 1_800_000_000);
+        assert_eq!(saved.theme, "dark");
+
+        // A later settings write echoes the mask; the real cookie must survive.
+        let mut echoed = saved.clone();
+        echoed.openreview_cookie = mask_translate_api_key("openreview.clearanceToken=fresh");
+        store.set(echoed).unwrap();
+        let (saved, _) = read_file(&store.path);
+        assert_eq!(saved.openreview_cookie, "openreview.clearanceToken=fresh");
+        assert_eq!(saved.openreview_cookie_expires_at, 1_800_000_000);
+    }
+
+    #[test]
     fn roundtrip_defaults() {
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1817,14 +1969,14 @@ mod tests {
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.auto_update_internal_links, "ask");
         assert_eq!(loaded.paper_note_mode, "standard");
-        assert!(loaded.vim_mode);
+        assert!(!loaded.vim_mode);
         assert!(!loaded.onboarding_done);
         assert!(!loaded.feature_tour_done);
         // Persisted wire shape is camelCase: the settings window sends
         // `vimMode` and expects it back, otherwise the switch snaps back on.
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["vimMode"], serde_json::json!(true));
+        assert_eq!(json["vimMode"], serde_json::json!(false));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2650,7 +2802,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         let (s, existed) = read_file(&path);
         assert!(!existed);
-        assert_eq!(s.translate.provider, "tencenttransmart");
+        assert_eq!(s.translate.provider, "indextranslate2b");
         assert_eq!(s.layout.parser_backend, "local");
         assert_eq!(s.layout.backend, "local");
 
@@ -2717,7 +2869,7 @@ mod tests {
             }
             let (settings, existed) = read_file(&path);
             assert_eq!(existed, raw.is_some());
-            assert_eq!(settings.translate.provider, "tencenttransmart");
+            assert_eq!(settings.translate.provider, "indextranslate2b");
             persist(&path, &settings).unwrap();
             let (reloaded, existed) = read_file(&path);
             assert!(existed);

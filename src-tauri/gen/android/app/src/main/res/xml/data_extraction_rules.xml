@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <!-- Keystore keys cannot move with these encrypted preferences. -->
+        <exclude domain="sharedpref" path="keyring-agentero-mobile-v2.xml" />
+        <!-- Keep legacy pairing credentials out of backups during migration. -->
+        <exclude domain="root" path="bridge/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="keyring-agentero-mobile-v2.xml" />
+        <exclude domain="root" path="bridge/" />
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agentero_bg_agent_channel">远程连接</string>
+    <string name="agentero_bg_sync_channel">同步与传输</string>
+    <string name="agentero_bg_agent_title">远程连接运行中</string>
+    <string name="agentero_bg_sync_title">同步或传输运行中</string>
+    <string name="agentero_bg_public_title">Agentero 后台活动</string>
+    <string name="agentero_bg_running">后台活动正在运行。</string>
+    <string name="agentero_bg_stop">停止后台活动</string>
+</resources>
