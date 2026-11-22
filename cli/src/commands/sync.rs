@@ -17,129 +17,50 @@ use agentero_core::features::sync::config::{
 use agentero_core::features::sync::lock::SyncLock;
 use agentero_core::features::sync::snapshot::SyncScope;
 use agentero_core::features::sync::{engine, local};
-use clap::{Args, Subcommand, ValueEnum};
+
 use serde_json::{json, Value};
-use std::io::{stdin, Read};
+
 use std::path::Path;
 
-const ENV_ACCESS_KEY: &str = "AGENTERO_SYNC_ACCESS_KEY";
-const ENV_SECRET_KEY: &str = "AGENTERO_SYNC_SECRET_KEY";
-const ENV_WEBDAV_PASSWORD: &str = "AGENTERO_SYNC_WEBDAV_PASSWORD";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackendKind {
     S3,
     Webdav,
     Git,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum OverwriteDirectionKind {
-    RemoteToLocal,
-    LocalToRemote,
-}
-
-#[derive(Debug, Subcommand)]
-#[allow(clippy::large_enum_variant)]
-pub enum SyncCmd {
-    /// Show the vault's sync binding and last-pass info.
-    Status,
-    /// Bind the vault to an S3/WebDAV store (validate + connection test first).
-    Configure(ConfigureArgs),
-    /// Re-test the stored binding (credentials, bucket, conditional writes).
-    Test,
-    /// Run one bidirectional sync pass now.
-    Now {
-        /// Print progress lines to stderr while the pass runs (text mode
-        /// prints them by default; stdout stays machine-readable either way).
-        #[arg(long = "progress")]
-        progress: bool,
-    },
-    /// Remove the binding and local sync state (remote data stays untouched).
-    Disconnect,
-    /// Force one side to win. `remote-to-local` mirrors the remote HEAD onto
-    /// disk and discards divergent local files; `local-to-remote` publishes
-    /// the local scan as the new HEAD. Shows an impact preview and asks for
-    /// confirmation (--yes / -y to skip).
-    Overwrite {
-        /// Which side wins: remote-to-local or local-to-remote.
-        #[arg(value_enum)]
-        direction: OverwriteDirectionKind,
-        /// Print progress lines to stderr while the overwrite runs.
-        #[arg(long = "progress")]
-        progress: bool,
-    },
-}
-
-#[derive(Debug, Args)]
 pub struct ConfigureArgs {
+    /// Initialize or join the experimental ordinary-PUT WebDAV journal in a dedicated directory.
+    pub webdav_journal: bool,
     /// Backend store: `s3` (default), `webdav`, or `git`.
-    #[arg(long = "backend", value_enum, default_value = "s3")]
     pub backend: BackendKind,
     /// S3-compatible endpoint, e.g. https://<account>.r2.cloudflarestorage.com
-    #[arg(long = "endpoint", value_name = "URL")]
     pub endpoint: Option<String>,
     /// S3 region (default us-east-1; R2/MinIO accept any).
-    #[arg(long = "region", value_name = "REGION")]
     pub region: Option<String>,
     /// Bucket name.
-    #[arg(long = "bucket", value_name = "NAME")]
     pub bucket: Option<String>,
     /// Optional key prefix inside the bucket (multiple vaults per bucket).
-    #[arg(long = "prefix", value_name = "PREFIX")]
     pub prefix: Option<String>,
     /// WebDAV directory URL, e.g. https://dav.jianguoyun.com/dav/agentero/
-    #[arg(long = "webdav-url", value_name = "URL")]
     pub webdav_url: Option<String>,
     /// WebDAV username.
-    #[arg(long = "webdav-username", value_name = "NAME")]
     pub webdav_username: Option<String>,
     /// Git remote URL or local path (uses the system credential helper / SSH).
-    #[arg(long = "git-remote", value_name = "URL")]
     pub git_remote: Option<String>,
     /// Git branch to sync (default main).
-    #[arg(long = "git-branch", value_name = "BRANCH")]
     pub git_branch: Option<String>,
     /// Allow a non-loopback `http://` Git remote (`true` or `false`).
     /// The token travels in cleartext; only for a trusted intranet.
-    #[arg(long = "git-allow-insecure-http", value_name = "BOOL")]
     pub git_allow_insecure_http: Option<String>,
     /// Absolute PEM CA bundle for a self-signed HTTPS Git remote.
-    #[arg(long = "git-ssl-ca", value_name = "PATH")]
     pub git_ssl_ca_info: Option<String>,
-    /// Opt in to degraded sync for WebDAV stores that ignore conditional
-    /// writes (`true` or `false`): publish lock + plain HEAD PUT. Conflict
-    /// copies and resurrected deletions are possible; every device sharing
-    /// the store must opt in separately.
-    #[arg(long = "allow-degraded-sync", value_name = "BOOL")]
-    pub allow_degraded_sync: Option<String>,
     /// Bulky asset categories to keep out of sync (comma list of
     /// pdf,source,attachments,ink,translated). Notes, sidecars and highlights
     /// always sync.
-    #[arg(long = "exclude", value_name = "LIST", value_delimiter = ',')]
     pub exclude: Vec<String>,
     /// Categories to opt in that are off by default (`translated`).
-    #[arg(long = "include", value_name = "LIST", value_delimiter = ',')]
     pub include: Vec<String>,
-    /// Read the full config JSON (camelCase, incl. secrets) from stdin.
-    /// For scripts: keeps credentials out of argv and shell history.
-    #[arg(long = "stdin")]
-    pub stdin_cfg: bool,
-}
-
-pub async fn run(cmd: SyncCmd, globals: &GlobalOpts) -> Result<Value, CliError> {
-    let vault = resolve_vault(globals)?;
-    match cmd {
-        SyncCmd::Status => status(&vault, globals),
-        SyncCmd::Configure(args) => configure(&vault, &args, globals).await,
-        SyncCmd::Test => test(&vault).await,
-        SyncCmd::Now { progress } => now(&vault, progress, globals).await,
-        SyncCmd::Disconnect => disconnect(&vault, globals),
-        SyncCmd::Overwrite {
-            direction,
-            progress,
-        } => overwrite(&vault, direction, progress, globals).await,
-    }
 }
 
 /// Resolve the `sync.json` entry for a vault dir: the desktop Host keys
@@ -163,7 +84,7 @@ fn entry_for(dir: &Path) -> (String, Option<SyncBackendConfig>) {
 fn sync_not_configured() -> CliError {
     CliError::new(
         "sync_not_configured",
-        "sync is not configured (run `agentero sync configure`)",
+        "sync is not configured (run `agentero sync connect --help`)",
         ExitCode::Business,
     )
 }
@@ -229,18 +150,11 @@ async fn configure(
     vault: &Path,
     args: &ConfigureArgs,
     globals: &GlobalOpts,
+    credentials: Option<&Value>,
 ) -> Result<Value, CliError> {
-    let _lock = SyncLock::acquire(vault)?;
+    let lock = SyncLock::acquire(vault)?;
     let (key, existing) = entry_for(vault);
-    let mut cfg = if args.stdin_cfg {
-        read_config_stdin()?
-    } else {
-        assemble_config(args, existing.clone(), globals)?
-    };
-    // A `*`-masked secret echoed back (e.g. a status payload pasted into
-    // stdin JSON) restores the stored value instead of overwriting it.
-    cfg.merge_mask(existing.as_ref());
-    cfg = cfg.normalized();
+    let mut cfg = assemble_config(args, existing, globals, credentials)?.normalized();
     sync_config::hydrate_agentero(&mut cfg);
     cfg.validate().map_err(|e| {
         // Non-interactive callers cannot fill a missing secret via prompt;
@@ -249,14 +163,17 @@ async fn configure(
             "sync_config_invalid",
             e.to_string(),
             json!({
-                "secrets": format!(
-                    "pass secrets via {ENV_ACCESS_KEY} / {ENV_SECRET_KEY} / {ENV_WEBDAV_PASSWORD}, a TTY prompt, or `--stdin` JSON (never argv)"
-                )
+                "secrets": "use --credentials-input FILE (or - for stdin)"
             }),
             ExitCode::Business,
         )
     })?;
-    cfg.conditional_writes = engine::test_connection(vault, &cfg).await?;
+    if args.webdav_journal {
+        engine::configure_webdav_journal(&lock, &cfg).await?;
+        cfg.conditional_writes = false;
+    } else {
+        cfg.conditional_writes = engine::test_connection(vault, &cfg).await?;
+    }
     sync_config::set(&key, cfg.clone())?;
 
     let style = globals.style;
@@ -281,8 +198,10 @@ async fn configure(
             style.key("conditional writes"),
             if cfg.conditional_writes {
                 "yes"
-            } else if cfg.allow_degraded_sync {
-                "no (degraded sync enabled)"
+            } else if args.webdav_journal {
+                "unused (WebDAV journal)"
+            } else if cfg.backend == SyncBackendKind::Webdav {
+                "no (requires a WebDAV journal for sync)"
             } else {
                 "no (sync blocked)"
             }
@@ -292,14 +211,64 @@ async fn configure(
     Ok(v)
 }
 
+mod credentials;
+
+fn stored_credentials(cfg: &SyncBackendConfig) -> Result<Option<Value>, CliError> {
+    let (backend, target, identity) = match cfg.backend {
+        SyncBackendKind::S3 => ("s3", cfg.endpoint.as_str(), cfg.bucket.as_str()),
+        SyncBackendKind::Webdav => (
+            "webdav",
+            cfg.webdav_url.as_str(),
+            cfg.webdav_username.as_str(),
+        ),
+        _ => return Ok(None),
+    };
+    credentials::read(backend, target, identity)
+        .map_err(|_| CliError::usage("invalid sync credential JSON in the system credential store"))
+}
+
 /// Build the config from flags on top of the existing binding (if any);
-/// secrets come from the environment or a TTY prompt, never from argv.
+/// Resolve secrets from explicit input, the OS store, a saved binding, or a TTY.
 fn assemble_config(
     args: &ConfigureArgs,
     existing: Option<SyncBackendConfig>,
     globals: &GlobalOpts,
+    credentials: Option<&Value>,
 ) -> Result<SyncBackendConfig, CliError> {
-    let mut cfg = existing.unwrap_or_default();
+    let region = args.region.as_deref().unwrap_or("us-east-1");
+    let default_endpoint = format!(
+        "https://s3.{region}.{}",
+        if region.starts_with("cn-") {
+            "amazonaws.com.cn"
+        } else {
+            "amazonaws.com"
+        }
+    );
+    let endpoint = args
+        .endpoint
+        .as_deref()
+        .unwrap_or(&default_endpoint)
+        .trim_end_matches('/');
+    let reuse = existing
+        .as_ref()
+        .is_some_and(|previous| match args.backend {
+            BackendKind::S3 => {
+                previous.backend == SyncBackendKind::S3
+                    && endpoint == previous.endpoint.trim_end_matches('/')
+                    && args.bucket.as_deref() == Some(&previous.bucket)
+            }
+            BackendKind::Webdav => {
+                previous.backend == SyncBackendKind::Webdav
+                    && args.webdav_url.as_deref().map(|x| x.trim_end_matches('/'))
+                        == Some(previous.webdav_url.trim_end_matches('/'))
+                    && args
+                        .webdav_username
+                        .as_ref()
+                        .is_none_or(|u| u == &previous.webdav_username)
+            }
+            BackendKind::Git => previous.backend == SyncBackendKind::Git,
+        });
+    let mut cfg = existing.filter(|_| reuse).unwrap_or_default();
     cfg.backend = match args.backend {
         BackendKind::S3 => SyncBackendKind::S3,
         BackendKind::Webdav => SyncBackendKind::Webdav,
@@ -310,6 +279,12 @@ fn assemble_config(
     }
     if let Some(v) = &args.region {
         cfg.region = v.clone();
+    }
+    if matches!(args.backend, BackendKind::S3) {
+        cfg.endpoint = endpoint.to_owned();
+    }
+    if matches!(args.backend, BackendKind::S3) && !reuse && args.endpoint.is_some() {
+        cfg.force_path_style = true;
     }
     if let Some(v) = &args.bucket {
         cfg.bucket = v.clone();
@@ -332,20 +307,41 @@ fn assemble_config(
     if let Some(v) = &args.git_allow_insecure_http {
         cfg.git_allow_insecure_http = parse_bool_flag("git-allow-insecure-http", v)?;
     }
-    if let Some(v) = &args.allow_degraded_sync {
-        cfg.allow_degraded_sync = parse_bool_flag("allow-degraded-sync", v)?;
-    }
     if let Some(v) = &args.git_ssl_ca_info {
         cfg.git_ssl_ca_info = v.clone();
     }
-    if let Some(v) = env_non_empty(ENV_ACCESS_KEY) {
-        cfg.access_key = v;
-    }
-    if let Some(v) = env_non_empty(ENV_SECRET_KEY) {
-        cfg.secret_key = v;
-    }
-    if let Some(v) = env_non_empty(ENV_WEBDAV_PASSWORD) {
-        cfg.webdav_password = v;
+    let from_store = if credentials.is_none() {
+        stored_credentials(&cfg)?
+    } else {
+        None
+    };
+    if let Some(credentials) = credentials.or(from_store.as_ref()) {
+        let field = |key: &str| {
+            credentials
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| CliError::usage(format!("missing credential field {key}")))
+        };
+        match args.backend {
+            BackendKind::S3 => {
+                cfg.access_key = field("access_key")?;
+                cfg.secret_key = field("secret_key")?;
+                cfg.session_token = credentials
+                    .get("session_token")
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| CliError::usage("session_token must be a string"))
+                    })
+                    .transpose()?;
+            }
+            BackendKind::Webdav => cfg.webdav_password = field("password")?,
+            BackendKind::Git => {
+                return Err(CliError::usage("git uses the system credential helper"))
+            }
+        }
     }
     if !args.exclude.is_empty() || !args.include.is_empty() {
         cfg.scope = scope_from_lists(&args.include, &args.exclude)?;
@@ -353,12 +349,13 @@ fn assemble_config(
 
     // Prompt for missing secrets only on an interactive TTY; `--json` and
     // pipes never prompt — the gap then surfaces as a validate() error that
-    // points at the env / stdin options.
+    // points at the supported credential inputs.
     if prompt::allows_interactive(globals) {
         match cfg.backend {
             SyncBackendKind::S3 => {
                 if cfg.access_key.trim().is_empty() {
-                    cfg.access_key = inquire::Text::new("S3 access key id")
+                    cfg.access_key = inquire::Password::new("S3 access key id")
+                        .without_confirmation()
                         .prompt()
                         .map_err(prompt_failed)?;
                 }
@@ -399,13 +396,6 @@ fn parse_bool_flag(name: &str, value: &str) -> Result<bool, CliError> {
     }
 }
 
-fn env_non_empty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
 fn scope_from_lists(include: &[String], exclude: &[String]) -> Result<SyncScope, CliError> {
     let mut scope = SyncScope::default();
     let mut apply = |item: &str, enabled: bool| -> Result<(), CliError> {
@@ -432,15 +422,6 @@ fn scope_from_lists(include: &[String], exclude: &[String]) -> Result<SyncScope,
     Ok(scope)
 }
 
-fn read_config_stdin() -> Result<SyncBackendConfig, CliError> {
-    let mut raw = String::new();
-    stdin()
-        .read_to_string(&mut raw)
-        .map_err(|e| CliError::usage(format!("failed to read config from stdin: {e}")))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| CliError::usage(format!("invalid config JSON on stdin: {e}")))
-}
-
 async fn test(vault: &Path) -> Result<Value, CliError> {
     let _lock = SyncLock::acquire(vault)?;
     let (_, cfg) = entry_for(vault);
@@ -457,7 +438,8 @@ async fn now(vault: &Path, progress_flag: bool, globals: &GlobalOpts) -> Result<
     let (_, cfg) = entry_for(vault);
     let cfg = cfg.ok_or_else(sync_not_configured)?;
 
-    let show_progress = progress_flag || !matches!(globals.format, OutputFormat::Json);
+    let show_progress =
+        !globals.quiet && (progress_flag || !matches!(globals.format, OutputFormat::Json));
     let progress = move |phase: &str, current: usize, total: usize| {
         if show_progress {
             eprintln!("sync: {phase} {current}/{total}");
@@ -485,74 +467,6 @@ async fn now(vault: &Path, progress_flag: bool, globals: &GlobalOpts) -> Result<
     Ok(v)
 }
 
-async fn overwrite(
-    vault: &Path,
-    direction: OverwriteDirectionKind,
-    progress_flag: bool,
-    globals: &GlobalOpts,
-) -> Result<Value, CliError> {
-    let (_, cfg) = entry_for(vault);
-    let cfg = cfg.ok_or_else(sync_not_configured)?;
-    let direction = match direction {
-        OverwriteDirectionKind::RemoteToLocal => engine::OverwriteDirection::RemoteToLocal,
-        OverwriteDirectionKind::LocalToRemote => engine::OverwriteDirection::LocalToRemote,
-    };
-    let preview = engine::overwrite_preview(vault, &cfg, direction).await?;
-    let style = globals.style;
-    let summary = match direction {
-        engine::OverwriteDirection::RemoteToLocal => format!(
-            "remote overwrites local: delete {} local-only file(s), download/restore {} file(s) (remote version {})",
-            preview.will_delete_local, preview.will_download, preview.remote_version
-        ),
-        engine::OverwriteDirection::LocalToRemote => format!(
-            "local overwrites remote: upload {} blob(s), drop {} remote-only file(s) from the manifest (remote version {})",
-            preview.will_upload, preview.will_remove_remote, preview.remote_version
-        ),
-    };
-    eprintln!("{}", style.key(&summary));
-    let message = match direction {
-        engine::OverwriteDirection::RemoteToLocal => {
-            "Apply remote-over-local overwrite? Divergent local files are discarded without copies."
-        }
-        engine::OverwriteDirection::LocalToRemote => {
-            "Apply local-over-remote overwrite? Remote changes are superseded (old manifests stay on the store)."
-        }
-    };
-    if !prompt::confirm(globals, message, false)? {
-        return Err(CliError::needs_confirmation("overwrite cancelled"));
-    }
-    let lock = SyncLock::acquire(vault)?;
-    let show_progress = progress_flag || !matches!(globals.format, OutputFormat::Json);
-    let progress = move |phase: &str, current: usize, total: usize| {
-        if show_progress {
-            eprintln!("sync: {phase} {current}/{total}");
-        }
-    };
-    let outcome = engine::overwrite_locked(&lock, &cfg, direction, &progress).await?;
-    let mut v = serde_json::to_value(&outcome)?;
-    if let Some(obj) = v.as_object_mut() {
-        obj.insert(
-            "direction".into(),
-            json!(match direction {
-                engine::OverwriteDirection::RemoteToLocal => "remoteToLocal",
-                engine::OverwriteDirection::LocalToRemote => "localToRemote",
-            }),
-        );
-        obj.insert("preview".into(), serde_json::to_value(&preview)?);
-        let lines = vec![format!(
-            "{} version={} up={} down={} deleted-local={} removed-remote={}",
-            style.ok("overwritten"),
-            outcome.version,
-            outcome.uploaded,
-            outcome.downloaded,
-            outcome.deleted_local,
-            outcome.removed_remote,
-        )];
-        obj.insert("lines".into(), json!(lines));
-    }
-    Ok(v)
-}
-
 fn disconnect(vault: &Path, globals: &GlobalOpts) -> Result<Value, CliError> {
     let lock = SyncLock::acquire(vault)?;
     let (key, cfg) = entry_for(vault);
@@ -567,4 +481,69 @@ fn disconnect(vault: &Path, globals: &GlobalOpts) -> Result<Value, CliError> {
     }
     sync_config::disconnect(&key, &lock)?;
     Ok(json!({ "disconnected": key }))
+}
+
+pub async fn dispatch(route: &str, a: &Value, g: &GlobalOpts) -> Result<Value, CliError> {
+    use crate::dispatch::{input_text, string, strings};
+    let vault = resolve_vault(g)?;
+    let state = || -> Result<Value, CliError> {
+        let value = status(&vault, g)?;
+        let (_, cfg) = entry_for(&vault);
+        let (backend, location) = cfg
+            .as_ref()
+            .map(|c| match c.backend {
+                SyncBackendKind::S3 => ("s3".to_string(), format!("{}/{}", c.endpoint, c.bucket)),
+                SyncBackendKind::Git => ("git".to_string(), c.git_remote.clone()),
+                SyncBackendKind::Webdav => ("webdav".to_string(), c.webdav_url.clone()),
+                SyncBackendKind::Agentero => ("agentero".to_string(), c.agentero_api.clone()),
+            })
+            .unzip();
+        Ok(json!({"backend":backend,"location":location,"last_run":value["lastSyncAt"]}))
+    };
+    match route {
+        "sync status" => return state(),
+        "sync test" => {
+            test(&vault).await?;
+            return Ok(json!({"ok":true,"checks":[{"outcome":"passed","id":"connection"}]}));
+        }
+        "sync run" => {
+            let r = now(&vault, false, g).await?;
+            return Ok(
+                json!({"uploaded":r["uploaded"],"downloaded":r["downloaded"],"conflicts":r["conflictCopies"],"errors":[]}),
+            );
+        }
+        "sync disconnect" => {
+            disconnect(&vault, g)?;
+            return Ok(
+                json!({"changed":true,"preview":false,"items":[{"outcome":"disconnected"}]}),
+            );
+        }
+        _ => {}
+    }
+    let flags = ConfigureArgs {
+        backend: match route {
+            "sync connect s3" => BackendKind::S3,
+            "sync connect git" => BackendKind::Git,
+            "sync connect webdav" => BackendKind::Webdav,
+            _ => return Err(CliError::usage("unknown sync operation")),
+        },
+        webdav_journal: a["journal"] == true,
+        endpoint: string(a, "endpoint").map(str::to_owned),
+        region: string(a, "region").map(str::to_owned),
+        bucket: string(a, "bucket").map(str::to_owned),
+        prefix: string(a, "prefix").map(str::to_owned),
+        webdav_url: string(a, "url").map(str::to_owned),
+        webdav_username: string(a, "username").map(str::to_owned),
+        git_remote: string(a, "remote").map(str::to_owned),
+        git_branch: string(a, "branch").map(str::to_owned),
+        git_allow_insecure_http: a["allow_insecure_http"].as_bool().map(|v| v.to_string()),
+        git_ssl_ca_info: string(a, "ca_file").map(str::to_owned),
+        exclude: strings(a, "exclude"),
+        include: strings(a, "include"),
+    };
+    let supplied = string(a, "credentials_input")
+        .map(|p| serde_json::from_str::<Value>(&input_text(p)?).map_err(CliError::from))
+        .transpose()?;
+    configure(&vault, &flags, g, supplied.as_ref()).await?;
+    state()
 }

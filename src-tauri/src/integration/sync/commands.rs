@@ -38,6 +38,10 @@ pub struct SyncStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<String>,
     pub last_version: u64,
+    /// Divergent-edit conflicts awaiting a user decision (ask policy). Present
+    /// after a paused pass until the resolved pass publishes successfully.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_conflicts: Option<agentero_core::features::sync::conflicts::PendingConflicts>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,10 +51,6 @@ struct SyncStateEvent<'a> {
     status: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// Stable domain code of `error` (e.g. `sync_no_conditional_writes`) so
-    /// listeners can localize without matching message text.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,7 +100,7 @@ async fn attach_agentero_session(app: &AppHandle, cfg: &mut SyncBackendConfig) {
     }
 }
 
-fn vault_dir(app: &AppHandle, vault_path: &str) -> Result<PathBuf, AppError> {
+pub(super) fn vault_dir(app: &AppHandle, vault_path: &str) -> Result<PathBuf, AppError> {
     let trimmed = vault_path.trim();
     if trimmed.is_empty() || trimmed.starts_with("remote:") {
         return Err(AppError::message("sync requires a local vault"));
@@ -152,6 +152,8 @@ pub async fn sync_get_status(
         let dir = vault_dir(&app, &args.vault_path)?;
         let status = super::credentials::status(&app, args.vault_path.trim()).await?;
         let meta = local::read_meta(&dir)?;
+        let pending_conflicts =
+            agentero_core::features::sync::conflicts::read_pending(&dir)?;
         Ok::<_, AppError>(SyncStatus {
             configured: status.config.is_some(),
             config: status.config,
@@ -159,6 +161,7 @@ pub async fn sync_get_status(
             running: service.is_running(args.vault_path.trim()),
             last_sync_at: meta.last_sync_at,
             last_version: meta.last_version,
+            pending_conflicts,
         })
     };
     Ok(match inner.await {
@@ -202,6 +205,7 @@ pub async fn sync_configure(
             running: false,
             last_sync_at: meta.last_sync_at,
             last_version: meta.last_version,
+            pending_conflicts: agentero_core::features::sync::conflicts::read_pending(&dir)?,
         })
     };
     let result = inner.await;
@@ -400,7 +404,7 @@ async fn perform_sync_task(
         .await?
         .ok_or_else(|| AppError::message("sync is not configured"))?;
     attach_agentero_session(app, &mut cfg).await;
-    emit_state(app, vault_key, "syncing", None, None);
+    emit_state(app, vault_key, "syncing", None);
     let progress_app = app.clone();
     let progress_key = vault_key.to_string();
     let progress = move |phase: &str, current: usize, total: usize| {
@@ -433,17 +437,11 @@ async fn perform_sync_task(
     drop(lease);
     match result {
         Ok(outcome) => {
-            emit_state(app, vault_key, "idle", None, None);
+            emit_state(app, vault_key, "idle", None);
             Ok(outcome)
         }
         Err(e) => {
-            emit_state(
-                app,
-                vault_key,
-                "error",
-                Some(e.to_string()),
-                Some(e.code().to_string()),
-            );
+            emit_state(app, vault_key, "error", Some(e.to_string()));
             Err(e)
         }
     }
@@ -479,103 +477,69 @@ pub async fn sync_now(
     }
 }
 
-#[derive(Debug, Deserialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncOverwriteArgs {
-    pub vault_path: String,
-    pub direction: engine::OverwriteDirection,
-}
-
-/// Read-only impact preview for the manual-overwrite confirmation dialog.
-#[tauri::command]
-#[specta::specta]
-pub async fn sync_overwrite_preview(
-    app: AppHandle,
-    args: SyncOverwriteArgs,
-) -> Result<ApiResult<engine::OverwritePreview>, String> {
-    let inner = async {
-        let dir = vault_dir(&app, &args.vault_path)?;
-        let mut cfg = super::credentials::load(&app, args.vault_path.trim())
-            .await?
-            .ok_or_else(|| AppError::message("sync is not configured"))?;
-        attach_agentero_session(&app, &mut cfg).await;
-        engine::overwrite_preview(&dir, &cfg, args.direction).await
+/// True while a paused ask-policy pass still waits for a per-file choice.
+///
+/// Automatic sync consults this so it stops retrying a vault whose conflicts
+/// only the user can resolve; a manual pass keeps returning
+/// `sync_conflict_pending` so the prompt stays reachable.
+pub(super) fn has_pending_conflicts(app: &AppHandle, vault_path: &str) -> bool {
+    let Ok(dir) = vault_dir(app, vault_path) else {
+        return false;
     };
-    Ok(match inner.await {
-        Ok(preview) => ApiResult::ok(preview),
-        Err(error) => map_err(error),
-    })
+    agentero_core::features::sync::conflicts::read_pending(&dir)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
-/// Manual overwrite: `remoteToLocal` mirrors the remote HEAD onto disk
-/// (discarding divergent local content); `localToRemote` publishes the local
-/// scan as the new HEAD. The UI confirms with a preview before calling this.
+/// Persist the user's per-file conflict decisions and re-run the paused pass.
+/// The override file is durable before the pass starts; a crash mid-pass leaves
+/// it in place so the next attempt resumes the same decision.
 #[tauri::command]
 #[specta::specta]
-pub async fn sync_overwrite(
+pub async fn sync_resolve_conflicts(
     app: AppHandle,
     service: State<'_, SyncService>,
-    args: SyncOverwriteArgs,
+    args: SyncResolveConflictsArgs,
 ) -> Result<ApiResult<SyncOutcome>, String> {
     use crate::core::log_util::OpTimer;
 
     let vault_key = args.vault_path.trim().to_string();
     let op = OpTimer::start_with(
-        "sync_overwrite",
-        format!("vault={vault_key} direction={:?}", args.direction),
+        "sync_resolve_conflicts",
+        format!("vault={vault_key} resolutions={}", args.resolutions.len()),
     );
     let inner = async {
         let dir = vault_dir(&app, &vault_key)?;
-        prepare_download_policy(&dir)?;
-        let lease = service
-            .try_begin(&vault_key)
-            .ok_or_else(|| AppError::message("sync already running"))?;
-        let mut cfg = super::credentials::load(&app, &vault_key)
-            .await?
-            .ok_or_else(|| AppError::message("sync is not configured"))?;
-        attach_agentero_session(&app, &mut cfg).await;
-        emit_state(&app, &vault_key, "syncing", None, None);
-        let progress_app = app.clone();
-        let progress_key = vault_key.clone();
-        let progress = move |phase: &str, current: usize, total: usize| {
-            let _ = progress_app.emit(
-                "sync:progress",
-                SyncProgressEvent {
-                    vault_path: &progress_key,
-                    phase,
-                    current,
-                    total,
-                },
-            );
-        };
-        let result = crate::features::mobile_background::with_work(
-            &app,
-            crate::features::mobile_background::BackgroundReason::Sync,
-            async {
-                let lock = SyncLock::acquire(&dir)?;
-                engine::overwrite_locked(&lock, &cfg, args.direction, &progress).await
-            },
-        )
-        .await;
-        // Terminal event consumers immediately re-read status; release first.
-        drop(lease);
-        match &result {
-            Ok(_) => emit_state(&app, &vault_key, "idle", None, None),
-            Err(e) => emit_state(
-                &app,
-                &vault_key,
-                "error",
-                Some(e.to_string()),
-                Some(e.code().to_string()),
-            ),
+        let pending = agentero_core::features::sync::conflicts::read_pending(&dir)?
+            .ok_or_else(|| AppError::message("no pending sync conflicts to resolve"))?;
+        let mut resolutions = std::collections::BTreeMap::new();
+        for (path, resolution) in &args.resolutions {
+            if !pending.conflicts.iter().any(|c| &c.path == path) {
+                return Err(AppError::message(format!(
+                    "{path} is not a pending sync conflict"
+                )));
+            }
+            resolutions.insert(path.clone(), *resolution);
         }
-        result
+        agentero_core::features::sync::conflicts::write_overrides(
+            &dir,
+            &agentero_core::features::sync::conflicts::ConflictOverrides {
+                store_id: pending.store_id.clone(),
+                default_resolution: args.default_resolution,
+                resolutions,
+            },
+        )?;
+        perform_sync(&app, &service, &vault_key).await
     };
     match inner.await {
         Ok(outcome) => {
             op.finish_ok_extra(format!(
-                "version={} up={} down={} deletedLocal={}",
-                outcome.version, outcome.uploaded, outcome.downloaded, outcome.deleted_local
+                "version={} up={} down={} conflicts={}",
+                outcome.version,
+                outcome.uploaded,
+                outcome.downloaded,
+                outcome.conflict_copies.len()
             ));
             Ok(ApiResult::ok(outcome))
         }
@@ -584,6 +548,18 @@ pub async fn sync_overwrite(
             Ok(map_err(e))
         }
     }
+}
+
+#[derive(Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncResolveConflictsArgs {
+    pub vault_path: String,
+    /// Fallback for pending paths absent from `resolutions`.
+    pub default_resolution: agentero_core::features::sync::conflicts::ConflictResolution,
+    pub resolutions: std::collections::BTreeMap<
+        String,
+        agentero_core::features::sync::conflicts::ConflictResolution,
+    >,
 }
 
 #[derive(Debug, Deserialize, specta::Type)]
@@ -690,20 +666,13 @@ pub async fn sync_cloud_usage(
     }))
 }
 
-fn emit_state(
-    app: &AppHandle,
-    vault_path: &str,
-    status: &str,
-    error: Option<String>,
-    error_code: Option<String>,
-) {
+fn emit_state(app: &AppHandle, vault_path: &str, status: &str, error: Option<String>) {
     let _ = app.emit(
         "sync:state",
         SyncStateEvent {
             vault_path,
             status,
             error,
-            error_code,
         },
     );
 }
@@ -728,13 +697,11 @@ mod events_contract_shape_tests {
             vault_path: "/vault",
             status: "configured",
             error: Some("offline".to_string()),
-            error_code: Some("sync_unreachable".to_string()),
         };
         let mirror = MirrorSyncState {
             vault_path: "/vault".to_string(),
             status: "configured".to_string(),
             error: Some("offline".to_string()),
-            error_code: Some("sync_unreachable".to_string()),
         };
         assert_eq!(
             serde_json::to_value(&real).unwrap(),
@@ -745,13 +712,11 @@ mod events_contract_shape_tests {
             vault_path: "/vault",
             status: "disconnected",
             error: None,
-            error_code: None,
         };
         let mirror_none = MirrorSyncState {
             vault_path: "/vault".to_string(),
             status: "disconnected".to_string(),
             error: None,
-            error_code: None,
         };
         assert_eq!(
             serde_json::to_value(&real_none).unwrap(),

@@ -561,7 +561,12 @@ const CommentCard = memo(function CommentCard({
 			const current = itemRef.current;
 			if (!current.isNew || cancelledRef.current) return;
 			const target = event.target as Node | null;
-			if (!target || rootRef.current?.contains(target)) return;
+			if (
+				!target ||
+				rootRef.current?.contains(target) ||
+				editorHandleRef.current?.ownsEquationPopover(target)
+			)
+				return;
 			const text = readDraft();
 			if (!text.trim()) {
 				cancelledRef.current = true;
@@ -601,9 +606,9 @@ const CommentCard = memo(function CommentCard({
 				className={cn(
 					COMMENT_CARD_SURFACE_CLASS,
 					editing
-						? "bg-background/92 ring-2 ring-ring/50"
+						? "bg-background/92 ring-1 ring-ring"
 						: hovered
-							? "bg-background/92 ring-2 ring-primary/45"
+							? "bg-background/92 ring-1 ring-primary/60"
 							: "",
 				)}
 			>
@@ -623,7 +628,8 @@ const CommentCard = memo(function CommentCard({
 									if (
 										next &&
 										(e.currentTarget.contains(next) ||
-											rootRef.current?.contains(next))
+											rootRef.current?.contains(next) ||
+											editorHandleRef.current?.ownsEquationPopover(next))
 									) {
 										return;
 									}
@@ -632,7 +638,14 @@ const CommentCard = memo(function CommentCard({
 									// click-away until the editable has focus and focus has
 									// actually left the card.
 									if (!editorFocusedRef.current) return;
-									if (rootRef.current?.contains(document.activeElement)) return;
+									// Focus can already be in the portal without a relatedTarget.
+									const active = document.activeElement;
+									if (
+										rootRef.current?.contains(active) ||
+										editorHandleRef.current?.ownsEquationPopover(active)
+									) {
+										return;
+									}
 									if (cancelledRef.current) return;
 									const text = readDraft();
 									if (item.isNew && !text.trim()) {
@@ -686,7 +699,7 @@ const CommentCard = memo(function CommentCard({
 						<div
 							role="button"
 							tabIndex={0}
-							className="block w-full cursor-text text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+							className="block w-full cursor-text text-left outline-none focus-visible:ring-1 focus-visible:ring-ring"
 							onClick={(e) => {
 								e.stopPropagation();
 								if ((e.target as Element).closest("a, button")) return;
@@ -938,7 +951,11 @@ const SelectionCommentAffordance = memo(function SelectionCommentAffordance({
 	useEffect(() => {
 		const onPointerDown = (event: PointerEvent) => {
 			const target = event.target;
-			if (!(target instanceof Node) || rootRef.current?.contains(target)) {
+			if (
+				!(target instanceof Node) ||
+				rootRef.current?.contains(target) ||
+				editorHandleRef.current?.ownsEquationPopover(target)
+			) {
 				return;
 			}
 			if ((target as Element).closest?.("[data-pdf-chrome]")) {
@@ -970,7 +987,7 @@ const SelectionCommentAffordance = memo(function SelectionCommentAffordance({
 			data-comment-card
 			className={cn(
 				COMMENT_DRAFT_SURFACE_CLASS,
-				"z-[7] w-56 bg-background/92 ring-2 ring-ring/50",
+				"z-[7] w-56 bg-background/92 ring-1 ring-ring",
 			)}
 			style={{
 				...(inset
@@ -1004,7 +1021,19 @@ const SelectionCommentAffordance = memo(function SelectionCommentAffordance({
 						// The corner "x" owns the outcome of this click-away.
 						if (dismissingRef.current) return;
 						const next = e.relatedTarget as Node | null;
-						if (next && rootRef.current?.contains(next)) return;
+						if (
+							next &&
+							(rootRef.current?.contains(next) ||
+								editorHandleRef.current?.ownsEquationPopover(next))
+						)
+							return;
+						const active = document.activeElement;
+						if (
+							rootRef.current?.contains(active) ||
+							editorHandleRef.current?.ownsEquationPopover(active)
+						) {
+							return;
+						}
 						const text = readDraft();
 						if (text.trim()) {
 							commit(text);

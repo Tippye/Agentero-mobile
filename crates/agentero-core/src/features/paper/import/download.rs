@@ -9,7 +9,7 @@
 //! - Always try PDF; arXiv IDs also try e-print TeX; caller runs liteparse when
 //!   no TeX is available.
 
-use super::{institution_proxy, AppHandle, PaperDownloadAssetsArgs};
+use super::{institution_proxy, openreview, web_verify, AppHandle, PaperDownloadAssetsArgs};
 use crate::error::AppError;
 use crate::features::catalog::{papers, probe_paper_caps, CapsCache};
 use crate::features::paper::source::{self, SourceStatus};
@@ -330,7 +330,7 @@ pub async fn ensure_paper_assets_with_progress(
         PAPER_ASSET_TIMEOUT,
         ensure_paper_assets_impl(
             paper_dir, vault, paper_path, id, arxiv_id, pdf_url, doi, cookies, cache, progress,
-            true,
+            true, true, true,
         ),
     )
     .await
@@ -369,6 +369,8 @@ pub async fn ensure_paper_assets_with_cookies(
                 task_id: None,
             },
             false,
+            true,
+            true,
         ),
     )
     .await
@@ -405,14 +407,16 @@ async fn ensure_paper_assets_impl(
     cache: Option<&CapsCache>,
     progress: AssetProgressContext<'_>,
     retry_source: bool,
+    include_pdf: bool,
+    include_tex: bool,
 ) -> Result<AssetDownloadResult, AppError> {
     super::check_task_not_cancelled(progress.task_id)?;
     let mut out = AssetDownloadResult::default();
     fs::create_dir_all(paper_dir)?;
 
     let before = probe_paper_caps(paper_dir);
-    let need_pdf = !before.has_pdf();
-    let need_tex = !before.has_tex;
+    let need_pdf = include_pdf && !before.has_pdf();
+    let need_tex = include_tex && !before.has_tex;
     let request = source::asset_request(arxiv_id, pdf_url, None);
     let tex_arxiv_id = request.as_deref();
 
@@ -595,6 +599,29 @@ async fn fetch_pdf_assets(
             }
         }
     }
+    // PMC open-access fallback: PMC article pages answer scripted clients with
+    // a proof-of-work page, so fetch the same PDF from NCBI's public bucket.
+    // The bucket is a third party, so the page cookies stay behind.
+    if !ok {
+        if let Err(e) = super::check_task_not_cancelled(progress.task_id()) {
+            out.messages.push(format!("pdf cancelled: {e}"));
+            return out;
+        }
+        if let Some(url) = pmc_oa_pdf_url(doi, &candidates).await {
+            if !candidates.iter().any(|c| c == &url) {
+                ok = try_download_candidates_with_cookies(
+                    paper_dir,
+                    id,
+                    std::slice::from_ref(&url),
+                    &mut out,
+                    None,
+                    progress,
+                )
+                .await;
+                candidates.push(url);
+            }
+        }
+    }
     // Institution proxy fallback (EZProxy/WebVPN): rewrite the DOI target
     // through the user's proxy prefix + session cookie. Only active when the
     // host configured one; uses the user's own institution subscription.
@@ -764,7 +791,7 @@ async fn prepare_arxiv_source_with_progress(
 fn pdf_url_candidates(id: &str, arxiv_id: Option<&str>, pdf_url: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
     let mut push = |u: String| {
-        let t = u.trim().to_string();
+        let t = clean_pdf_url(&u);
         if !t.is_empty() && !out.iter().any(|x| x == &t) {
             out.push(t);
         }
@@ -796,6 +823,21 @@ fn pdf_url_candidates(id: &str, arxiv_id: Option<&str>, pdf_url: Option<&str>) -
     out
 }
 
+/// Drop feed-only cache suffixes from a stored PDF URL.
+///
+/// Papers.cool (and some aggregators) append `||md5=<hash>` — its own cache
+/// key, unrelated to the file bytes — to the link they publish:
+/// `https://aclanthology.org/2026.findings-acl.95.pdf||md5=2afd98b8…`.
+/// The suffix is not part of the resource path, so requesting the URL as-is
+/// returns 404. Strip everything from the first `||` before use.
+fn clean_pdf_url(raw: &str) -> String {
+    raw.split("||")
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// Query Unpaywall for a DOI's best open-access PDF location.
 async fn unpaywall_pdf_url(doi: &str) -> Option<String> {
     use crate::features::scholar_api::sources::unpaywall::UnpaywallApi;
@@ -808,6 +850,30 @@ async fn unpaywall_pdf_url(doi: &str) -> Option<String> {
         .await
         .ok()
         .flatten()
+}
+
+/// Resolve a PMC open-access PDF from a PMC link among the tried candidates
+/// (PubMed metadata and Unpaywall both hand out PMC article links), else from
+/// the DOI.
+async fn pmc_oa_pdf_url(doi: Option<&str>, candidates: &[String]) -> Option<String> {
+    use crate::features::scholar_api::sources::pmc::PmcOaApi;
+    use crate::features::scholar_api::traits::PdfUrlSource;
+    use crate::features::scholar_api::ApiQuery;
+
+    let doi = doi
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| ApiQuery::Doi(s.to_string()));
+    let queries = candidates
+        .iter()
+        .map(|u| ApiQuery::Url(u.clone()))
+        .chain(doi);
+    for query in queries {
+        if let Ok(Some(url)) = PmcOaApi.pdf_url(&query).await {
+            return Some(url);
+        }
+    }
+    None
 }
 
 /// Try each PDF URL in order; write on first success. Returns true when a PDF was saved.
@@ -1191,56 +1257,156 @@ pub(crate) async fn http_get_bytes_with_progress(
     super::check_task_not_cancelled(task_id)?;
     // Each attempt counts from zero: PDF falls back across candidate URLs.
     progress.restart();
-    let client = http::client_with(timeout, 10, http::BROWSER_USER_AGENT)?;
-    let mut request = client
-        .get(url)
-        .header("Accept", "application/pdf,application/octet-stream,*/*");
-    if let Some(cookie) = cookies.map(str::trim).filter(|s| !s.is_empty()) {
-        request = request.header(reqwest::header::COOKIE, cookie);
-    }
-    let mut res = request
-        .send()
-        .await
-        .map_err(|e| AppError::message(format!("download: {e}")))?;
-    super::check_task_not_cancelled(task_id)?;
-    if !res.status().is_success() {
-        return Err(AppError::message(format!("download HTTP {}", res.status())));
-    }
-    let total_bytes = res.content_length();
-    // Big artifacts on a lossy link: one TCP stream gets throttled or reset,
-    // and a reset discards every byte already received. arXiv (and most CDNs)
-    // answer `Accept-Ranges: bytes`, so fetch large bodies as parallel ranges —
-    // ~3x faster here, and each chunk retries on its own.
-    if let Some(total) = total_bytes {
-        if total >= PARALLEL_MIN_BYTES && cookies.is_none() && supports_ranges(res.headers()) {
-            drop(res);
-            let bytes = fetch_bytes_parallel(&client, url, total, progress, task_id).await?;
-            progress.finish();
-            return Ok(bytes);
+    let had_credential = openreview::cookie_header_for(url).is_some()
+        || web_verify::cookie_header_for(url).is_some();
+    // At most one interactive verification round-trip per request: a second
+    // challenge is reported instead of re-opening the window in a loop.
+    let mut verified = false;
+    loop {
+        // Verification cookies are process state, not page cookies: merge them
+        // in for the matching hosts only (OpenReview keeps its own durable
+        // credential; every other site keeps it for this session).
+        let stored =
+            openreview::cookie_header_for(url).or_else(|| web_verify::cookie_header_for(url));
+        let cookie = merge_cookie_header(cookies, stored);
+        let client = http::client_with(timeout, 10, http::BROWSER_USER_AGENT)?;
+        let mut request = client
+            .get(url)
+            .header("Accept", "application/pdf,application/octet-stream,*/*");
+        if let Some(cookie) = cookie.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            request = request.header(reqwest::header::COOKIE, cookie);
         }
-    }
-    let mut downloaded_bytes = 0_u64;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = res
-        .chunk()
-        .await
-        .map_err(|e| AppError::message(format!("download body: {e}")))?
-    {
-        if let Some(task_id) = task_id {
-            if super::is_task_cancelled(task_id) {
-                return Err(AppError::message("background task cancelled"));
+        let mut res = request
+            .send()
+            .await
+            .map_err(|e| AppError::message(format!("download: {e}")))?;
+        super::check_task_not_cancelled(task_id)?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let headers = res.headers().clone();
+            let body = res
+                .bytes()
+                .await
+                .map_err(|e| AppError::message(format!("download body: {e}")))?;
+            // Cloudflare / Turnstile answer scripted clients with an
+            // interactive wall. Ask the desktop Host to open its verification
+            // window on this URL once, then replay the request with the
+            // captured clearance cookie.
+            let challenged = openreview::looks_like_challenge(status.as_u16(), &body)
+                || web_verify::challenge_detected(status.as_u16(), &headers, &body);
+            if challenged {
+                if verified {
+                    return Err(verification_error(url, had_credential));
+                }
+                verified = true;
+                super::check_task_not_cancelled(task_id)?;
+                if web_verify::request_auth(url.to_string()).await.is_none() {
+                    return Err(verification_error(url, had_credential));
+                }
+                progress.restart();
+                continue;
+            }
+            return Err(AppError::message(format!("download HTTP {status}")));
+        }
+        let total_bytes = res.content_length();
+        // Big artifacts on a lossy link: one TCP stream gets throttled or reset,
+        // and a reset discards every byte already received. arXiv (and most CDNs)
+        // answer `Accept-Ranges: bytes`, so fetch large bodies as parallel ranges —
+        // ~3x faster here, and each chunk retries on its own.
+        if let Some(total) = total_bytes {
+            if total >= PARALLEL_MIN_BYTES && cookie.is_none() && supports_ranges(res.headers()) {
+                drop(res);
+                let bytes = fetch_bytes_parallel(&client, url, total, progress, task_id).await?;
+                progress.finish();
+                return Ok(bytes);
             }
         }
-        downloaded_bytes += chunk.len() as u64;
-        bytes.extend_from_slice(&chunk);
-        // Per-chunk emits flood the webview event loop; the aggregator
-        // throttles to percent moves / ≥100ms.
-        progress.report(downloaded_bytes, total_bytes);
+        let mut downloaded_bytes = 0_u64;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|e| AppError::message(format!("download body: {e}")))?
+        {
+            if let Some(task_id) = task_id {
+                if super::is_task_cancelled(task_id) {
+                    return Err(AppError::message("background task cancelled"));
+                }
+            }
+            downloaded_bytes += chunk.len() as u64;
+            bytes.extend_from_slice(&chunk);
+            // Per-chunk emits flood the webview event loop; the aggregator
+            // throttles to percent moves / ≥100ms.
+            progress.report(downloaded_bytes, total_bytes);
+        }
+        // Settling always lands an event, even when the throttle just swallowed
+        // the last chunk: the task bar must reach the final byte count.
+        progress.finish();
+        return Ok(bytes);
     }
-    // Settling always lands an event, even when the throttle just swallowed
-    // the last chunk: the task bar must reach the final byte count.
-    progress.finish();
-    Ok(bytes)
+}
+
+/// Merge the page/connector `Cookie` header with the stored OpenReview
+/// credential; explicit pairs win on name collisions.
+fn merge_cookie_header(explicit: Option<&str>, stored: Option<String>) -> Option<String> {
+    let Some(stored) = stored else {
+        return explicit.map(str::to_string);
+    };
+    let Some(explicit) = explicit.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Some(stored);
+    };
+    let mut names: Vec<String> = explicit
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .map(|(name, _)| name.trim().to_string())
+        .collect();
+    let mut out = explicit.to_string();
+    for pair in stored
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+    {
+        let name = pair
+            .split_once('=')
+            .map(|(name, _)| name.trim())
+            .unwrap_or(pair);
+        if names.iter().any(|known| known == name) {
+            continue;
+        }
+        names.push(name.to_string());
+        out.push_str("; ");
+        out.push_str(pair);
+    }
+    Some(out)
+}
+
+/// Readable failure for a verification wall: no valid cookie came out of the
+/// verification window (closed early, headless CLI, or expired again).
+fn verification_error(url: &str, had_credential: bool) -> AppError {
+    if openreview::is_openreview_url(url) {
+        return if had_credential {
+            AppError::domain(
+                "openreview_auth_required",
+                "OpenReview browser verification expired; open Settings → General → OpenReview, verify again, then retry the download",
+            )
+        } else {
+            AppError::domain(
+                "openreview_auth_required",
+                "OpenReview requires browser verification; open Settings → General → OpenReview, complete the check, then retry the download",
+            )
+        };
+    }
+    if had_credential {
+        AppError::domain(
+            "site_verification_required",
+            "The site's browser verification expired; retry the download and complete the verification window",
+        )
+    } else {
+        AppError::domain(
+            "site_verification_required",
+            "The site requires browser verification; retry the download and complete the verification window",
+        )
+    }
 }
 
 fn supports_ranges(headers: &reqwest::header::HeaderMap) -> bool {
@@ -1440,12 +1606,158 @@ fn safe_filename(id: &str, ext: &str) -> String {
     format!("{base}.{ext}")
 }
 
+mod managed;
+
+/// Fetch selected assets in staging, then publish only new or unmodified managed files.
+pub async fn fetch_selected_assets(
+    vault: &Path,
+    paper: &crate::features::catalog::papers::PaperRecord,
+    pdf: bool,
+    tex: bool,
+    retry: bool,
+) -> Result<AssetDownloadResult, AppError> {
+    let (dir, rel) = crate::fs::resolve_paper_dir(vault, &paper.path)?;
+    if !dir.canonicalize()?.starts_with(vault.canonicalize()?) || dir.join("source").is_symlink() {
+        return Err(AppError::domain(
+            "scope_denied",
+            "download destination escapes the paper directory",
+        ));
+    }
+    let before = probe_paper_caps(&dir);
+    if retry && pdf {
+        if let Some(path) = before.pdf_path.as_ref() {
+            managed::guarded(&dir, path)?;
+        }
+    }
+    if retry && tex && before.has_tex {
+        if let Some(tex) = source::read_tex(&dir) {
+            managed::guarded(&dir, &tex.root)?;
+        }
+    }
+    let need_pdf = pdf && (retry || !before.has_pdf());
+    let need_tex = tex && (retry || !before.has_tex);
+    if !need_pdf && !need_tex {
+        return Ok(AssetDownloadResult {
+            pdf: before.has_pdf(),
+            tex: before.has_tex,
+            paper_md: before.has_paper_md,
+            ..Default::default()
+        });
+    }
+    let stage = tempfile::Builder::new()
+        .prefix(".agentero-source-")
+        .tempdir_in(&dir)?;
+    if !need_pdf && need_tex {
+        if let Some(pdf) = before.pdf_path.as_ref() {
+            let dest = stage.path().join(
+                pdf.file_name()
+                    .ok_or_else(|| AppError::message("PDF has no file name"))?,
+            );
+            if fs::hard_link(pdf, &dest).is_err() {
+                fs::copy(pdf, dest)?;
+            }
+        }
+    }
+    let state = dir.join("source").join(source::STATE_FILE);
+    if need_tex && !retry && state.is_file() {
+        fs::create_dir_all(stage.path().join("source"))?;
+        fs::copy(state, stage.path().join("source").join(source::STATE_FILE))?;
+    }
+    let mut result = tokio::time::timeout(
+        PAPER_ASSET_TIMEOUT,
+        ensure_paper_assets_impl(
+            stage.path(),
+            stage.path(),
+            "",
+            &paper.id,
+            source::arxiv_request(paper).as_deref(),
+            paper.pdf_url.as_deref(),
+            paper.doi.as_deref(),
+            None,
+            None,
+            AssetProgressContext {
+                app: None,
+                task_id: None,
+            },
+            retry,
+            need_pdf,
+            need_tex,
+        ),
+    )
+    .await
+    .map_err(|_| AppError::domain("provider_unavailable", "asset download timed out"))??;
+    let _lock = source::lock(&dir, None).await?;
+    let lock_path = vault.join(".agentero").join("asset-publication.lock");
+    if lock_path.is_symlink() {
+        return Err(AppError::domain(
+            "scope_denied",
+            "invalid asset publication lock",
+        ));
+    }
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    fs2::FileExt::try_lock_exclusive(&lock).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            AppError::domain("busy", "another process is updating downloaded assets")
+        } else {
+            e.into()
+        }
+    })?;
+    managed::publish(stage.path(), &dir, need_pdf, need_tex)?;
+    if need_tex {
+        if let Some(state) = source::state(stage.path()) {
+            source::record_state(&dir, &state.arxiv_id, state.status, state.error)?;
+        }
+    }
+    source::reconcile_body(vault, &rel)?;
+    let current = probe_paper_caps(&dir);
+    if retry
+        && ((need_pdf && !result.pdf && before.has_pdf())
+            || (need_tex && !result.tex && before.has_tex))
+    {
+        return Err(AppError::domain(
+            "provider_unavailable",
+            format!(
+                "asset refresh failed; existing files were preserved. {}",
+                result.messages.join(", ")
+            ),
+        ));
+    }
+    result.pdf = current.has_pdf();
+    result.tex = current.has_tex;
+    result.paper_md = current.has_paper_md;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Write;
+
+    #[test]
+    fn openreview_cookie_merge_keeps_explicit_pairs() {
+        // No stored guard cookie: the explicit header must pass through.
+        assert_eq!(
+            merge_cookie_header(Some("a=1; b=2"), None).as_deref(),
+            Some("a=1; b=2")
+        );
+        // Stored clearance joins the explicit cookie unless the name repeats.
+        assert_eq!(
+            merge_cookie_header(Some("a=1"), Some("a=stale; guard=ok".into())).as_deref(),
+            Some("a=1; guard=ok")
+        );
+        assert_eq!(
+            merge_cookie_header(None, Some("guard=ok".into())).as_deref(),
+            Some("guard=ok")
+        );
+        assert_eq!(merge_cookie_header(None, None), None);
+    }
 
     /// 2000 × 8KB chunks of a 16MB known-size download at the same instant
     /// (time gate never opens) must be capped by percent moves: ≤ ~100 emits

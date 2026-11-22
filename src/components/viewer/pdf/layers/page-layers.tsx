@@ -139,6 +139,10 @@ import {
 	PDF_PAGE_RASTER_DARK_CLASS,
 	PDF_PAPER_SHELL_CLASS,
 	PDF_PAPER_TINT,
+	PDF_SEARCH_ACTIVE_FILL,
+	PDF_SEARCH_HIT_FILL,
+	PDF_SEARCH_SOURCE_ACTIVE_FILL,
+	PDF_SEARCH_SOURCE_HIT_FILL,
 	type PdfPaperTone,
 } from "@/lib/pdf/page-theme";
 import type { PdfNavigationRegion } from "@/lib/pdf/pending-pdf-page";
@@ -182,9 +186,6 @@ const EMPTY_HIGHLIGHT_SET = new Set<string>();
 const TRANSLATION_SEARCH_LAYER_STYLE = {
 	...PAGE_LAYER_STYLE,
 	zIndex: 5,
-	// The z-index isolates the child result boxes' multiply blend from the
-	// translated page. Blend the whole layer so glyphs stay visible.
-	mixBlendMode: "multiply" as const,
 };
 
 /**
@@ -553,7 +554,7 @@ const PageTranslateTab = memo(function PageTranslateTab({
 				// Vertical column, one unit under the top-left toolbar: the
 				// horizontal pill used to sit in the toolbar's corner and collide
 				// with it. The column keeps the label readable below the toolbar.
-				"pointer-events-auto absolute top-11 left-2 z-[8] flex w-7 min-h-16 flex-col items-center justify-center gap-1 rounded-md px-1 py-2 text-foreground transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+				"pointer-events-auto absolute top-11 left-2 z-[8] flex w-7 min-h-16 flex-col items-center justify-center gap-1 rounded-md px-1 py-2 text-foreground transition-colors duration-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
 				// The running stage reports state on the plain theme surface and
 				// does not recolour on hover. Translate / hide / retry keep the old
 				// hover fill; a page with a visible translation keeps the theme
@@ -1235,6 +1236,9 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					pageIndex={pageIndex}
 					scale={searchScale}
 					style={TRANSLATION_SEARCH_LAYER_STYLE}
+					className="pdf-search-hits"
+					highlightColor={PDF_SEARCH_HIT_FILL}
+					activeHighlightColor={PDF_SEARCH_ACTIVE_FILL}
 				/>
 			</div>
 		);
@@ -1283,7 +1287,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					type="button"
 					data-pdf-chrome
 					className={cn(
-						"absolute top-2 right-2 z-10 flex size-7 items-center justify-center rounded-sm transition-[color,opacity,transform] duration-150 hover:opacity-100 active:scale-90 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current motion-reduce:transform-none motion-reduce:transition-none",
+						"absolute top-2 right-2 z-10 flex size-7 items-center justify-center rounded-sm transition-[color,opacity,transform] duration-150 hover:opacity-100 active:scale-90 focus-visible:opacity-100 focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-current motion-reduce:transform-none motion-reduce:transition-none",
 						pageBookmarked
 							? pdfDark
 								? "text-[#ef8791]"
@@ -1361,6 +1365,9 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					documentId={docId}
 					pageIndex={pageIndex}
 					style={PAGE_LAYER_STYLE}
+					className="pdf-search-hits"
+					highlightColor={PDF_SEARCH_SOURCE_HIT_FILL}
+					activeHighlightColor={PDF_SEARCH_SOURCE_ACTIVE_FILL}
 				/>
 			) : null}
 			{/*
@@ -1485,32 +1492,51 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 						pageIndex={pageIndex}
 						scale={searchScale}
 						style={TRANSLATION_SEARCH_LAYER_STYLE}
+						className="pdf-search-hits"
+						highlightColor={PDF_SEARCH_HIT_FILL}
+						activeHighlightColor={PDF_SEARCH_ACTIVE_FILL}
 					/>
 				) : null}
 				{translationVisible ? (
 					<TranslatedHighlightLayer paints={translatedPaints} />
 				) : null}
 				{/*
-				 * Selection-translate spans stay tinted after the result card
-				 * closes, above the opaque translation paper (z-3) and under
-				 * the glyphs (z-6).
+				 * Paint pinned and active selection translations together, above the
+				 * translation paper (z-3) and below glyphs (z-6). Only the open
+				 * result accepts pointer events so its card can keep hover.
 				 */}
-				{translateHighlightsOnPage.map((item) =>
-					item.id === activeTranslateOnPage?.id
-						? null
-						: item.rects.map((rect) => (
+				{(translateHighlightsOnPage.length > 0 || activeTranslateOnPage) && (
+					<div
+						aria-hidden="true"
+						className="pdf-translation-source-tint pointer-events-none absolute inset-0 z-[4]"
+					>
+						{[
+							...translateHighlightsOnPage.filter(
+								(item) => item.id !== activeTranslateOnPage?.id,
+							),
+							...(activeTranslateOnPage ? [activeTranslateOnPage] : []),
+						].flatMap(({ id, rects }) => {
+							const active = id === activeTranslateOnPage?.id;
+							return rects.map((rect) => (
 								<div
-									key={`tr-hl-${item.id}-${rect.x}-${rect.y}-${rect.w}-${rect.h}`}
-									className="pointer-events-none absolute z-[4] rounded-[2px] bg-yellow-300/40 dark:bg-yellow-400/35"
+									aria-hidden="true"
+									key={`${id}:${rect.x}:${rect.y}:${rect.w}:${rect.h}`}
+									className={cn(
+										"absolute rounded-[2px]",
+										active && "pointer-events-auto",
+									)}
 									style={{
 										left: `${rect.x * 100}%`,
 										top: `${rect.y * 100}%`,
 										width: `${rect.w * 100}%`,
 										height: `${rect.h * 100}%`,
 									}}
-									aria-hidden="true"
+									onMouseEnter={active ? handlers.onCardHoverEnter : undefined}
+									onMouseLeave={active ? handlers.onCardHoverLeave : undefined}
 								/>
-							)),
+							));
+						})}
+					</div>
 				)}
 				{/*
 				 * Mobile lasso marquee (frontend/mobile-paper-context.md). Armed
@@ -1564,7 +1590,6 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 						regions={selectableOnPage}
 						width={width}
 						height={height}
-						paperDark={pdfDark}
 						sentencePairing={mode.sentencePairing}
 					/>
 				) : null}
@@ -1581,30 +1606,11 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					onHoverEnter={handlers.onCardHoverEnter}
 					onHoverLeave={handlers.onCardHoverLeave}
 				/>
-				{activeTranslateOnPage
-					? activeTranslateOnPage.rects.map((rect) => (
-							<div
-								key={`${activeTranslateOnPage.id}-source-${rect.x}-${rect.y}-${rect.w}-${rect.h}`}
-								className={cn(
-									"pointer-events-auto absolute z-[4] rounded-[2px] bg-yellow-300/40 dark:bg-yellow-400/35",
-								)}
-								style={{
-									left: `${rect.x * 100}%`,
-									top: `${rect.y * 100}%`,
-									width: `${rect.w * 100}%`,
-									height: `${rect.h * 100}%`,
-								}}
-								aria-hidden="true"
-								onMouseEnter={handlers.onCardHoverEnter}
-								onMouseLeave={handlers.onCardHoverLeave}
-							/>
-						))
-					: null}
 				{/* Figures selection outline, or citation yellow flash block. */}
 				{persistentRegion ? (
 					<div
 						data-pdf-embed-target={persistentRegion.id}
-						className="pointer-events-none absolute z-[6] rounded-sm border border-amber-400/45 bg-amber-300/20 dark:bg-amber-300/15"
+						className="pdf-mark-citation-region pointer-events-none absolute z-[6] rounded-sm"
 						style={{
 							left: `${persistentRegion.bbox.x * 100}%`,
 							top: `${persistentRegion.bbox.y * 100}%`,
@@ -1620,8 +1626,8 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 						className={cn(
 							"pointer-events-none absolute rounded-sm border",
 							marks.focusedLayoutFlash
-								? "citation-focus-flash z-[6] border-amber-400/90 bg-amber-300/55 shadow-[0_0_0_1px_rgba(251,191,36,0.55)] dark:bg-amber-300/40"
-								: "z-[2] shadow-[0_0_0_1px_rgba(255,255,255,0.55)] dark:shadow-[0_0_0_1px_rgba(0,0,0,0.5)]",
+								? "pdf-mark-citation-flash citation-focus-flash z-[6]"
+								: "pdf-mark-focus-frame z-[2]",
 						)}
 						style={
 							marks.focusedLayoutFlash
@@ -1644,7 +1650,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 						aria-hidden="true"
 					/>
 				) : null}
-				{/* Active visual mark: default-theme outline of the crop region. */}
+				{/* Active visual mark: paper-ink outline of the crop region. */}
 				{activeVisualRects
 					? activeVisualRects.map((rect) => (
 							<div

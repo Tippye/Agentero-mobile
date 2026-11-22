@@ -257,6 +257,16 @@ function PaperInfoBody({
 							keyDraft={keyDraft}
 							onKeyDraftChange={setKeyDraft}
 							onCommitKey={commitKey}
+							ranks={settings.easyScholarRanks}
+							onRanksChange={(next) =>
+								mutate(async () => {
+									const saved = await saveSettingsAsync({
+										...loadSettings(),
+										easyScholarRanks: next,
+									});
+									if (active.current) setSettings(saved);
+								})
+							}
 							onOpenKeyPage={() =>
 								jump("https://www.easyscholar.cc/console/user/open")
 							}

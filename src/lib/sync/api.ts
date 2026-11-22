@@ -1,13 +1,15 @@
 /**
  * Vault cloud sync (S3-compatible / WebDAV) — Host command wrappers.
- * Design: docs/backend/sync.md
+ * Host implementation: `src-tauri/src/integration/sync/commands.rs`.
  */
 
 import {
+	type ConflictResolution as ConflictResolutionWire,
 	commands,
 	type DownloadPolicy as DownloadPolicyWire,
 	type PaperAssetAvailability as PaperAssetAvailabilityWire,
 	type PaperAvailability as PaperAvailabilityWire,
+	type PendingConflicts as PendingConflictsWire,
 	type SyncBackendConfig as SyncBackendConfigWire,
 	type SyncCredentialState as SyncCredentialStateWire,
 	type SyncStateEvent_Deserialize,
@@ -70,14 +72,17 @@ export type SyncBackendConfig = {
 	intervalMinutes: number;
 	/** Detected on connect: false when the backend rejects conditional PUTs. */
 	conditionalWrites: boolean;
-	/** Per-device opt-in to the degraded protocol (WebDAV stores that ignore
-	 * conditional writes). Off by default; every device must enable it. */
-	allowDegradedSync: boolean;
+	/** Divergent-edit handling: auto (mtime wins) or ask (pause + prompt). */
+	conflictPolicy: "auto" | "ask";
 	/** Sync scope for bulky paper assets (default: everything). */
 	scope: SyncScope;
 };
 
 export type SyncCredentialState = SyncCredentialStateWire;
+/** How a paused divergent-edit prompt resolves one file. */
+export type ConflictResolution = ConflictResolutionWire;
+/** Divergent edits a paused pass left for the user to decide. */
+export type PendingConflicts = PendingConflictsWire;
 export type DownloadPolicy = DownloadPolicyWire;
 export type PaperAssetAvailability = PaperAssetAvailabilityWire;
 export type PaperAvailability = PaperAvailabilityWire;
@@ -89,6 +94,8 @@ export type SyncStatus = {
 	running: boolean;
 	lastSyncAt?: string;
 	lastVersion: number;
+	/** Divergent edits awaiting a user decision (ask policy). */
+	pendingConflicts?: PendingConflicts | null;
 };
 
 export type SyncOutcome = {
@@ -149,7 +156,8 @@ export const emptySyncConfig = (
 	autoSync: true,
 	intervalMinutes: 30,
 	conditionalWrites: true,
-	allowDegradedSync: false,
+	// Desktop and CLI keep the historical automatic policy; mobile asks.
+	conflictPolicy: "auto",
 	// Product defaults: ink has always synced; translated PDFs are opt-in.
 	scope: {
 		pdf: true,
@@ -210,7 +218,7 @@ function configFromWire(config: SyncBackendConfigWire): SyncBackendConfig {
 		autoSync: config.autoSync ?? true,
 		intervalMinutes: config.intervalMinutes ?? 30,
 		conditionalWrites: config.conditionalWrites ?? true,
-		allowDegradedSync: config.allowDegradedSync ?? false,
+		conflictPolicy: config.conflictPolicy === "ask" ? "ask" : "auto",
 		scope: {
 			pdf: config.scope?.pdf ?? true,
 			source: config.scope?.source ?? true,
@@ -244,37 +252,23 @@ export async function syncDisconnect(vaultPath: string): Promise<void> {
 	await callApiResult(() => commands.syncDisconnect({ vaultPath }));
 }
 
+export async function syncResolveConflicts(
+	vaultPath: string,
+	resolutions: Record<string, ConflictResolution>,
+	defaultResolution: ConflictResolution = "keepBoth",
+): Promise<SyncOutcome> {
+	const res = await callApiResult(() =>
+		commands.syncResolveConflicts({
+			vaultPath,
+			defaultResolution,
+			resolutions,
+		}),
+	);
+	return res;
+}
+
 export function syncNow(vaultPath: string): Promise<SyncOutcome> {
 	return callApiResult(() => commands.syncNow({ vaultPath }));
-}
-
-/** Which side wins a manual overwrite. */
-export type SyncOverwriteDirection = "remoteToLocal" | "localToRemote";
-
-/** Impact preview for the overwrite confirmation dialog (read-only). */
-export type SyncOverwritePreview = {
-	willDeleteLocal: number;
-	willDownload: number;
-	willRemoveRemote: number;
-	willUpload: number;
-	remoteVersion: number;
-};
-
-export function syncOverwritePreview(
-	vaultPath: string,
-	direction: SyncOverwriteDirection,
-): Promise<SyncOverwritePreview> {
-	return callApiResult(() =>
-		commands.syncOverwritePreview({ vaultPath, direction }),
-	);
-}
-
-/** Destructive manual overwrite; the UI confirms with a preview first. */
-export function syncOverwrite(
-	vaultPath: string,
-	direction: SyncOverwriteDirection,
-): Promise<SyncOutcome> {
-	return callApiResult(() => commands.syncOverwrite({ vaultPath, direction }));
 }
 
 export function syncGetDownloadPolicy(

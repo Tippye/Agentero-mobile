@@ -118,13 +118,10 @@
 		"title": "General",
 		"sections": {
 			"papers": "Paper library",
-			"pdf": "PDF reading",
-			"plaza": "Plaza",
 			"system": "System",
 			"network": "Network",
 			"integrations": "Integrations",
-			"mcp": "MCP",
-			"keyboard": "Keyboard"
+			"mcp": "MCP"
 		},
 		"terminalApp": {
 			"label": "Open in Terminal with",
@@ -185,26 +182,6 @@
 			"ask": "Ask",
 			"always": "Always when safe"
 		},
-		"pdfScrollStrategy": {
-			"label": "PDF navigation mode",
-			"vertical": "Vertical",
-			"horizontal": "Horizontal",
-			"paginated": "Page by page"
-		},
-		"pdfVimKeys": {
-			"label": "Enable PDF Vim keys (j/k/h/l)",
-			"requiresVimMode": "Requires Vim mode"
-		},
-		"vimMode": {
-			"label": "Vim mode",
-			"description": "Enable j/k/h/l navigation and F jump labels in the file tree, dropdown lists and the PDF reader. Off keeps plain typing and arrow keys."
-		},
-		"pdfSpreadMode": {
-			"label": "PDF page layout",
-			"none": "Single page",
-			"odd": "Two-page (from page 1)",
-			"even": "Two-page (cover separate)"
-		},
 		"batchImportConcurrency": {
 			"label": "Background task concurrency",
 			"value": "{{value}} simultaneous"
@@ -242,6 +219,16 @@
 				"bjmu": "Peking University Health Science Center"
 			}
 		},
+		"openreviewAuth": {
+			"label": "OpenReview",
+			"login": "Sign in",
+			"loggingIn": "Waiting…",
+			"statusIdle": "Not verified",
+			"statusWaiting": "Waiting for verification…",
+			"statusOk": "Verified",
+			"statusExpired": "Verification expired",
+			"loginFailed": "Could not open the OpenReview login"
+		},
 		"easyScholar": {
 			"section": "EasyScholar",
 			"keyLabel": "Key",
@@ -251,10 +238,23 @@
 			"probeIdle": "Not configured",
 			"probeOk": "Available",
 			"probeFail": "Unavailable",
-			"probeProbing": "Checking…"
-		},
-		"plaza": {
-			"label": "Plaza"
+			"probeProbing": "Checking…",
+			"ranksLabel": "Rank tags",
+			"ranksPlaceholder": "Select rank tags to show",
+			"ranksReset": "Reset",
+			"rankNames": {
+				"if": "IF",
+				"if5": "IF5",
+				"jci": "JCI",
+				"sci": "SCI",
+				"ssci": "SSCI",
+				"eii": "EI",
+				"cssci": "CSSCI",
+				"pku": "PKU Core",
+				"ccf": "CCF",
+				"fms": "FMS",
+				"utd24": "UTD24"
+			}
 		},
 		"connector": {
 			"label": "Zotero Connector compatibility",
@@ -267,8 +267,10 @@
 			"serverStopped": "The Connector service stopped. Agentero retries every 5 seconds. You can also retry now."
 		},
 		"mcp": {
+			"allowWrite": "Allow clients to modify the Vault",
+			"allowOnline": "Allow online tools",
 			"exposeText": {
-				"label": "Expose paper text (MCP)"
+				"label": "Allow clients to read full papers"
 			},
 			"label": "MCP server",
 			"portLabel": "MCP port",
@@ -304,13 +306,6 @@
 				"action": "Clear",
 				"done": "Activity history cleared"
 			}
-		},
-		"pdfTranslateTab": {
-			"label": "Page translate button",
-			"description": "Fixed screen size on the page corner. Hidden still leaves the PDF toolbar and the translate shortcut.",
-			"hover": "Show on hover",
-			"always": "Always show",
-			"hidden": "Hidden"
 		}
 	},
 	"appearance": {
@@ -338,8 +333,35 @@
 		},
 		"sound": {
 			"label": "In-app sounds",
-			"description": "Quiet cues when an Agent needs you, or a turn or PDF translation finishes or fails",
 			"preview": "Preview"
+		},
+		"sections": {
+			"pdf": "PDF reading"
+		},
+		"plaza": {
+			"label": "Plaza"
+		},
+		"pdfScrollStrategy": {
+			"label": "PDF navigation mode",
+			"vertical": "Vertical",
+			"horizontal": "Horizontal",
+			"paginated": "Page by page"
+		},
+		"pdfVimKeys": {
+			"label": "Enable PDF Vim keys (j/k/h/l)",
+			"requiresVimMode": "Requires Vim mode"
+		},
+		"pdfSpreadMode": {
+			"label": "PDF page layout",
+			"none": "Single page",
+			"odd": "Two-page (from page 1)",
+			"even": "Two-page (cover separate)"
+		},
+		"pdfTranslateTab": {
+			"label": "PDF top-left translate-page button",
+			"hover": "Show on hover",
+			"always": "Always show",
+			"hidden": "Hidden"
 		},
 		"fonts": {
 			"section": "Fonts",
@@ -559,6 +581,7 @@
 			}
 		},
 		"form": {
+			"supportsShell": "Can run local shell commands",
 			"defaultName": "Desktop",
 			"name": "Name",
 			"command": "Command",
@@ -610,7 +633,11 @@
 		"errors": {
 			"noBuiltinKey": "Built-in translation is not available in this build.",
 			"unreachable": "Could not reach the translation service. Check the network or pick another service in Translate settings.",
-			"terminology": "This service could not preserve the terminology. Choose another translation service and retry."
+			"timeout": "Translation timed out because the service stopped sending output. Retry this block.",
+			"incomplete": "The translation was cut off before it finished. Retry this block.",
+			"upstream": "The translation service returned an error: {{detail}}",
+			"terminology": "This service could not preserve the terminology. Choose another translation service and retry.",
+			"indexPromptEcho": "The translation included the prompt. The original text was kept for that passage."
 		},
 		"targetLang": {
 			"label": "Target language",
@@ -1018,6 +1045,7 @@
 	},
 	"keyboard": {
 		"title": "Keyboard",
+		"vimMode": "Vim mode",
 		"edit": "Change shortcut for {{command}}",
 		"clear": "Unbind {{command}}",
 		"clearHint": "Unbind this shortcut",
@@ -1162,18 +1190,7 @@
 		"gitSslCaHint": "Absolute PEM path for a self-signed HTTPS server. Empty uses the system trust store.",
 		"gitAuthFailed": "Git could not sign in, and sync does not prompt.\n{{detail}}\nHTTPS: store a token first with `git credential approve` or your credential helper. SSH: run `ssh-add`.",
 		"gitTlsFailed": "Git rejected the server certificate.\n{{detail}}\nFor a self-signed server, set the CA certificate path and connect again.",
-		"noConditionalWrites": "Sync is blocked because this storage does not enforce conditional writes. Choose another store to avoid overwriting another device’s changes.",
-		"allowDegradedSync": "Allow degraded sync",
-		"degradedSyncRisk": "Publishes under a lock instead of atomic writes. Conflict copies may appear and deleted files can resurface. Enable on every device sharing this store, then save.",
-		"overwritePull": "Remote overwrites local",
-		"overwritePush": "Local overwrites remote",
-		"overwritePullTitle": "Overwrite local with remote?",
-		"overwritePushTitle": "Overwrite remote with local?",
-		"overwritePullBody": "Deletes {{delete}} local-only file(s) and restores {{download}} file(s) to the remote version (remote v{{version}}). Discarded local content cannot be recovered.",
-		"overwritePushBody": "Uploads {{upload}} object(s) and drops {{remove}} remote-only file(s) from the manifest (remote v{{version}}). Other devices see these deletions on their next sync; superseded manifests stay on the store.",
-		"overwriteConfirm": "Overwrite",
-		"overwriteDone": "Overwrite complete: v{{version}}, {{up}} uploaded, {{down}} downloaded, {{deleted}} local deleted",
-		"cancel": "Cancel",
+		"noConditionalWrites": "Standard sync is blocked without conditional writes. WebDAV can use ordinary uploads with a journal configured through the CLI.",
 		"saved": "Sync configured",
 		"disconnect": "Disconnect",
 		"syncNow": "Sync now",
@@ -1187,6 +1204,17 @@
 		"neverSynced": "Not synced yet.",
 		"done": "Sync complete: {{up}} uploaded, {{down}} downloaded",
 		"conflicts": "{{count}} conflict copy(ies) saved next to the originals",
+		"conflictTitle": "Both devices changed these files",
+		"conflictDescription": "Sync is paused and nothing has been overwritten yet. Choose what to keep for each of the {{count}} file(s).",
+		"conflictChoice": {
+			"keepLocal": "Keep local",
+			"keepCloud": "Keep cloud",
+			"keepBoth": "Keep both"
+		},
+		"conflictKeepBothAll": "Keep both for all",
+		"conflictLater": "Later",
+		"conflictApply": "Apply",
+		"conflictApplying": "Syncing...",
 		"phase": {
 			"scan": "Scanning vault…",
 			"pull": "Fetching remote state…",
