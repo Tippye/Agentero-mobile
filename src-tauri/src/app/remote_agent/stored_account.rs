@@ -28,6 +28,10 @@ pub(super) struct StoredAccount {
     credentials: StoredTokens,
     refresh_pending: bool,
     pins: HashMap<String, String>,
+    /// Third-party sign-in provider ID; absent in records saved before
+    /// provider tracking existed (schema stays version 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_provider: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -46,6 +50,7 @@ pub(super) struct RestoredAccount {
     pub connection: ConnectionRef,
     pub server: String,
     pub account: String,
+    pub login_provider: Option<String>,
 }
 
 fn invalid() -> AppError {
@@ -83,6 +88,7 @@ impl StoredAccount {
             },
             refresh_pending: account.refresh_pending,
             pins: account.pins.clone(),
+            login_provider: account.view.login_provider.clone(),
         })
     }
 
@@ -95,6 +101,14 @@ impl StoredAccount {
             || self.account.len() > 320
             || self.account.chars().any(char::is_control)
             || self.pins.len() > 512
+            || self.login_provider.as_deref().is_some_and(|id| {
+                id.is_empty()
+                    || id.len() > 128
+                    || !id.starts_with(|c: char| c.is_ascii_alphanumeric())
+                    || !id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            })
         {
             return Err(invalid());
         }
@@ -136,6 +150,7 @@ impl StoredAccount {
             },
             server: self.server,
             account: self.account,
+            login_provider: self.login_provider,
         })
     }
 }
@@ -182,6 +197,34 @@ mod tests {
             value["pins"]["host-1"].as_str().unwrap()
         );
         assert_eq!(restored.credentials.access_token_expires_at, 100);
+        // Records saved before provider tracking existed restore without one.
+        assert_eq!(restored.login_provider, None);
+    }
+
+    #[tokio::test]
+    async fn login_provider_round_trips_and_must_be_a_plain_provider_id() {
+        let mut value = record();
+        value["loginProvider"] = json!("github");
+        let restored = serde_json::from_value::<StoredAccount>(value)
+            .unwrap()
+            .restore(200)
+            .unwrap();
+        assert_eq!(restored.login_provider.as_deref(), Some("github"));
+        for bad in [json!(""), json!("../evil"), json!("has space")] {
+            let mut value = record();
+            value["loginProvider"] = bad.clone();
+            assert!(
+                serde_json::from_value::<StoredAccount>(value)
+                    .unwrap()
+                    .restore(200)
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        // Non-string provider values fail closed at deserialization.
+        let mut value = record();
+        value["loginProvider"] = json!(42);
+        assert!(serde_json::from_value::<StoredAccount>(value).is_err());
     }
 
     #[tokio::test]

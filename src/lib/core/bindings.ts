@@ -10,7 +10,27 @@ export const commands = {
 	/**  Remove one file with the same permissions and mutation lane as text saves. */
 	vaultRemoveFile: (path: string) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("vault_remove_file", { path })),
 	remoteAgentCatalog: () => typedError<ApiResult<RemoteAgentCatalog>, string>(__TAURI_INVOKE("remote_agent_catalog")),
-	remoteAgentLogin: (request: RemoteAgentLogin) => typedError<ApiResult<RemoteAgentAccount>, string>(__TAURI_INVOKE("remote_agent_login", { request })),
+	/**
+	 *  List the third-party sign-in providers (GitHub, Google, Zhihu, …) the
+	 *  Remote server currently offers for browser sign-in.
+	 */
+	remoteAgentOauthProviders: (server: string) => typedError<ApiResult<RemoteAgentOAuthProvider[]>, string>(__TAURI_INVOKE("remote_agent_oauth_providers", { server })),
+	/**
+	 *  Begin one browser sign-in session. The caller opens `scanUrl` in a browser
+	 *  (or shows it as a QR code) and polls `remote_agent_oauth_poll` until the
+	 *  user completes authorization. No account password ever enters this app.
+	 */
+	remoteAgentOauthStart: (server: string, providerId: string) => typedError<ApiResult<RemoteAgentOAuthStart>, string>(__TAURI_INVOKE("remote_agent_oauth_start", { server, providerId })),
+	/**
+	 *  Observe one sign-in session. On completion the account token is exchanged
+	 *  for this device's credentials inside Rust and never crosses IPC.
+	 */
+	remoteAgentOauthPoll: (qrId: string) => typedError<ApiResult<RemoteAgentOAuthStatus>, string>(__TAURI_INVOKE("remote_agent_oauth_poll", { qrId })),
+	/**
+	 *  Abandon a pending sign-in session. Local only; the server-side session
+	 *  expires on its own and an already-issued token is never used afterwards.
+	 */
+	remoteAgentOauthCancel: (qrId: string) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("remote_agent_oauth_cancel", { qrId })),
 	remoteAgentLogout: () => typedError<ApiResult<null>, string>(__TAURI_INVOKE("remote_agent_logout")),
 	remoteAgentHosts: (connection: ConnectionRef) => typedError<ApiResult<HostInfo[]>, string>(__TAURI_INVOKE("remote_agent_hosts", { connection })),
 	remoteAgentHostIdentity: (host: HostRef) => typedError<ApiResult<RemoteAgentHostIdentity>, string>(__TAURI_INVOKE("remote_agent_host_identity", { host })),
@@ -5829,6 +5849,11 @@ export type RemoteAgentAccount = {
 	expiresAt: number,
 	info: ConnectionInfo,
 	persistence: RemoteCredentialPersistence,
+	/**
+	 *  Third-party sign-in provider ID (`github`, `google`, `zhihu`, …);
+	 *  `None` for sign-ins saved before provider tracking existed.
+	 */
+	loginProvider: string | null,
 };
 
 export type RemoteAgentCatalog = {
@@ -5852,11 +5877,20 @@ export type RemoteAgentInstallArgs = {
 	templateId: string,
 };
 
-export type RemoteAgentLogin = {
-	server: string,
-	email: string,
-	password: string,
+/**  One third-party sign-in provider advertised by the Remote server. */
+export type RemoteAgentOAuthProvider = {
+	id: string,
+	displayName: string,
 };
+
+/**  A browser sign-in session: authorize at `scan_url`, then poll for completion. */
+export type RemoteAgentOAuthStart = {
+	qrId: string,
+	scanUrl: string,
+	expiresIn: number,
+};
+
+export type RemoteAgentOAuthStatus = { status: "pending" } | { status: "expired" } | { status: "complete"; account: RemoteAgentAccount };
 
 export type RemoteAgentProbeArgs = {
 	sessionId: string,

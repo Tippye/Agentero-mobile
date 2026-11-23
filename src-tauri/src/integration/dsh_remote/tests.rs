@@ -514,3 +514,166 @@ async fn rest_host_discovery_reads_every_page() {
         .unwrap()
         .unwrap();
 }
+
+async fn http_reply_status(mut socket: TcpStream, status: &str, body: Value) -> String {
+    let mut request = Vec::new();
+    let mut chunk = [0; 1024];
+    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+        let size = socket.read(&mut chunk).await.unwrap();
+        assert!(size > 0);
+        request.extend_from_slice(&chunk[..size]);
+        assert!(request.len() < 16384);
+    }
+    let body = body.to_string();
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+    socket.write_all(response.as_bytes()).await.unwrap();
+    String::from_utf8(request).unwrap()
+}
+
+#[tokio::test]
+async fn oauth_browser_sign_in_discovers_starts_polls_and_registers() {
+    use super::api::OAuthQrPoll;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let api = ServerApi::new(&origin, Duration::from_secs(2)).unwrap();
+    let scan_origin = origin.clone();
+    let server = tokio::spawn(async move {
+        // Discovery advertises GitHub (QR-capable) and a redirect-only provider.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"/api/v1/auth/oauth/github/start","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"},
+            {"id":"google","displayName":"Google","startUrl":"/api/v1/auth/oauth/google/start"}
+        ]})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/providers "));
+        // Start returns a same-origin scan URL and a bounded lifetime.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"qrId":"github-qr-session-1234567890","scanUrl":format!("{scan_origin}/api/v1/auth/q/github-qr-session-1234567890"),"expiresIn":300,"provider":"github"})).await;
+        assert!(request.starts_with("POST /api/v1/auth/oauth/qr/start?provider=github "));
+        // Poll: pending, then complete with the one-time account token.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"status":"pending"})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/qr/github-qr-session-1234567890 "));
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(
+            socket,
+            json!({"status":"complete","token":"account-token-fixture-0123456789"}),
+        )
+        .await;
+        // Account profile under the fresh account token.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(
+            socket,
+            json!({"account":"reader@example.test","isAdmin":false}),
+        )
+        .await;
+        assert!(request.starts_with("GET /api/v1/auth/me "));
+        assert!(request.contains("Bearer account-token-fixture-0123456789"));
+        // Device registration exchanges the account token for a device pair.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"accessToken":"device-access-fixture","accessTokenExpiresAt":9_000_000_000_000u64,"refreshToken":"device-refresh-fixture","refreshTokenExpiresAt":9_000_000_000_000u64})).await;
+        assert!(request.starts_with("POST /api/v1/devices/register "));
+        assert!(request.contains("Bearer account-token-fixture-0123456789"));
+    });
+    let providers = api.oauth_providers().await.unwrap();
+    assert_eq!(providers.len(), 2);
+    let github = providers.iter().find(|p| p.id == "github").unwrap();
+    assert!(providers
+        .iter()
+        .find(|p| p.id == "google")
+        .unwrap()
+        .qr_start_url
+        .is_none());
+    let session = api.start_oauth_qr(github).await.unwrap();
+    assert_eq!(session.expires_in, 300);
+    assert_eq!(
+        api.poll_oauth_qr(&session.qr_id).await.unwrap(),
+        OAuthQrPoll::Pending
+    );
+    let OAuthQrPoll::Complete(token) = api.poll_oauth_qr(&session.qr_id).await.unwrap() else {
+        panic!("expected completion");
+    };
+    assert_eq!(api.account_me(&token).await.unwrap(), "reader@example.test");
+    let identity = DeviceIdentity::generate(uuid::Uuid::new_v4().to_string()).unwrap();
+    let pair = api
+        .register(&identity, "Agentero", "windows", "0.0.0-test", &token)
+        .await
+        .unwrap();
+    assert_eq!(pair.access_token, "device-access-fixture");
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn oauth_discovery_falls_back_to_legacy_status_only_on_404() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = ServerApi::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply_status(
+            socket,
+            "404 Not Found",
+            json!({"error":{"code":"NOT_FOUND"}}),
+        )
+        .await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/providers "));
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"configured":true})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/status "));
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply_status(socket, "404 Not Found", json!({})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/github/status "));
+    });
+    let providers = api.oauth_providers().await.unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "zhihu");
+    assert_eq!(
+        providers[0].qr_start_url.as_deref(),
+        Some("/api/v1/auth/oauth/qr/start?provider=zhihu")
+    );
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn oauth_rejects_cross_origin_scan_urls_and_unsafe_entry_paths() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = ServerApi::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"/api/v1/auth/oauth/github/start","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"}
+        ]})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"qrId":"github-qr-session-1234567890","scanUrl":"https://evil.example/api/v1/auth/q/x","expiresIn":300})).await;
+        // A discovery response pointing outside /api/v1/auth/ must be refused.
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"https://evil.example/start","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"}
+        ]})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"/api/v1/auth/../devices","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"}
+        ]})).await;
+    });
+    let providers = api.oauth_providers().await.unwrap();
+    let session = api.start_oauth_qr(&providers[0]).await;
+    assert!(session.is_err());
+    assert!(api.oauth_providers().await.is_err());
+    assert!(api.oauth_providers().await.is_err());
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
