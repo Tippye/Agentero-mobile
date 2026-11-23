@@ -2,6 +2,12 @@
 
 平板的远程 Agent 状态由 Rust 持有。DSH 是默认 provider；已配对用户可以选择 Bridge。Vault 文件仍是论文与笔记的权威来源，下面的设备身份和操作记录均位于 Vault 之外。
 
+## DSH 第三方登录
+
+dsh-remote（ds-harness-remote）默认只提供 GitHub、Google、知乎等第三方授权，没有账号密码登录。移动端与桌面设置页共用同一套流程：`remote_agent_oauth_providers` 发现服务器提供的登录方式（404 时回退到旧的逐项 status 端点），`remote_agent_oauth_start` 创建一次浏览器授权会话，移动端用系统浏览器打开 `scanUrl`、桌面展示二维码并可选打开浏览器，随后 `remote_agent_oauth_poll` 轮询直到完成。账号 token 只在 Rust 内换取设备凭据（`auth/me` → `devices/register`），不经过 IPC；轮询会话由 Rust 按 qrId 持有并在完成/过期/取消后丢弃。发现响应的入口路径必须同源且位于 `/api/v1/auth/` 下，`scanUrl` 必须留在服务器 origin。登录成功后账号视图带 `loginProvider`，凭据记录向后兼容旧格式。桌面入口在设置 → Agent →「远程 Agent」分组，与移动端共用同一原生账号。
+
+实现：[REST 客户端](../../../src-tauri/src/integration/dsh_remote/api.rs)、[登录命令](../../../src-tauri/src/app/remote_agent.rs)、[共享登录组件](../../../src/components/remote-agent/dsh-remote-sign-in.tsx)、[设置分组](../../../src/components/settings/panes/agent/dsh-remote-connection.tsx)。
+
 ## Bridge 身份与配对
 
 Android/iOS 的 Bridge Ed25519 身份复用应用管理的系统 `CredentialStore`，与 DSH 登录及同步凭据共用后端健康状态和串行读写通道。系统记录为 Rust 私有的 v2 envelope；设备 ID、私钥、公钥和创建时间不进入 IPC。桌面继续使用原有文件身份。
@@ -32,6 +38,6 @@ Android/iOS 的 Bridge Ed25519 身份复用应用管理的系统 `CredentialStor
 
 ## 验证边界
 
-宿主注入存储测试覆盖身份字节与签名连续性、错误分类、未知写入、迁移期间旧记录变化、清除标记、profile CAS、并发恢复和 transport 取消。实际临时 SQLite 测试覆盖重启、取消、提交失败、并发 reservation、回执、损坏和 managed directory 丢失。UI 回归覆盖选中 provider 才恢复 Bridge、保留配对 metadata、显式重置确认、失败后重试及 WebView 丢失后恢复 native operation ID。
+宿主注入存储测试覆盖身份字节与签名连续性、错误分类、未知写入、迁移期间旧记录变化、清除标记、profile CAS、并发恢复和 transport 取消。实际临时 SQLite 测试覆盖重启、取消、提交失败、并发 reservation、回执、损坏和 managed directory 丢失。UI 回归覆盖选中 provider 才恢复 Bridge、保留配对 metadata、显式重置确认、失败后重试及 WebView 丢失后恢复 native operation ID。DSH 第三方登录另有回环 REST 测试（provider 发现与 404 回退、QR 会话 start/poll、`auth/me` 与设备注册、跨 origin scanUrl 与不安全入口路径拒绝）和前端 service 测试（发现 → 开始 → 轮询完成/过期/取消，账号 token 不经过 IPC）。
 
 这些测试不替代 Android Keystore / iOS Keychain、真实 Host、设备后台及完整视觉验收；平台限制和后续工作记录在[共享实施计划](tablet-shared.md)。
