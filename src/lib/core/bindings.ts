@@ -80,12 +80,8 @@ export const commands = {
 	 *  rejects the key (non-200 / non-200 code).
 	 */
 	easyScholarProbe: () => __TAURI_INVOKE<ApiResult<boolean>>("easy_scholar_probe"),
-	/**
-	 *  Probe the configured institution proxy (EZProxy/WebVPN) by fetching a
-	 *  known paywalled DOI through the rewrite and checking the response is a
-	 *  PDF. Returns a short human-readable result for the settings UI.
-	 */
-	institutionProxyProbe: () => __TAURI_INVOKE<ApiResult<string>>("institution_proxy_probe"),
+	/**  Verify access to the preset's campus page or the default publisher PDF. */
+	institutionProxyProbe: () => __TAURI_INVOKE<ApiResult<InstitutionProxyProbe>>("institution_proxy_probe"),
 	/**
 	 *  Built-in institution gateway presets for the settings quick-fill menu.
 	 *  The registry lives in `agentero-core/.../institution_proxy/presets.json`;
@@ -98,12 +94,10 @@ export const commands = {
 	 *  Resolves once the login window closes; `true` when a cookie was captured.
 	 */
 	institutionProxyLoginOpen: (prefix: string) => typedError<boolean, string>(__TAURI_INVOKE("institution_proxy_login_open", { prefix })),
-	/**
-	 *  Open (or focus) the verification window for the Settings button: no target
-	 *  URL, so it opens OpenReview's challenge gate and waits until a captured
-	 *  cookie passes the probe (or the window is closed).
-	 */
+	/**  Use the official sign-in page, including any MFA required by the account. */
 	openreviewAuthLoginOpen: () => typedError<boolean, string>(__TAURI_INVOKE("openreview_auth_login_open")),
+	/**  Return the expiry of the account session for the Settings indicator. */
+	openreviewAccountExpiry: () => __TAURI_INVOKE<number | null>("openreview_account_expiry"),
 	builtinProviderStatus: () => __TAURI_INVOKE<ApiResult<BuiltinProviderStatus>>("builtin_provider_status"),
 	decisionGatewayDecide: (request: DecisionGatewayRequest) => __TAURI_INVOKE<ApiResult<DecisionGatewayResponse>>("decision_gateway_decide", { request }),
 	layoutModelStatus: () => __TAURI_INVOKE<ApiResult<LayoutModelStatus>>("layout_model_status"),
@@ -159,7 +153,7 @@ export const commands = {
 	doctorCheckNetwork: () => typedError<ApiResult<NetworkDoctorReport_Serialize>, string>(__TAURI_INVOKE("doctor_check_network")),
 	/**  List which known desktop apps are installed on this machine. */
 	desktopAppsProbe: () => typedError<ApiResult<DesktopAppStatus_Serialize[]>, string>(__TAURI_INVOKE("desktop_apps_probe")),
-	/**  Launch one installed desktop app (macOS or Windows). */
+	/**  Launch one installed desktop app (macOS, Windows or Linux). */
 	desktopAppOpen: (id: DesktopAppId) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("desktop_app_open", { id })),
 	/**
 	 *  Retarget in-flight agent runs that emit to `source_label` so later events
@@ -414,6 +408,8 @@ export const commands = {
 	 *  origin was unreachable or behind a WAF.
 	 */
 	paperRecaptureWebpage: (vaultPath: string, path: string) => typedError<ApiResult<WebpageSnapshotResult>, string>(__TAURI_INVOKE("paper_recapture_webpage", { vaultPath, path })),
+	/**  Verify access to a PDF on the catalog entry the user chose to retry. */
+	paperVerifyOpenreviewPdf: (vaultPath: string, path: string) => typedError<OpenReviewPdfVerification, string>(__TAURI_INVOKE("paper_verify_openreview_pdf", { vaultPath, path })),
 	/**
 	 *  Seed `{vault}/.agentero/templates/NOTES.md` with a starting template for
 	 *  the `custom` paper-note mode. Never overwrites an existing template.
@@ -750,6 +746,23 @@ export const commands = {
 	 *  is `Send` and keeps streaming from the blocking pool.
 	 */
 	zoteroSync: (args: ZoteroSyncArgs, onProgress: Channel<SyncProgress>) => __TAURI_INVOKE<ApiResult<ZoteroSyncResult>>("zotero_sync", { args, onProgress }),
+	/**
+	 *  Check an AlphaXiv API key with `GET /folders/v3` without saving it.
+	 *  An empty value or a mask rechecks the key already stored in Host settings.
+	 */
+	alphaxivTestKey: (apiKey: string) => __TAURI_INVOKE<ApiResult<AlphaXivAccount>>("alphaxiv_test_key", { apiKey }),
+	/**
+	 *  Validate a pasted AlphaXiv API key with `GET /folders/v3`, then store it.
+	 *  The returned settings snapshot masks the key. A failed check stores nothing.
+	 */
+	alphaxivSaveKey: (apiKey: string) => __TAURI_INVOKE<ApiResult<AlphaXivSaveResult_Serialize>>("alphaxiv_save_key", { apiKey }),
+	/**  Remove the stored AlphaXiv API key and the saved profile. */
+	alphaxivClearKey: () => __TAURI_INVOKE<ApiResult<AppSettings_Serialize>>("alphaxiv_clear_key"),
+	/**
+	 *  List the signed-in user's AlphaXiv folders. Each folder already includes
+	 *  its papers. Uses the stored key only.
+	 */
+	alphaxivListFolders: () => __TAURI_INVOKE<ApiResult<AlphaXivFolder[]>>("alphaxiv_list_folders"),
 	/**  Current sync binding + last-pass info for the settings pane. */
 	syncGetStatus: (args: SyncVaultArgs) => typedError<ApiResult<SyncStatus_Serialize>, string>(__TAURI_INVOKE("sync_get_status", { args })),
 	/**  Validate and probe before publishing a protected credential reference. */
@@ -764,6 +777,14 @@ export const commands = {
 	 *  it in place so the next attempt resumes the same decision.
 	 */
 	syncResolveConflicts: (args: SyncResolveConflictsArgs) => typedError<ApiResult<SyncOutcome>, string>(__TAURI_INVOKE("sync_resolve_conflicts", { args })),
+	/**  Read-only impact preview for the manual-overwrite confirmation dialog. */
+	syncOverwritePreview: (args: SyncOverwriteArgs) => typedError<ApiResult<OverwritePreview>, string>(__TAURI_INVOKE("sync_overwrite_preview", { args })),
+	/**
+	 *  Manual overwrite: `remoteToLocal` mirrors the remote HEAD onto disk
+	 *  (discarding divergent local content); `localToRemote` publishes the local
+	 *  scan as the new HEAD. The UI confirms with a preview before calling this.
+	 */
+	syncOverwrite: (args: SyncOverwriteArgs) => typedError<ApiResult<SyncOutcome>, string>(__TAURI_INVOKE("sync_overwrite", { args })),
 	/**
 	 *  Local disk usage per bulky-asset category (bytes), for the sync-scope UI.
 	 *  The shared snapshot classifier covers all five categories (including the
@@ -827,6 +848,10 @@ export const commands = {
 	version: string,
 	body: string | null,
 } | null, string>(__TAURI_INVOKE("app_update_check", { proxy, retryOnTimeout })),
+	appChangelog: (request: ChangelogRequest) => typedError<{
+	schemaVersion: number,
+	releases: ChangelogRelease[],
+} | null, string>(__TAURI_INVOKE("app_changelog", { request })),
 	cliInstallStatus: () => __TAURI_INVOKE<ApiResult<CliInstallStatus>>("cli_install_status"),
 	cliInstallCommand: (automatic: boolean | null) => __TAURI_INVOKE<ApiResult<CliInstallResult>>("cli_install_command", { automatic }),
 	cliUninstallCommand: () => __TAURI_INVOKE<ApiResult<CliInstallResult>>("cli_uninstall_command"),
@@ -990,6 +1015,7 @@ export const events = {
 	settingsChanged: makeEvent<SettingsChangedEvent_Deserialize>("settings:changed"),
 	settingsSectionRequested: makeEvent<SettingsSectionRequestedEvent>("settings:section-requested"),
 	settingsVaultRequested: makeEvent<SettingsVaultRequestedEvent>("settings:vault-requested"),
+	syncMirror: makeEvent<SyncMirrorEvent_Deserialize>("sync:mirror"),
 	syncProgress: makeEvent<SyncProgressEvent>("sync:progress"),
 	syncState: makeEvent<SyncStateEvent_Deserialize>("sync:state"),
 	uiRequest: makeEvent<UiRequestEvent_Deserialize>("ui:request"),
@@ -1822,6 +1848,93 @@ export type AliasRepairResult = {
 	updatedPaths: string[],
 };
 
+/**  Account fields safe to show in Settings. No credential. */
+export type AlphaXivAccount = {
+	username: string,
+	email: string,
+	realName: string,
+	/**  `realName`, else `username`, else `email`, else `"AlphaXiv"`. */
+	label: string,
+};
+
+/**  One library folder. `papers` is the list the folder payload already included. */
+export type AlphaXivFolder = {
+	id: string,
+	name: string,
+	folderType: string,
+	order: number,
+	parentId: string,
+	sharingStatus: string,
+	/**
+	 *  Lucide icon name from the folder appearance (`cpu`). Empty when AlphaXiv
+	 *  leaves the mark to the client and sends `icon: null`.
+	 */
+	icon: string,
+	/**  Appearance palette name (`red`, `orange`, …). Empty when unset. */
+	color: string,
+	papers: AlphaXivFolderPaper[],
+	paperCount: number,
+};
+
+/**  One paper inside a folder payload. */
+export type AlphaXivFolderPaper = {
+	paperGroupId: string,
+	universalPaperId: string,
+	canonicalId: string,
+	paperVersionId: string,
+	title: string,
+	paperAbstract: string,
+	topics: string[],
+	authors: string[],
+	/**
+	 *  Original `addedAt` string, or the decimal timestamp when that is all
+	 *  the payload has. Empty when absent.
+	 */
+	addedAt: string,
+	/**  Bare public arXiv id (`1706.03762`). Empty for private uploads. */
+	arxivId: string,
+	importable: boolean,
+	/**  [`SKIP_REASON_PRIVATE`] when `importable` is false, otherwise empty. */
+	skipReason: string,
+	/**  `https://pdfs.assets.alphaxiv.org/{canonical}.pdf` for a public paper. */
+	pdfUrl: string,
+};
+
+/**
+ *  Settings snapshot after a successful key save. `settings.alphaxiv.apiKey`
+ *  is masked. `account` has no profile: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSaveResult = AlphaXivSaveResult_Serialize | AlphaXivSaveResult_Deserialize;
+
+/**
+ *  Settings snapshot after a successful key save. `settings.alphaxiv.apiKey`
+ *  is masked. `account` has no profile: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSaveResult_Deserialize = {
+	settings: AppSettings_Deserialize,
+	account: AlphaXivAccount,
+};
+
+/**
+ *  Settings snapshot after a successful key save. `settings.alphaxiv.apiKey`
+ *  is masked. `account` has no profile: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSaveResult_Serialize = {
+	settings: AppSettings_Serialize,
+	account: AlphaXivAccount,
+};
+
+/**
+ *  AlphaXiv credential kept in Host settings. `api_key` is a secret.
+ *  Profile fields stay empty: API keys cannot read `GET /users/v3`.
+ */
+export type AlphaXivSettings = {
+	apiKey?: string,
+	username?: string,
+	email?: string,
+	realName?: string,
+};
+
 export type ApiResult<T> = {
 	ok: boolean,
 	data: T | null,
@@ -1873,6 +1986,12 @@ export type AppSettings_Deserialize = {
 	 *  the cookie carries no readable expiry. Drives the Settings status dot.
 	 */
 	openreviewCookieExpiresAt?: number,
+	/**
+	 *  AlphaXiv API key. The key is masked across IPC. A plaintext key in
+	 *  `settings_set` is ignored; only [`AppSettingsStore::update_alphaxiv_auth`]
+	 *  stores one, after `GET /folders/v3` succeeds. Profile fields stay empty.
+	 */
+	alphaxiv?: AlphaXivSettings,
 	paperTreeLabelMode?: string,
 	paperTreeSortMode?: string,
 	/**
@@ -2047,6 +2166,12 @@ export type AppSettings_Serialize = {
 	 *  the cookie carries no readable expiry. Drives the Settings status dot.
 	 */
 	openreviewCookieExpiresAt: number,
+	/**
+	 *  AlphaXiv API key. The key is masked across IPC. A plaintext key in
+	 *  `settings_set` is ignored; only [`AppSettingsStore::update_alphaxiv_auth`]
+	 *  stores one, after `GET /folders/v3` succeeds. Profile fields stay empty.
+	 */
+	alphaxiv: AlphaXivSettings,
 	paperTreeLabelMode: string,
 	paperTreeSortMode: string,
 	/**
@@ -2666,6 +2791,24 @@ export type CatalogUpdatePropertyArgs_Serialize = {
 	property: CustomProperty_Serialize,
 };
 
+export type Changelog = {
+	schemaVersion: number,
+	releases: ChangelogRelease[],
+};
+
+export type ChangelogRelease = {
+	tag: string,
+	releaseDate: string,
+	summary: ChangelogSummary | null,
+};
+
+export type ChangelogRequest = "cached" | "refresh" | "force";
+
+export type ChangelogSummary = {
+	en: string,
+	"zh-CN": string,
+};
+
 export type ChatImportExtractArgs = {
 	/**  Pasted chat text, or a bare AI-chat share URL (chatgpt.com/share/...). */
 	text: string,
@@ -3220,20 +3363,30 @@ export type DepPolicy = "allSettled" | "allSucceeded";
 /**  Stable id the frontend keys rows and brand logos on. */
 export type DesktopAppId = "chatgpt" | "qwenwork" | "workbuddy" | "dsh-desktop";
 
-/**  Detection result: macOS bundle or Windows executable path when known. */
+/**  Detection result: the installed executable (or macOS bundle) path when known. */
 export type DesktopAppStatus = DesktopAppStatus_Serialize | DesktopAppStatus_Deserialize;
 
-/**  Detection result: macOS bundle or Windows executable path when known. */
+/**  Detection result: the installed executable (or macOS bundle) path when known. */
 export type DesktopAppStatus_Deserialize = {
 	id: DesktopAppId,
 	installed: boolean,
+	/**
+	 *  True when the vendor ships no build for this platform, so the row can
+	 *  never become installed here.
+	 */
+	unsupported: boolean,
 	path: string | null,
 };
 
-/**  Detection result: macOS bundle or Windows executable path when known. */
+/**  Detection result: the installed executable (or macOS bundle) path when known. */
 export type DesktopAppStatus_Serialize = {
 	id: DesktopAppId,
 	installed: boolean,
+	/**
+	 *  True when the vendor ships no build for this platform, so the row can
+	 *  never become installed here.
+	 */
+	unsupported?: boolean,
 	path?: string | null,
 };
 
@@ -3873,6 +4026,14 @@ export type InstitutionProxyPreset = {
 	/**  True only after an authorized account downloaded a paywalled PDF. */
 	subscriptionVerified?: boolean,
 };
+
+export type InstitutionProxyProbe = {
+	scope: InstitutionProxyProbeScope,
+	kind: string,
+	bytes: number,
+};
+
+export type InstitutionProxyProbeScope = "campusPage" | "pdf";
 
 /**
  *  A parsed explicit Vault-local link. Markdown remains the source of truth; this
@@ -4583,6 +4744,7 @@ export type LookupImportResult_Deserialize = {
 	paperMd?: boolean,
 	/**  Download / parse messages (for UI warnings). */
 	assetMessages?: string[],
+	openreviewPdfIssue: OpenReviewPdfIssue | null,
 	/**
 	 *  `Deduped` when the paper already existed and (for local PDFs) the PDF
 	 *  was merged into the existing entry instead of creating a duplicate.
@@ -4612,6 +4774,7 @@ export type LookupImportResult_Serialize = {
 	paperMd: boolean,
 	/**  Download / parse messages (for UI warnings). */
 	assetMessages: string[],
+	openreviewPdfIssue?: OpenReviewPdfIssue | null,
 	/**
 	 *  `Deduped` when the paper already existed and (for local PDFs) the PDF
 	 *  was merged into the existing entry instead of creating a duplicate.
@@ -4807,6 +4970,14 @@ export type OpenInTerminalResult = {
 	cwd: string,
 };
 
+/**  Why the OpenReview PDF is still missing after trying available sources. */
+export type OpenReviewPdfIssue = "verificationRequired" | "rateLimited" | "network" | "unavailable" | "downloadFailed";
+
+export type OpenReviewPdfVerification = {
+	verified: boolean,
+	url: string,
+};
+
 export type OpenWithApp = {
 	/**  Stable id used by `path_open_with`. */
 	id: string,
@@ -4840,6 +5011,30 @@ export type OperationRequest = {
 };
 
 export type OperationResult = { type: "sessionCreated"; session: SessionRef } | { type: "attachmentUploaded"; attachment: RemoteAttachment } | { type: "acknowledged" };
+
+/**
+ *  Which side wins a manual overwrite. `RemoteToLocal` mirrors the remote
+ *  HEAD manifest onto disk (discarding divergent local content);
+ *  `LocalToRemote` publishes the local scan as the new HEAD (superseding
+ *  remote changes).
+ */
+export type OverwriteDirection = "remoteToLocal" | "localToRemote";
+
+/**
+ *  Impact preview for the confirmation dialog. Counts only; computed without
+ *  any local or remote write.
+ */
+export type OverwritePreview = {
+	/**  Local files the remote does not have (force pull deletes them). */
+	willDeleteLocal: number,
+	/**  Remote files force pull downloads or restores over local edits. */
+	willDownload: number,
+	/**  Remote files absent locally (force push drops them from the manifest). */
+	willRemoveRemote: number,
+	/**  Blobs force push uploads (local content the remote lacks). */
+	willUpload: number,
+	remoteVersion: number,
+};
 
 export type PairingRequest = {
 	requestId: string,
@@ -4893,6 +5088,7 @@ export type PaperCommitResult = {
 	tex: boolean,
 	paperMd: boolean,
 	assetMessages: string[],
+	openreviewPdfIssue: OpenReviewPdfIssue | null,
 	/**  True when assets are still downloading in the background (`Deferred`). */
 	assetsPending: boolean,
 };
@@ -6348,6 +6544,13 @@ export type SyncBackendConfig_Deserialize = {
 	/**  Last conditional-write probe result. Unsafe stores cannot publish. */
 	conditionalWrites?: boolean,
 	/**
+	 *  Explicit per-device opt-in to the degraded protocol for stores that
+	 *  ignore conditional writes (publish lock + plain HEAD PUT + read-back
+	 *  verification). Off by default; the engine still hard-stops without it.
+	 *  Phase 1: WebDAV only. See `docs/development/sync-degraded-mode.md`.
+	 */
+	allowDegradedSync?: boolean,
+	/**
 	 *  Which bulky paper assets (PDF / LaTeX source / attachments) take part
 	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
 	 */
@@ -6425,6 +6628,13 @@ export type SyncBackendConfig_Serialize = {
 	/**  Last conditional-write probe result. Unsafe stores cannot publish. */
 	conditionalWrites: boolean,
 	/**
+	 *  Explicit per-device opt-in to the degraded protocol for stores that
+	 *  ignore conditional writes (publish lock + plain HEAD PUT + read-back
+	 *  verification). Off by default; the engine still hard-stops without it.
+	 *  Phase 1: WebDAV only. See `docs/development/sync-degraded-mode.md`.
+	 */
+	allowDegradedSync: boolean,
+	/**
 	 *  Which bulky paper assets (PDF / LaTeX source / attachments) take part
 	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
 	 */
@@ -6467,11 +6677,21 @@ export type SyncConfigureArgs = SyncConfigureArgs_Serialize | SyncConfigureArgs_
 export type SyncConfigureArgs_Deserialize = {
 	vaultPath: string,
 	config: SyncBackendConfig_Deserialize,
+	/**
+	 *  Read-only mirrors published after the primary pass. The primary stays
+	 *  the only backend that pulls and merges.
+	 */
+	mirrors?: SyncBackendConfig_Deserialize[],
 };
 
 export type SyncConfigureArgs_Serialize = {
 	vaultPath: string,
 	config: SyncBackendConfig_Serialize,
+	/**
+	 *  Read-only mirrors published after the primary pass. The primary stays
+	 *  the only backend that pulls and merges.
+	 */
+	mirrors: SyncBackendConfig_Serialize[],
 };
 
 /**
@@ -6502,6 +6722,61 @@ export type SyncFileConflict = {
 	remoteMtimeMs: number,
 };
 
+/**
+ *  Owned mirror of the private borrowed `SyncMirrorEvent` in
+ *  `integration::sync::commands` (`started` / `published` / `error` per mirror).
+ */
+export type SyncMirrorEvent = SyncMirrorEvent_Serialize | SyncMirrorEvent_Deserialize;
+
+/**
+ *  Owned mirror of the private borrowed `SyncMirrorEvent` in
+ *  `integration::sync::commands` (`started` / `published` / `error` per mirror).
+ */
+export type SyncMirrorEvent_Deserialize = {
+	vaultPath: string,
+	/**  Zero-based position in the vault's mirror list. */
+	index: number,
+	identity: string,
+	backend: string,
+	status: string,
+	error?: string | null,
+};
+
+/**
+ *  Owned mirror of the private borrowed `SyncMirrorEvent` in
+ *  `integration::sync::commands` (`started` / `published` / `error` per mirror).
+ */
+export type SyncMirrorEvent_Serialize = {
+	vaultPath: string,
+	/**  Zero-based position in the vault's mirror list. */
+	index: number,
+	identity: string,
+	backend: string,
+	status: string,
+	error?: string | null,
+};
+
+/**  One read-only mirror and its last pass result. */
+export type SyncMirrorStatus = SyncMirrorStatus_Serialize | SyncMirrorStatus_Deserialize;
+
+/**  One read-only mirror and its last pass result. */
+export type SyncMirrorStatus_Deserialize = {
+	config: SyncBackendConfig_Deserialize,
+	credentialState: SyncCredentialState,
+	lastSyncAt: string | null,
+	lastVersion: number,
+	lastError: string | null,
+};
+
+/**  One read-only mirror and its last pass result. */
+export type SyncMirrorStatus_Serialize = {
+	config: SyncBackendConfig_Serialize,
+	credentialState: SyncCredentialState,
+	lastSyncAt?: string | null,
+	lastVersion: number,
+	lastError?: string | null,
+};
+
 export type SyncOutcome = {
 	version: number,
 	uploaded: number,
@@ -6509,6 +6784,11 @@ export type SyncOutcome = {
 	deletedLocal: number,
 	removedRemote: number,
 	conflictCopies: string[],
+};
+
+export type SyncOverwriteArgs = {
+	vaultPath: string,
+	direction: OverwriteDirection,
 };
 
 export type SyncPaperArgs = {
@@ -6587,6 +6867,7 @@ export type SyncStateEvent_Deserialize = {
 	vaultPath: string,
 	status: string,
 	error?: string | null,
+	errorCode?: string | null,
 };
 
 /**
@@ -6597,6 +6878,7 @@ export type SyncStateEvent_Serialize = {
 	vaultPath: string,
 	status: string,
 	error?: string | null,
+	errorCode?: string | null,
 };
 
 export type SyncStatus = SyncStatus_Serialize | SyncStatus_Deserialize;
@@ -6610,6 +6892,8 @@ export type SyncStatus_Deserialize = {
 	lastVersion: number,
 	/**  Divergent edits awaiting confirmation under the ask policy. */
 	pendingConflicts: PendingConflicts | null,
+	/**  Mirrors in configuration order; empty for a single-backend binding. */
+	mirrors?: SyncMirrorStatus_Deserialize[],
 };
 
 export type SyncStatus_Serialize = {
@@ -6621,6 +6905,8 @@ export type SyncStatus_Serialize = {
 	lastVersion: number,
 	/**  Divergent edits awaiting confirmation under the ask policy. */
 	pendingConflicts?: PendingConflicts | null,
+	/**  Mirrors in configuration order; empty for a single-backend binding. */
+	mirrors: SyncMirrorStatus_Serialize[],
 };
 
 export type SyncTexLocation = {

@@ -30,7 +30,10 @@ import {
 	companionReflowSentenceBands,
 	sourceSentenceHoverBands,
 } from "@/lib/pdf/layout/element-sentence";
-import { translatedSelectionLineRects } from "@/lib/pdf/layout/visible-selection-rects";
+import {
+	translatedSelectionLineRects,
+	translatedSentenceAtPoint,
+} from "@/lib/pdf/layout/visible-selection-rects";
 import { linkPreviewDragActive } from "@/lib/pdf/link-preview-drag";
 import { synctexHoverSupersedes } from "@/lib/tex/synctex-boxes";
 
@@ -38,15 +41,19 @@ import { synctexHoverSupersedes } from "@/lib/tex/synctex-boxes";
 const SENTENCE_BAND_FADE_MS = MOTION_MS.micro;
 
 function spanFromTarget(
-	target: EventTarget | null,
+	event: PointerEvent,
+	translatedTextHitTest: boolean,
 ): { itemId: string; sentenceIndex: number } | null {
+	const { target, clientX, clientY } = event;
 	if (!(target instanceof Element)) return null;
-	const span = target.closest("[data-sentence]");
-	const item = span?.closest("[data-layout-item]");
-	if (!span || !item) return null;
-	const itemId = item.getAttribute("data-layout-item");
-	const sentenceIndex = Number(span.getAttribute("data-sentence"));
-	if (!itemId || !Number.isInteger(sentenceIndex)) return null;
+	const span = translatedTextHitTest
+		? translatedSentenceAtPoint(target, clientX, clientY)
+		: target.closest("[data-sentence]");
+	const index = span?.getAttribute("data-sentence");
+	const itemId =
+		span?.closest<HTMLElement>("[data-layout-item]")?.dataset.layoutItem;
+	const sentenceIndex = Number(index);
+	if (index == null || !itemId || !Number.isInteger(sentenceIndex)) return null;
 	return { itemId, sentenceIndex };
 }
 
@@ -87,9 +94,10 @@ export function usePdfSentenceInteraction(
 		sentence: LayoutSentenceHover,
 		event: MouseEvent,
 	) => void,
-	options?: { enabled?: boolean },
+	options?: { enabled?: boolean; translatedTextHitTest?: boolean },
 ): void {
 	const enabled = options?.enabled ?? true;
+	const translatedTextHitTest = options?.translatedTextHitTest ?? false;
 	const doubleClickRef = useRef(onSentenceDoubleClick);
 	doubleClickRef.current = onSentenceDoubleClick;
 	useEffect(() => {
@@ -118,7 +126,6 @@ export function usePdfSentenceInteraction(
 				return;
 			}
 			releaseLayoutSentenceHover();
-			const span = spanFromTarget(event.target);
 			const page =
 				event.target instanceof Element
 					? event.target.closest<HTMLElement>(`[${EMBED_PAGE_ATTR}]`)
@@ -135,6 +142,7 @@ export function usePdfSentenceInteraction(
 			}
 			const box = page.getBoundingClientRect();
 			if (!box.width || !box.height) return;
+			const span = spanFromTarget(event, translatedTextHitTest);
 			syncLayoutSentencePointer({
 				docId,
 				regionId: span?.itemId ?? "",
@@ -221,7 +229,7 @@ export function usePdfSentenceInteraction(
 			const current = layoutSentenceHover();
 			if (current?.docId === docId) clearLayoutSentenceHover();
 		};
-	}, [docId, hostRef, enabled]);
+	}, [docId, hostRef, enabled, translatedTextHitTest]);
 }
 
 /**

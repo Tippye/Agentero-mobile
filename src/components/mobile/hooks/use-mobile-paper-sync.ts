@@ -11,6 +11,7 @@ import {
 } from "@/lib/mobile/paper-sync";
 import type { PaperMetadata } from "@/lib/paper/types";
 import {
+	isSyncConflictPending,
 	isSyncProgressPhase,
 	type PaperAvailability,
 	type PendingConflicts,
@@ -107,10 +108,16 @@ export function useMobilePaperSync({
 			setProgress(null);
 			if (payload.status === "error") {
 				const detail = payload.error ?? t("sync.statusError");
-				const unreachable = isLikelyNetworkFailure(detail);
-				notifyError(unreachable ? t("sync.unreachable") : detail, {
+				const message =
+					payload.errorCode === "sync_no_conditional_writes"
+						? t("sync.noConditionalWrites")
+						: payload.errorCode === "sync_unreachable" ||
+								isLikelyNetworkFailure(detail)
+							? t("sync.unreachable")
+							: detail;
+				notifyError(message, {
 					id: `sync:${vaultPath}`,
-					description: unreachable ? detail : undefined,
+					...(message === detail ? {} : { description: detail }),
 				});
 			}
 			void refresh().catch(report);
@@ -140,15 +147,21 @@ export function useMobilePaperSync({
 			for (const off of offs) off();
 		};
 	}, [vaultPath, refresh, t]);
+	const pendingConflicts =
+		pending?.vaultPath === vaultPath ? pending.conflicts : null;
 	const setPinned = useCallback(
 		async (paper: PaperMetadata, pinned: boolean) => {
 			if (!vaultPath || busyRef.current.has(paper.id)) return;
+			if (pinned && pendingConflicts) {
+				notifyError(t("sync.statusConflict"), { id: `sync:${vaultPath}` });
+				return;
+			}
 			busyRef.current.add(paper.id);
 			setBusy(new Set(busyRef.current));
 			try {
 				await setMobilePaperPinned(vaultPath, paper, pinned);
 			} catch (error) {
-				notifyError(errorText(error));
+				if (!isSyncConflictPending(error)) notifyError(errorText(error));
 			} finally {
 				busyRef.current.delete(paper.id);
 				setBusy(new Set(busyRef.current));
@@ -156,19 +169,25 @@ export function useMobilePaperSync({
 				await onChanged();
 			}
 		},
-		[vaultPath, refresh, onChanged],
+		[vaultPath, pendingConflicts, refresh, onChanged, t],
 	);
 	const fetchMissing = useCallback(
 		async (paper: PaperMetadata) => {
-			if (!vaultPath) return false;
-			const fetched = await fetchMobilePaperIfDeferred(vaultPath, paper);
-			if (fetched) {
-				await onChanged();
+			if (!vaultPath || pendingConflicts) return false;
+			try {
+				const fetched = await fetchMobilePaperIfDeferred(vaultPath, paper);
+				if (fetched) {
+					await onChanged();
+					await refresh();
+				}
+				return fetched;
+			} catch (error) {
+				if (!isSyncConflictPending(error)) throw error;
 				await refresh();
+				return false;
 			}
-			return fetched;
 		},
-		[vaultPath, onChanged, refresh],
+		[vaultPath, pendingConflicts, onChanged, refresh],
 	);
 	const states = useMemo(() => {
 		const result: Record<string, MobilePaperSyncState> = {};
@@ -194,8 +213,7 @@ export function useMobilePaperSync({
 		states,
 		setPinned,
 		fetchMissing,
-		pendingConflicts:
-			pending?.vaultPath === vaultPath ? pending.conflicts : null,
+		pendingConflicts,
 		refresh,
 		progressText: progress
 			? t(`sync.phase.${progress.phase}`, {
