@@ -28,13 +28,15 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
 | 文件 | 职责 |
 |---|---|
 | `mod.rs` | 引擎 re-export + `SyncService` 与 `SyncRunLease`：手动、自动与退出同步共用按 Vault 的进程内占用，guard 释放覆盖正常返回、错误、超时和 task abort（跨进程占用由引擎内文件锁负责） |
-| `commands.rs` | 状态、配置、解绑、同步、分类体积、下载策略、论文可用性/获取/清缓存/变更提示；移动命令校验应用私有 Vault；广播 `sync:state` / `sync:progress` 事件 |
+| `commands.rs` | 状态、主同步源与镜像配置、解绑、同步、分类体积、下载策略、论文可用性/获取/清缓存/变更提示；移动命令校验应用私有 Vault；广播 `sync:state` / `sync:progress` / `sync:mirror` 事件 |
 | `credentials.rs` | 共享系统凭据门面、目标绑定、旧配置迁移、双代引用提交与状态恢复；不向 JS 暴露通用秘密读取接口 |
 | `scheduler.rs` | 自动同步：每 Vault 一个后台任务——启动时同步一次、改动静置 30s 后同步、按 `intervalMinutes`（15/30/60）定时兜底；退出时尽力推送（每 Vault 限 5s） |
 
 ## 平板、本机下载与凭据
 
 平板同步入口复用成熟的 S3/WebDAV 设置表单，固定操作应用私有 Vault，不进入桌面官方账号或 Git 工作流。新平板首次使用时初始化「按需下载」，已有明确下载策略保持不变；桌面与 CLI 未配置策略时仍为完整下载。移动新连接默认关闭 LaTeX 源码类别，版面缓存始终保留。同步完成后先重新扫描磁盘再读取 Catalog，避免只刷新 SQLite 而看不到新下载的论文。
+
+一个 Vault 配置一个双向主同步源，并可添加最多三个 S3/WebDAV 只读镜像。镜像沿用主同步源的同步范围，并各自保存凭据和运行状态。若范围内还有按需下载的文件未落盘，本次镜像发布会暂停，以免从镜像快照丢掉这些文件。移动端通过系统凭据服务保存镜像密码。
 
 本机策略与可用性记录位于 `.agentero/sync/availability.json`，配套 guard 检测已管理记录丢失；结构损坏、未来版本或部分写入均报错，不退回空历史。元数据、笔记、标注、内嵌资源及 `source/layout.json` 始终同步。按需模式对尚未缓存的 PDF、源码和附件保留远端条目，缺少本地文件不构成删除。打开缺失 PDF 时去重获取该论文，再重新扫描并重试本地字节；「离线保存」更新固定集合并获取，取消固定保留本地文件。获取仍遵守已启用的类别。清缓存是显式操作，只允许移除与已确认清单相同的未编辑资源，先记录延后状态，再删除文件；没有自动清缓存。
 
@@ -79,7 +81,7 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
 
 - **recovery journal**（`engine/recovery.rs`）：落盘前 `save(pending)` 记录 intent（store/head/scope/落盘前条目）；`apply_local`/上传在 HEAD CAS 之前失败时 `discard`（未发布的 pass 不被当作 accepted，已落盘的本地改动下一轮重新合并）；CAS 成功后 `accept`，`record_sync` 后 `finish`。崩溃恢复时 `resume`：accepted 且远端 HEAD 匹配 intent → 用远端 manifest + 本地观测重建 base（`needs_merge`）；pending 且 HEAD 未匹配 → discard。CAS 失败/manifest 发布失败 → discard，把已落盘的 merged 作为新的本地真相、winner manifest 作为新 base 重试。
 - **scope.rs**：嵌套集合论文根识别 + 逐类对称过滤（含 mobile 的 `ink`/`translated`），排除路径双向失明、绝不因缺失被当作删除。
-- **强制条件写**：pass 前 `probe_conditional_writes`，远端不支持条件写则停止（不改本地）。
+- **条件写**：pass 前探测远端。标准同步要求条件写。WebDAV 可显式启用上游的锁保护降级模式，移动端仍执行逐文件冲突确认。已注册旧 WebDAV 日志协议的 Vault 沿用其协议。镜像发布要求条件写。
 - **fork 保守合并**：plain-PUT 后端同版本号不同 manifest（或回滚 HEAD）视为 fork，无共享祖先时按新增/编辑合并而非推断删除。
 
 下次上游同步若再引入 stage→publish→apply，须显式评估并保留 mobile 的 lane 内落盘与上述数据安全断言，不得作为合并副作用翻回时序。

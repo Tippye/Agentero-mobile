@@ -39,6 +39,7 @@ import {
 	useMemo,
 	useRef,
 	useState,
+	useSyncExternalStore,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { PDF_CHROME_CHIP } from "@/components/viewer/pdf/chrome/pdf-chrome-surface";
@@ -130,6 +131,10 @@ import type {
 	TranslateLinkBox,
 } from "@/lib/pdf/layout/translated-links";
 import {
+	subscribeTranslationSelectionBands,
+	translationSelectionBandsFor,
+} from "@/lib/pdf/layout/translation-selection-bands";
+import {
 	pageQuarterTurns,
 	shellFractionToUnrotatedPdf,
 	unrotatedPageFrameTransform,
@@ -192,6 +197,47 @@ const TRANSLATION_SEARCH_LAYER_STYLE = {
  * Saved translation selection. Same yellow as the English highlight, placed
  * in page fractions so it stays on the sentence the reader boxed.
  */
+const EMPTY_TRANSLATED_SELECTION: readonly PdfAskNormalizedRect[] = [];
+
+function TranslatedEvidenceBands({
+	documentId,
+	pageIndex,
+	draft,
+}: {
+	documentId: string;
+	pageIndex: number;
+	draft?: SelectionCommentDraft | null;
+}) {
+	const live = useSyncExternalStore(
+		subscribeTranslationSelectionBands,
+		() => translationSelectionBandsFor(documentId, pageIndex),
+		() => EMPTY_TRANSLATED_SELECTION,
+	);
+	const rects =
+		draft?.visiblePages?.find((page) => page.pageIndex === pageIndex)?.rects ??
+		live;
+	if (!rects.length) return null;
+	return (
+		<div
+			aria-hidden="true"
+			className="pdf-mark-selection-layer pointer-events-none absolute inset-0 z-[5]"
+		>
+			{rects.map(({ x, y, w, h }) => (
+				<div
+					key={`${x}:${y}:${w}:${h}`}
+					className="absolute -translate-y-[12%] rounded-[1px] bg-[var(--pdf-paper-ink)]"
+					style={{
+						left: `${x * 100}%`,
+						top: `${y * 100}%`,
+						width: `${w * 100}%`,
+						height: `${h * 100}%`,
+					}}
+				/>
+			))}
+		</div>
+	);
+}
+
 function TranslatedHighlightLayer({
 	paints,
 }: {
@@ -363,6 +409,7 @@ export type PdfPageLayoutSlice = {
 
 /** Interaction modes that unmount or gate page layers. */
 export type PdfPageModeSlice = {
+	translatedEvidenceSelection?: boolean;
 	inkEditing?: boolean;
 	regionSelecting: boolean;
 	visualCropPending: boolean;
@@ -1179,6 +1226,13 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 					<PdfSentenceHighlight docId={docId} pageIndex={pageIndex} />
 				) : null}
 				{translateOverlay}
+				{mode.translatedEvidenceSelection && (
+					<TranslatedEvidenceBands
+						documentId={docId}
+						pageIndex={pageIndex}
+						draft={marks.selectionCommentDraft}
+					/>
+				)}
 				<TranslatedHighlightLayer paints={translatedPaints} />
 				{selectionDraftOnPage ? (
 					<CommentCardsLayer
@@ -1474,6 +1528,13 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 				 * z-5); glyphs are z-6 so the tint cannot wash them out.
 				 */}
 				{translateOverlay}
+				{mode.translatedEvidenceSelection && translationVisible && (
+					<TranslatedEvidenceBands
+						documentId={docId}
+						pageIndex={pageIndex}
+						draft={marks.selectionCommentDraft}
+					/>
+				)}
 				{searchAboveTranslation ? (
 					<SearchLayer
 						documentId={activeSearchDocumentId}

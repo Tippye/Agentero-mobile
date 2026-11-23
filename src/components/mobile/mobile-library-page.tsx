@@ -18,7 +18,7 @@ import {
 	DialogDescription,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { Shimmer } from "@/components/ui/shimmer";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/core/utils";
 import type { PaperMetadata } from "@/lib/paper/types";
 
@@ -246,12 +246,27 @@ export function MobileLibraryPage({
 			) : null}
 			<div className="agentero-scroll flex-1">
 				{loading && papers.length === 0 ? (
-					<div className="grid h-full place-items-center px-6">
-						<Shimmer className="text-sm">{t("library.loading")}</Shimmer>
-					</div>
+					<ul className="divide-y" aria-busy="true">
+						<li className="sr-only" role="status">
+							{t("library.loading")}
+						</li>
+						{["one", "two", "three", "four", "five", "six"].map((key) => (
+							<li
+								key={key}
+								aria-hidden="true"
+								className="flex items-center gap-3 px-4 py-4.5 md:px-6"
+							>
+								<Skeleton className="size-11 shrink-0 rounded-lg" />
+								<span className="min-w-0 flex-1 space-y-2">
+									<Skeleton className="h-4 w-4/5" />
+									<Skeleton className="h-3 w-1/2" />
+								</span>
+							</li>
+						))}
+					</ul>
 				) : (
 					<>
-						<ul className="divide-y">
+						<ul className="content-arrive divide-y">
 							{filtered.map((paper) => {
 								const rowKey = rowKeyOf(paper);
 								const isOpen = openKey === rowKey;

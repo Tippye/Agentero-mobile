@@ -42,9 +42,12 @@ import {
 	ZoomPluginPackage,
 } from "@embedpdf/plugin-zoom/react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
+import { PageSkeleton } from "@/components/ui/skeleton";
 import { pdfViewerCapabilities } from "@/components/viewer/pdf/capabilities";
+import { SelectionMenu } from "@/components/viewer/pdf/cards/selection-menu";
 import { PdfBottomBar } from "@/components/viewer/pdf/chrome/pdf-bottom-bar";
 import { PdfCardStack } from "@/components/viewer/pdf/chrome/pdf-card-stack";
 import { PdfFiguresPanel } from "@/components/viewer/pdf/chrome/pdf-figures-panel";
@@ -65,6 +68,7 @@ import { usePdfBookmarkEditor } from "@/components/viewer/pdf/hooks/use-pdf-book
 import { usePdfCards } from "@/components/viewer/pdf/hooks/use-pdf-cards";
 import { usePdfChromeVisibility } from "@/components/viewer/pdf/hooks/use-pdf-chrome-visibility";
 import { usePdfCitations } from "@/components/viewer/pdf/hooks/use-pdf-citations";
+import { usePdfTranslatedEvidence } from "@/components/viewer/pdf/hooks/use-pdf-companion-selection";
 import { usePdfCrossrefPreview } from "@/components/viewer/pdf/hooks/use-pdf-crossref-preview";
 import { usePdfFind } from "@/components/viewer/pdf/hooks/use-pdf-find";
 import { usePdfHighlights } from "@/components/viewer/pdf/hooks/use-pdf-highlights";
@@ -447,9 +451,7 @@ export const PdfViewer = memo(function PdfViewer(props: PdfViewerProps) {
 	if (engineLoading || !engine || !plugins) {
 		return (
 			<div id="agentero-pdf-host" className={hostClass}>
-				<p className="p-6 text-center text-muted-foreground text-sm">
-					{t("pdf.loading")}
-				</p>
+				<PageSkeleton label={t("pdf.loading")} />
 			</div>
 		);
 	}
@@ -481,9 +483,11 @@ export const PdfViewer = memo(function PdfViewer(props: PdfViewerProps) {
 							);
 						}
 						if (!isLoaded) {
-							return (
+							return isLoading ? (
+								<PageSkeleton label={t("pdf.loading")} />
+							) : (
 								<p className="p-6 text-center text-muted-foreground text-sm">
-									{isLoading ? t("pdf.loading") : t("pdf.empty")}
+									{t("pdf.empty")}
 								</p>
 							);
 						}
@@ -1676,6 +1680,46 @@ function PdfViewerInner({
 
 	const translationShown =
 		showTranslatedPages && layoutTranslatePageStateByPage.size > 0;
+	const elementSelectionEnabled = useStore(
+		layoutElementActionStore,
+		(state) => state.selectionDocumentId === layoutSentenceScope(docId),
+	);
+	const elementSelecting =
+		elementSelectionEnabled && !plainViewer && !isRemotePaper;
+	// Keep the clicked selection while focusing the comment editor clears it.
+	const [selectionCommentDraft, setSelectionCommentDraft] =
+		useState<SelectionCommentDraft | null>(null);
+	const selectionCommentDraftRef = useRef(selectionCommentDraft);
+	selectionCommentDraftRef.current = selectionCommentDraft;
+
+	const beginSelectionComment = useCallback((draft: SelectionCommentDraft) => {
+		setSelectionCommentDraft(draft);
+	}, []);
+
+	const translatedEvidenceEnabled =
+		capabilities.translatedEvidenceSelection &&
+		translationShown &&
+		!translationOnly &&
+		!plainViewer &&
+		!embeddedTarget &&
+		!immersiveReading &&
+		!elementSelecting;
+	const translatedEvidence = usePdfTranslatedEvidence({
+		enabled: translatedEvidenceEnabled,
+		docId,
+		hostRef,
+		zoomRef,
+		zoom: zoomLevel,
+		engineRef,
+		docCapRef,
+		itemsByPage: layoutTranslateItemsByPage,
+		paperRelPath,
+		paperAbsPath,
+		createHighlights,
+		canMark: !isRemotePaper,
+		onAsk: startFromAnchor,
+		onNote: beginSelectionComment,
+	});
 	const searchDocumentId = pickPdfSearchDocumentId({
 		sourceDocumentId: docId,
 		translatedDocumentId: reflowDisplayDocument?.id,
@@ -1995,7 +2039,7 @@ function PdfViewerInner({
 		toggleLayoutTranslate,
 	]);
 
-	const suppressLinkPreviews = Boolean(activeCard);
+	const suppressLinkPreviews = Boolean(activeCard || translatedEvidence.menu);
 
 	useEffect(() => {
 		return subscribeLinkPreviewDrag(() => {
@@ -2217,12 +2261,6 @@ function PdfViewerInner({
 		plainViewer,
 	});
 
-	const elementSelectionEnabled = useStore(
-		layoutElementActionStore,
-		(state) => state.selectionDocumentId === layoutSentenceScope(docId),
-	);
-	const elementSelecting =
-		elementSelectionEnabled && !plainViewer && !isRemotePaper;
 	const toggleElementSelection = useCallback(() => {
 		if (
 			plainViewer ||
@@ -2267,9 +2305,9 @@ function PdfViewerInner({
 		return () => window.removeEventListener("keydown", onKeyDown);
 	}, [docId, elementSelecting]);
 
-	// Text selection is not part of the mobile reader: a double-click on a
-	// sentence keeps its hover pairing only, with no floating action menu.
-	usePdfSentenceInteraction(docId, hostRef);
+	usePdfSentenceInteraction(docId, hostRef, undefined, {
+		translatedTextHitTest: capabilities.translatedEvidenceSelection,
+	});
 
 	const handleAskInkRegion = useCallback(
 		async (page: number, region: PdfAskNormalizedRect) => {
@@ -2303,16 +2341,6 @@ function PdfViewerInner({
 		createHighlights,
 		updateHighlightComment,
 	});
-
-	// Keep the clicked selection while focusing the comment editor clears it.
-	const [selectionCommentDraft, setSelectionCommentDraft] =
-		useState<SelectionCommentDraft | null>(null);
-	const selectionCommentDraftRef = useRef(selectionCommentDraft);
-	selectionCommentDraftRef.current = selectionCommentDraft;
-
-	const beginSelectionComment = useCallback((draft: SelectionCommentDraft) => {
-		setSelectionCommentDraft(draft);
-	}, []);
 
 	const handleDismissSelectionComment = useCallback(() => {
 		setSelectionCommentDraft(null);
@@ -2536,6 +2564,7 @@ function PdfViewerInner({
 
 	const pageMode = useMemo<PdfPageModeSlice>(
 		() => ({
+			translatedEvidenceSelection: translatedEvidenceEnabled,
 			elementSelecting,
 			regionSelecting,
 			visualCropPending,
@@ -2548,6 +2577,7 @@ function PdfViewerInner({
 		[
 			regionSelecting,
 			visualCropPending,
+			translatedEvidenceEnabled,
 			elementSelecting,
 			translationOnly,
 			plainViewer,
@@ -3006,7 +3036,7 @@ function PdfViewerInner({
 		<div
 			ref={hostRef}
 			data-pdf-root
-			className="relative flex h-full min-h-0 w-full select-none flex-col"
+			className="content-arrive relative flex h-full min-h-0 w-full select-none flex-col"
 		>
 			{!translationOnly && !immersiveReading && (
 				<PdfLeftToolbar
@@ -3143,6 +3173,10 @@ function PdfViewerInner({
 					active={Boolean(activeCard)}
 					onScroll={rePlaceFloatingOnScroll}
 				/>
+				<ActiveCardScrollSync
+					active={Boolean(translatedEvidence.menu)}
+					onScroll={translatedEvidence.rePlaceSelectionMenu}
+				/>
 				{/* Ctrl+wheel and trackpad pinch are handled by WheelZoomHandler (WebKit
 				    pinch arrives as GestureEvents, not ctrl+wheel); EmbedPDF's built-in
 				    wheel zoom is disabled because its per-tick scale factor collapses
@@ -3172,6 +3206,11 @@ function PdfViewerInner({
 				/>
 			) : null}
 
+			{translatedEvidence.menu &&
+				createPortal(
+					<SelectionMenu {...translatedEvidence.menu} />,
+					document.body,
+				)}
 			{!translationOnly && !immersiveReading && (
 				<PdfCardStack
 					citationPreview={cardCitationPreview}

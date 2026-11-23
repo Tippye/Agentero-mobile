@@ -1,7 +1,5 @@
 /**
- * Dual-pane translation companion. It renders the generated translated PDF and
- * keeps its own find / citation / crossref chrome; source text selection and
- * its floating menu live in the reader pane only.
+ * Dual-pane translation companion with its own find, citation and crossref chrome.
  */
 
 import type { PdfLinkAnnoObject } from "@embedpdf/models";
@@ -19,14 +17,21 @@ import {
 	useEffect,
 	useMemo,
 	useRef,
+	useState,
 	useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
 import { useStore } from "zustand";
+import {
+	createSelectionAskThread,
+	useSelectionAsk,
+} from "@/components/selection/use-selection-ask";
 import { pdfViewerCapabilities } from "@/components/viewer/pdf/capabilities";
+import { AskPopover } from "@/components/viewer/pdf/cards/ask-popover";
 import { PdfCitationPreview } from "@/components/viewer/pdf/cards/citation-preview";
 import { PdfCrossrefPreview } from "@/components/viewer/pdf/cards/crossref-preview";
 import { PdfLinkPreviewCard } from "@/components/viewer/pdf/cards/link-preview-card";
+import { SelectionMenu } from "@/components/viewer/pdf/cards/selection-menu";
 import { PdfFindBar } from "@/components/viewer/pdf/chrome/pdf-find-bar";
 import { PdfTranslateProgressChip } from "@/components/viewer/pdf/chrome/pdf-translate-progress";
 import { EMPTY_LAYOUT_REGIONS_BY_PAGE } from "@/components/viewer/pdf/constants";
@@ -34,6 +39,7 @@ import { usePdfEngineContext } from "@/components/viewer/pdf/engine-provider";
 import { EPHEMERAL_PREVIEW_OPEN_MS } from "@/components/viewer/pdf/floating-hover";
 import { useHoverIntent } from "@/components/viewer/pdf/hooks/use-hover-intent";
 import { usePdfCitations } from "@/components/viewer/pdf/hooks/use-pdf-citations";
+import { usePdfTranslatedEvidence } from "@/components/viewer/pdf/hooks/use-pdf-companion-selection";
 import { usePdfCrossrefPreview } from "@/components/viewer/pdf/hooks/use-pdf-crossref-preview";
 import { usePdfFind } from "@/components/viewer/pdf/hooks/use-pdf-find";
 import { usePdfHighlights } from "@/components/viewer/pdf/hooks/use-pdf-highlights";
@@ -44,6 +50,7 @@ import { usePdfLinkUrlTip } from "@/components/viewer/pdf/hooks/use-pdf-link-url
 import { usePdfPaperTone } from "@/components/viewer/pdf/hooks/use-pdf-paper-tone";
 import { usePdfReadingMode } from "@/components/viewer/pdf/hooks/use-pdf-reading-mode";
 import { usePdfScrollSync } from "@/components/viewer/pdf/hooks/use-pdf-scroll-sync";
+import { usePdfSelectionActions } from "@/components/viewer/pdf/hooks/use-pdf-selection-actions";
 import { usePdfZoomControls } from "@/components/viewer/pdf/hooks/use-pdf-zoom-controls";
 import { useReflowDisplayDocument } from "@/components/viewer/pdf/hooks/use-reflow-display-document";
 import { getLinkDestination } from "@/components/viewer/pdf/layers/citation-links";
@@ -62,7 +69,9 @@ import { usePdfSentenceInteraction } from "@/components/viewer/pdf/layout-senten
 import type {
 	PdfViewerInnerProps,
 	ScreenPoint,
+	SelectionCommentDraft,
 } from "@/components/viewer/pdf/types";
+import { ActiveCardScrollSync } from "@/components/viewer/pdf/viewport/active-card-scroll-sync";
 import { DockviewViewport } from "@/components/viewer/pdf/viewport/dockview-viewport";
 import { InkInputBridge } from "@/components/viewer/pdf/viewport/ink-input-bridge";
 import { KeyboardScrollHandler } from "@/components/viewer/pdf/viewport/keyboard-scroll-handler";
@@ -71,9 +80,14 @@ import { PdfHistoryKeyHandler } from "@/components/viewer/pdf/viewport/pdf-histo
 import { PdfScroller } from "@/components/viewer/pdf/viewport/pdf-scroller";
 import { PdfVimKeyHandler } from "@/components/viewer/pdf/viewport/pdf-vim-key-handler";
 import { WheelZoomHandler } from "@/components/viewer/pdf/viewport/wheel-zoom-handler";
+import { pdfAskContextRequest } from "@/lib/agent/context-request";
 import { backgroundTasksStore } from "@/lib/core/background-tasks";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { sameRelPaperPath } from "@/lib/core/path";
+import {
+	buildPdfAskPrompt,
+	rememberPairedAskTranslation,
+} from "@/lib/pdf/ask/prompt";
 import { destinationInPageBox } from "@/lib/pdf/citation-dest-keys";
 import { partitionHighlightPaint } from "@/lib/pdf/highlight/translated-geometry";
 import {
@@ -281,7 +295,9 @@ export function PdfTranslationViewerInner({
 			publishLayoutSentencePageAnalysis(docId, []);
 		};
 	}, [docId]);
-	usePdfSentenceInteraction(docId, hostRef);
+	usePdfSentenceInteraction(docId, hostRef, undefined, {
+		translatedTextHitTest: capabilities.translatedEvidenceSelection,
+	});
 	const { provides: annotationCap } = useAnnotationCapability();
 	const onHighlightsChangeRef = useRef(onHighlightsChange);
 	onHighlightsChangeRef.current = onHighlightsChange;
@@ -294,6 +310,59 @@ export function PdfTranslationViewerInner({
 		totalPages: docCap?.getDocument(docId)?.pages.length ?? 0,
 		onHighlightsChangeRef,
 	});
+	const translatedEvidenceEnabled =
+		capabilities.translatedEvidenceSelection &&
+		capabilities.layoutTranslation &&
+		layoutTranslatePageStateByPage.size > 0;
+	const [noteDraft, setNoteDraft] = useState<SelectionCommentDraft | null>(
+		null,
+	);
+	const activeSessionRef = useRef<string | null>(null);
+	const ask = useSelectionAsk<ScreenPoint>({
+		activeSessionRef,
+		buildPrompt: buildPdfAskPrompt,
+		context: pdfAskContextRequest,
+	});
+	const { handleCommitSelectionNote } = usePdfSelectionActions(highlights);
+	const dismissNote = useCallback(() => setNoteDraft(null), []);
+	const commitNote = useCallback(
+		(comment: string) => {
+			if (noteDraft) handleCommitSelectionNote(noteDraft, comment);
+			dismissNote();
+		},
+		[noteDraft, handleCommitSelectionNote, dismissNote],
+	);
+	const translatedEvidence = usePdfTranslatedEvidence({
+		enabled: translatedEvidenceEnabled,
+		docId,
+		hostRef,
+		zoomRef,
+		zoom: zoomLevel,
+		engineRef,
+		docCapRef,
+		itemsByPage: layoutTranslateItemsByPage,
+		paperRelPath,
+		paperAbsPath,
+		createHighlights: highlights.createHighlights,
+		canMark: !isRemotePaper,
+		onAsk: (anchor, translation, screen) => {
+			const thread = createSelectionAskThread(
+				paperRelPath ?? paperAbsPath ?? "PDF",
+				anchor.quote ?? "",
+			);
+			thread.anchor = anchor;
+			if (translation) rememberPairedAskTranslation(thread.id, translation);
+			ask.setAsk({ thread, screen });
+		},
+		onNote: setNoteDraft,
+	});
+	const evidenceMenuOpen = Boolean(translatedEvidence.menu);
+	const { hideAsk } = ask;
+	useEffect(() => {
+		if (translatedEvidenceEnabled && isActive) return;
+		hideAsk();
+		dismissNote();
+	}, [translatedEvidenceEnabled, isActive, hideAsk, dismissNote]);
 	const highlightPaint = useMemo(
 		() => partitionHighlightPaint(highlights.highlights),
 		[highlights.highlights],
@@ -460,8 +529,9 @@ export function PdfTranslationViewerInner({
 			textLinks: linkSource.textLinks,
 			translatedHighlightsByPage: highlightPaint.translatedByPage,
 			highlightQuotesByPage: highlightPaint.quotesByPage,
+			selectionCommentDraft: noteDraft,
 		}),
-		[linkSource, highlightPaint],
+		[linkSource, highlightPaint, noteDraft],
 	);
 
 	const pageLayout = useMemo<PdfPageLayoutSlice>(
@@ -635,9 +705,25 @@ export function PdfTranslationViewerInner({
 		urlHoverIntent.cancel();
 	}, [docId]);
 
+	useEffect(() => {
+		if (!evidenceMenuOpen) return;
+		linkHoverIntent.cancel();
+		urlHoverIntent.cancel();
+		clearCitationPreview();
+		clearCrossrefPreview();
+		clearLinkUrlTip();
+	}, [
+		evidenceMenuOpen,
+		linkHoverIntent,
+		urlHoverIntent,
+		clearCitationPreview,
+		clearCrossrefPreview,
+		clearLinkUrlTip,
+	]);
+
 	const handleLinkHover = useCallback(
 		(link: PdfLinkAnnoObject | null, point?: ScreenPoint | null) => {
-			if (linkPreviewDragActive()) {
+			if (evidenceMenuOpen || linkPreviewDragActive()) {
 				linkHoverIntent.cancel();
 				urlHoverIntent.cancel();
 				clearCitationPreview();
@@ -652,6 +738,7 @@ export function PdfTranslationViewerInner({
 			linkHoverIntent.enter({ link, clientPoint: point });
 		},
 		[
+			evidenceMenuOpen,
 			clearCitationPreview,
 			clearCrossrefPreview,
 			clearLinkUrlTip,
@@ -662,7 +749,7 @@ export function PdfTranslationViewerInner({
 
 	const handleLinkUrlHover = useCallback(
 		(url: string | null, point?: ScreenPoint | null) => {
-			if (linkPreviewDragActive()) {
+			if (evidenceMenuOpen || linkPreviewDragActive()) {
 				urlHoverIntent.cancel();
 				clearLinkUrlTip();
 				return;
@@ -674,7 +761,7 @@ export function PdfTranslationViewerInner({
 			}
 			urlHoverIntent.enter({ url: trimmed, clientPoint: point });
 		},
-		[clearLinkUrlTip, urlHoverIntent],
+		[evidenceMenuOpen, clearLinkUrlTip, urlHoverIntent],
 	);
 
 	const handleCitationImportOpenChange = useCallback(
@@ -699,7 +786,13 @@ export function PdfTranslationViewerInner({
 		[citationImport, handleCitationImportOpenChange, isRemotePaper],
 	);
 
-	const pageMode = PAGE_MODE;
+	const pageMode = useMemo<PdfPageModeSlice>(
+		() =>
+			translatedEvidenceEnabled
+				? { ...PAGE_MODE, translatedEvidenceSelection: true }
+				: PAGE_MODE,
+		[translatedEvidenceEnabled],
+	);
 	const pageHandlers = useMemo<PdfPageHandlers>(
 		() => ({
 			...EMPTY_HANDLERS,
@@ -709,6 +802,8 @@ export function PdfTranslationViewerInner({
 			onTextLinkActivate: openExternalUrl,
 			onCitationHover: handleLinkHover,
 			onLinkUrlHover: handleLinkUrlHover,
+			onCommitSelectionComment: commitNote,
+			onDismissSelectionComment: dismissNote,
 		}),
 		[
 			togglePageLayoutTranslate,
@@ -716,6 +811,8 @@ export function PdfTranslationViewerInner({
 			activateCitation,
 			handleLinkHover,
 			handleLinkUrlHover,
+			commitNote,
+			dismissNote,
 		],
 	);
 
@@ -749,6 +846,7 @@ export function PdfTranslationViewerInner({
 			pageMarks,
 			pageLayout,
 			pageHandlers,
+			pageMode,
 			reflowDisplayDocument,
 			searchDocumentId,
 			searchScale,
@@ -759,13 +857,17 @@ export function PdfTranslationViewerInner({
 		<div
 			ref={hostRef}
 			data-pdf-root
-			className="relative flex h-full min-h-0 w-full select-none flex-col"
+			className="content-arrive relative flex h-full min-h-0 w-full select-none flex-col"
 		>
 			<DockviewViewport
 				documentId={docId}
 				hostRef={hostRef}
 				className="min-h-0 min-w-0 flex-1"
 			>
+				<ActiveCardScrollSync
+					active={evidenceMenuOpen}
+					onScroll={translatedEvidence.rePlaceSelectionMenu}
+				/>
 				<PdfHistoryKeyHandler
 					active={isActive}
 					hostRef={hostRef}
@@ -829,6 +931,22 @@ export function PdfTranslationViewerInner({
 			{typeof document !== "undefined"
 				? createPortal(
 						<>
+							{translatedEvidence.menu && (
+								<SelectionMenu {...translatedEvidence.menu} />
+							)}
+							{translatedEvidenceEnabled && ask.ask && (
+								<AskPopover
+									thread={ask.ask.thread}
+									screen={ask.ask.screen}
+									streaming={ask.streaming}
+									error={ask.askError}
+									onSend={ask.sendAskQuestion}
+									onResend={ask.resendAskQuestion}
+									onHide={ask.hideAsk}
+									onDelete={ask.deleteAsk}
+									onStop={ask.stopAskStreaming}
+								/>
+							)}
 							{citationPreview ? (
 								<PdfCitationPreview
 									screen={citationPreview.screen}

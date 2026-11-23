@@ -12,6 +12,7 @@ import {
 	type PendingConflicts as PendingConflictsWire,
 	type SyncBackendConfig as SyncBackendConfigWire,
 	type SyncCredentialState as SyncCredentialStateWire,
+	type SyncMirrorEvent_Deserialize,
 	type SyncStateEvent_Deserialize,
 	type SyncStatus_Serialize,
 } from "@/lib/core/bindings";
@@ -45,8 +46,10 @@ export type SyncBackendConfig = {
 	bucket: string;
 	prefix: string;
 	accessKey: string;
-	/** Masked (`***`) on the way out; send the mask back to keep the secret. */
+	/** Masked on read. Send the mask back to retain the saved secret. */
 	secretKey: string;
+	/** Optional session token. The Host sends a mask when one is saved. */
+	sessionToken?: string | null;
 	forcePathStyle: boolean;
 	/** WebDAV server directory, e.g. `https://dav.jianguoyun.com/dav/agentero/`. */
 	webdavUrl: string;
@@ -74,6 +77,9 @@ export type SyncBackendConfig = {
 	conditionalWrites: boolean;
 	/** Divergent-edit handling: auto (mtime wins) or ask (pause + prompt). */
 	conflictPolicy: "auto" | "ask";
+	/** Per-device opt-in to the degraded protocol (WebDAV stores that ignore
+	 * conditional writes). Off by default; every device must enable it. */
+	allowDegradedSync: boolean;
 	/** Sync scope for bulky paper assets (default: everything). */
 	scope: SyncScope;
 };
@@ -86,6 +92,13 @@ export type PendingConflicts = PendingConflictsWire;
 export type DownloadPolicy = DownloadPolicyWire;
 export type PaperAssetAvailability = PaperAssetAvailabilityWire;
 export type PaperAvailability = PaperAvailabilityWire;
+export type SyncMirrorStatus = {
+	config: SyncBackendConfig;
+	credentialState?: SyncCredentialState;
+	lastSyncAt?: string;
+	lastVersion: number;
+	lastError?: string;
+};
 
 export type SyncStatus = {
 	configured: boolean;
@@ -96,6 +109,8 @@ export type SyncStatus = {
 	lastVersion: number;
 	/** Divergent edits awaiting a user decision (ask policy). */
 	pendingConflicts?: PendingConflicts | null;
+	/** Read-only mirrors in configuration order. */
+	mirrors: SyncMirrorStatus[];
 };
 
 export type SyncOutcome = {
@@ -109,6 +124,15 @@ export type SyncOutcome = {
 
 /** `sync:state` payload comes straight from the generated wire contract. */
 export type SyncStateEvent = SyncStateEvent_Deserialize;
+
+/** `sync:mirror` payload: one event per mirror pass (started → published | error). */
+export type SyncMirrorEvent = SyncMirrorEvent_Deserialize;
+
+export type SyncMirrorPhase = "started" | "published" | "error";
+
+export function isSyncMirrorPhase(value: string): value is SyncMirrorPhase {
+	return value === "started" || value === "published" || value === "error";
+}
 
 /** `sync:progress` phases; the wire payload types `phase` as a plain string. */
 export type SyncPhase = "scan" | "pull" | "download" | "upload" | "finalize";
@@ -142,6 +166,7 @@ export const emptySyncConfig = (
 	prefix: "",
 	accessKey: "",
 	secretKey: "",
+	sessionToken: null,
 	forcePathStyle: true,
 	webdavUrl: "",
 	webdavUsername: "",
@@ -156,6 +181,7 @@ export const emptySyncConfig = (
 	autoSync: true,
 	intervalMinutes: 30,
 	conditionalWrites: true,
+	allowDegradedSync: false,
 	// Desktop and CLI keep the historical automatic policy; mobile asks.
 	conflictPolicy: "auto",
 	// Product defaults: ink has always synced; translated PDFs are opt-in.
@@ -191,6 +217,13 @@ function statusFromWire(status: SyncStatus_Serialize): SyncStatus {
 		lastSyncAt: status.lastSyncAt ?? undefined,
 		lastVersion: status.lastVersion,
 		pendingConflicts: status.pendingConflicts,
+		mirrors: (status.mirrors ?? []).map((mirror) => ({
+			config: configFromWire(mirror.config),
+			credentialState: mirror.credentialState,
+			lastSyncAt: mirror.lastSyncAt ?? undefined,
+			lastVersion: mirror.lastVersion,
+			lastError: mirror.lastError ?? undefined,
+		})),
 	};
 }
 
@@ -204,6 +237,7 @@ function configFromWire(config: SyncBackendConfigWire): SyncBackendConfig {
 		prefix: config.prefix ?? "",
 		accessKey: config.accessKey ?? "",
 		secretKey: config.secretKey ?? "",
+		sessionToken: config.sessionToken ?? null,
 		forcePathStyle: config.forcePathStyle ?? true,
 		webdavUrl: config.webdavUrl ?? "",
 		webdavUsername: config.webdavUsername ?? "",
@@ -220,6 +254,7 @@ function configFromWire(config: SyncBackendConfigWire): SyncBackendConfig {
 		intervalMinutes: config.intervalMinutes ?? 30,
 		conditionalWrites: config.conditionalWrites ?? true,
 		conflictPolicy: config.conflictPolicy === "ask" ? "ask" : "auto",
+		allowDegradedSync: config.allowDegradedSync ?? false,
 		scope: {
 			pdf: config.scope?.pdf ?? true,
 			source: config.scope?.source ?? true,
@@ -243,9 +278,12 @@ export function syncScopeSizes(vaultPath: string): Promise<SyncScopeSizes> {
 export async function syncConfigure(
 	vaultPath: string,
 	config: SyncBackendConfig,
+	mirrors: SyncBackendConfig[] = [],
 ): Promise<SyncStatus> {
 	return statusFromWire(
-		await callApiResult(() => commands.syncConfigure({ vaultPath, config })),
+		await callApiResult(() =>
+			commands.syncConfigure({ vaultPath, config, mirrors }),
+		),
 	);
 }
 
@@ -311,6 +349,35 @@ export function syncEvictPaper(
 }
 export async function syncNotifyChange(vaultPath: string): Promise<void> {
 	await callApiResult(() => commands.syncNotifyChange({ vaultPath }));
+}
+
+/** Which side wins a manual overwrite. */
+export type SyncOverwriteDirection = "remoteToLocal" | "localToRemote";
+
+/** Impact preview for the overwrite confirmation dialog (read-only). */
+export type SyncOverwritePreview = {
+	willDeleteLocal: number;
+	willDownload: number;
+	willRemoveRemote: number;
+	willUpload: number;
+	remoteVersion: number;
+};
+
+export function syncOverwritePreview(
+	vaultPath: string,
+	direction: SyncOverwriteDirection,
+): Promise<SyncOverwritePreview> {
+	return callApiResult(() =>
+		commands.syncOverwritePreview({ vaultPath, direction }),
+	);
+}
+
+/** Destructive manual overwrite; the UI confirms with a preview first. */
+export function syncOverwrite(
+	vaultPath: string,
+	direction: SyncOverwriteDirection,
+): Promise<SyncOutcome> {
+	return callApiResult(() => commands.syncOverwrite({ vaultPath, direction }));
 }
 
 export type SyncCloudUsage = {

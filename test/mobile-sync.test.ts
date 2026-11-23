@@ -11,6 +11,7 @@ const host = vi.hoisted(() => {
 		running: false,
 		lastVersion: 0,
 		credentialState: "notConfigured",
+		mirrors: [],
 	};
 	const policy: DownloadPolicy = { mode: "full", pinnedPaperIds: [] };
 	const availability: PaperAvailability[] = [];
@@ -72,6 +73,7 @@ vi.mock("@/lib/core/bindings", () => ({
 				};
 			},
 		},
+		syncMirror: { listen: async () => () => {} },
 		syncProgress: {
 			listen: async (callback: typeof host.onProgress) => {
 				host.onProgress = callback;
@@ -221,6 +223,7 @@ beforeEach(async () => {
 		running: false,
 		lastSyncAt: undefined,
 		lastVersion: 0,
+		mirrors: [],
 	};
 	host.get.mockImplementation(async () => reply(host.status));
 	host.configure.mockImplementation(
@@ -366,6 +369,29 @@ describe("tablet composition of mature sync settings", () => {
 		expect(host.cloud).not.toHaveBeenCalled();
 	});
 
+	it("offers object storage and WebDAV as read-only mirrors for a connected mobile Vault", async () => {
+		host.status = {
+			...host.status,
+			configured: true,
+			credentialState: "ready",
+			config: emptySyncConfig("s3"),
+		};
+		await render();
+		await click("Add mirror");
+		const backend = document.querySelector('[aria-label="Mirror backend"]');
+		expect(backend).not.toBeNull();
+		await act(() => {
+			backend?.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+			);
+		});
+		expect(
+			[...document.querySelectorAll('[role="option"]')]
+				.map((element) => element.textContent?.trim())
+				.sort(),
+		).toEqual(["Object storage", "WebDAV"]);
+	});
+
 	it("configures S3 through the existing IPC adapter and preserves masked secrets on later edits", async () => {
 		await render();
 		await fill("sync-endpoint", "https://s3.example.org");
@@ -474,7 +500,9 @@ describe("tablet composition of mature sync settings", () => {
 		await render();
 		host.configure.mockRejectedValueOnce(new Error("Cannot reach WebDAV"));
 		await click("Connect");
-		expect(host.error).toHaveBeenCalledWith("Cannot reach WebDAV");
+		expect(host.error).toHaveBeenCalledWith("Cannot reach WebDAV", {
+			id: `sync:${vault}`,
+		});
 		expect(host.rescan).not.toHaveBeenCalled();
 		await act(async () => {
 			host.onState?.({
@@ -579,7 +607,9 @@ describe("tablet composition of mature sync settings", () => {
 			new Error("Cannot remove saved credentials"),
 		);
 		await click("Disconnect");
-		expect(host.error).toHaveBeenCalledWith("Cannot remove saved credentials");
+		expect(host.error).toHaveBeenCalledWith("Cannot remove saved credentials", {
+			id: `sync:${vault}`,
+		});
 		expect(
 			(document.getElementById("sync-endpoint") as HTMLInputElement).value,
 		).toBe("https://existing.example.org");

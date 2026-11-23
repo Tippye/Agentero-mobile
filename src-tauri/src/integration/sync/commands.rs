@@ -2,7 +2,8 @@
 //! `sync:progress` events so the settings pane (and later a status bar
 //! indicator) can follow along from any window.
 
-use super::config::SyncBackendConfig;
+use super::config::{self, SyncBackendConfig, VaultSyncConfig};
+use super::credentials::{self, CredentialStatus, SyncCredentialState, TargetStatus};
 use super::engine::{self, SyncOutcome};
 use super::local;
 use super::snapshot;
@@ -13,7 +14,9 @@ use agentero_core::features::sync::conflicts::{self, ConflictResolution, Pending
 use agentero_core::features::sync::lock::SyncLock;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(mobile)]
+use tauri::Manager;
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -21,18 +24,35 @@ pub struct SyncVaultArgs {
     pub vault_path: String,
 }
 
-#[derive(Debug, Deserialize, specta::Type)]
+#[derive(Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncConfigureArgs {
     pub vault_path: String,
     pub config: SyncBackendConfig,
+    /// Read-only mirrors published after the primary pass. The primary stays
+    /// the only backend that pulls and merges.
+    #[serde(default)]
+    pub mirrors: Vec<SyncBackendConfig>,
+}
+
+/// One read-only mirror and its last pass result.
+#[derive(Debug, Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncMirrorStatus {
+    pub config: SyncBackendConfig,
+    pub credential_state: SyncCredentialState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_sync_at: Option<String>,
+    pub last_version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
     pub configured: bool,
-    pub credential_state: super::credentials::SyncCredentialState,
+    pub credential_state: SyncCredentialState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<SyncBackendConfig>,
     pub running: bool,
@@ -42,6 +62,9 @@ pub struct SyncStatus {
     /// Divergent edits awaiting confirmation under the ask policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_conflicts: Option<PendingConflicts>,
+    /// Mirrors in configuration order; empty for a single-backend binding.
+    #[serde(default)]
+    pub mirrors: Vec<SyncMirrorStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +74,10 @@ struct SyncStateEvent<'a> {
     status: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Stable domain code of `error` (e.g. `sync_no_conditional_writes`) so
+    /// listeners can localize without matching message text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +87,33 @@ struct SyncProgressEvent<'a> {
     phase: &'a str,
     current: usize,
     total: usize,
+}
+
+/// Per-mirror pass state. Progress phases stay vault-level, so a mirror run is
+/// reported as one `started` → `published` | `error` pair instead.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncMirrorEvent<'a> {
+    vault_path: &'a str,
+    /// Zero-based position in the vault's mirror list (matches
+    /// `SyncStatus.mirrors[]` while the saved binding is unchanged).
+    index: usize,
+    /// `SyncBackendConfig::remote_identity` — matches `SyncStatus.mirrors[].config`.
+    identity: &'a str,
+    backend: &'a str,
+    /// `started` | `published` | `error`.
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+}
+
+fn backend_label(backend: config::SyncBackendKind) -> &'static str {
+    match backend {
+        config::SyncBackendKind::S3 => "s3",
+        config::SyncBackendKind::Webdav => "webdav",
+        config::SyncBackendKind::Git => "git",
+        config::SyncBackendKind::Agentero => "agentero",
+    }
 }
 
 pub fn account_api_origin() -> String {
@@ -149,31 +203,60 @@ pub async fn sync_get_status(
     service: State<'_, SyncService>,
 ) -> Result<ApiResult<SyncStatus>, String> {
     let inner = async {
-        let dir = vault_dir(&app, &args.vault_path)?;
-        let status = super::credentials::status(&app, args.vault_path.trim()).await?;
-        let meta = local::read_meta(&dir)?;
+        let key = args.vault_path.trim();
+        let dir = vault_dir(&app, key)?;
+        let status = credentials::status(&app, key).await?;
         let pending_conflicts = if status
-            .config
+            .primary
             .as_ref()
-            .is_some_and(|cfg| asks_for_conflicts(&dir, cfg))
+            .is_some_and(|target| asks_for_conflicts(&dir, &target.config))
         {
             conflicts::read_pending(&dir)?
         } else {
             None
         };
-        Ok::<_, AppError>(SyncStatus {
-            configured: status.config.is_some(),
-            config: status.config,
-            credential_state: status.state,
-            running: service.is_running(args.vault_path.trim()),
-            last_sync_at: meta.last_sync_at,
-            last_version: meta.last_version,
-            pending_conflicts,
-        })
+        sync_status(&dir, status, service.is_running(key), pending_conflicts)
     };
     Ok(match inner.await {
         Ok(status) => ApiResult::ok(status),
         Err(error) => map_err(error),
+    })
+}
+
+fn sync_status(
+    dir: &std::path::Path,
+    status: CredentialStatus,
+    running: bool,
+    pending_conflicts: Option<PendingConflicts>,
+) -> Result<SyncStatus, AppError> {
+    let meta = local::read_meta(dir)?;
+    let (config, credential_state) = match status.primary {
+        Some(TargetStatus { config, state }) => (Some(config), state),
+        None => (None, SyncCredentialState::NotConfigured),
+    };
+    let mirrors = status
+        .mirrors
+        .into_iter()
+        .map(|target| {
+            let state = engine::mirror_state(dir, &target.config);
+            SyncMirrorStatus {
+                config: target.config,
+                credential_state: target.state,
+                last_sync_at: state.last_sync_at,
+                last_version: state.last_version,
+                last_error: state.last_error,
+            }
+        })
+        .collect();
+    Ok(SyncStatus {
+        configured: config.is_some(),
+        config,
+        credential_state,
+        running,
+        last_sync_at: meta.last_sync_at,
+        last_version: meta.last_version,
+        pending_conflicts,
+        mirrors,
     })
 }
 
@@ -192,42 +275,39 @@ pub async fn sync_configure(
         let _lease = service
             .try_begin(&key)
             .ok_or_else(|| AppError::message("sync already running"))?;
-        let _lock = SyncLock::try_acquire(&dir)?
-            .ok_or_else(|| AppError::message("another vault sync is running"))?;
-        let previous = super::config::try_get(&key)?;
-        let mut candidate = args.config.normalized();
-        attach_agentero_session(&app, &mut candidate).await;
-        let configured = super::credentials::configure(&app, &key, &dir, candidate).await?;
-        let config = &configured.config;
-        let keep_review = asks_for_conflicts(&dir, config)
-            && previous.as_ref().is_some_and(|old| {
-                old.conflict_policy == config.conflict_policy
-                    && old.scope == config.scope
-                    && old.remote_identity() == config.remote_identity()
+        let lock = SyncLock::acquire(&dir)?;
+        let previous = config::try_get(&key)?;
+        let mut binding = VaultSyncConfig {
+            primary: args.config.normalized(),
+            mirrors: args
+                .mirrors
+                .into_iter()
+                .map(SyncBackendConfig::normalized)
+                .collect(),
+        };
+        attach_agentero_session(&app, &mut binding.primary).await;
+        let keep_review = asks_for_conflicts(&dir, &binding.primary)
+            && previous.as_ref().is_some_and(|saved| {
+                saved.primary.conflict_policy == binding.primary.conflict_policy
+                    && saved.primary.scope == binding.primary.scope
+                    && saved.primary.remote_identity() == binding.primary.remote_identity()
             });
+        if cfg!(mobile) && !keep_review {
+            ensure_no_pending_review(&dir)?;
+        }
+        let configured = credentials::configure(&app, &key, &dir, binding).await?;
         let pending_conflicts = if keep_review {
             conflicts::read_pending(&dir)?
         } else {
-            conflicts::clear_locked(&_lock)?;
+            conflicts::clear_locked(&lock)?;
             None
         };
-        let meta = local::read_meta(&dir)?;
-        Ok::<_, AppError>(SyncStatus {
-            configured: true,
-            config: Some(configured.config.masked()),
-            credential_state: if app
-                .state::<Option<crate::integration::credentials::CredentialStore>>()
-                .is_some()
-            {
-                super::credentials::SyncCredentialState::Ready
-            } else {
-                super::credentials::SyncCredentialState::Inline
-            },
-            running: false,
-            last_sync_at: meta.last_sync_at,
-            last_version: meta.last_version,
+        sync_status(
+            &dir,
+            CredentialStatus::configured(&configured.binding, configured.protected),
+            false,
             pending_conflicts,
-        })
+        )
     };
     let result = inner.await;
     if result.is_ok() {
@@ -253,10 +333,13 @@ pub async fn sync_disconnect(
         let _lease = service
             .try_begin(&key)
             .ok_or_else(|| AppError::message("sync already running"))?;
-        let _lock = SyncLock::try_acquire(&dir)?
+        let lock = SyncLock::try_acquire(&dir)?
             .ok_or_else(|| AppError::message("another vault sync is running"))?;
-        super::credentials::clear(&app, &key).await?;
-        local::clear(&_lock)?;
+        if cfg!(mobile) {
+            ensure_no_pending_review(&dir)?;
+        }
+        credentials::clear(&app, &key).await?;
+        local::clear(&lock)?;
         Ok::<_, AppError>(())
     };
     Ok(match inner.await {
@@ -435,11 +518,11 @@ async fn perform_sync_task(
         .try_begin(vault_key)
         .ok_or_else(|| AppError::message("sync already running"))?;
     let lock = SyncLock::acquire(&dir)?;
-    let mut cfg = super::credentials::load(app, vault_key)
+    let mut binding = credentials::load(app, vault_key)
         .await?
         .ok_or_else(|| AppError::message("sync is not configured"))?;
-    attach_agentero_session(app, &mut cfg).await;
-    emit_state(app, vault_key, "syncing", None);
+    attach_agentero_session(app, &mut binding.primary).await;
+    emit_state(app, vault_key, "syncing", None, None);
     let progress_app = app.clone();
     let progress_key = vault_key.to_string();
     let progress = move |phase: &str, current: usize, total: usize| {
@@ -453,6 +536,27 @@ async fn perform_sync_task(
             },
         );
     };
+    let mirror_watch = |index: usize,
+                        mirror: &SyncBackendConfig,
+                        phase: engine::MirrorPhase,
+                        error: Option<&str>| {
+        let status = match phase {
+            engine::MirrorPhase::Started => "started",
+            engine::MirrorPhase::Published => "published",
+            engine::MirrorPhase::Failed => "error",
+        };
+        let _ = app.emit(
+            "sync:mirror",
+            SyncMirrorEvent {
+                vault_path: vault_key,
+                index,
+                identity: &credentials::masked_status_config(mirror).remote_identity(),
+                backend: backend_label(mirror.backend),
+                status,
+                error,
+            },
+        );
+    };
     let reason = if matches!(task, SyncTask::FetchPaper(_)) {
         crate::features::mobile_background::BackgroundReason::Transfer
     } else {
@@ -461,19 +565,24 @@ async fn perform_sync_task(
     let result = crate::features::mobile_background::with_work(app, reason, async {
         match task {
             SyncTask::FetchPaper(paper) => {
-                availability::fetch_paper_locked(&lock, &cfg, paper, &progress).await
+                availability::fetch_paper_locked(&lock, &binding.primary, paper, &progress).await
             }
-            SyncTask::Sync => engine::sync_vault_locked(&lock, &cfg, &progress).await,
+            SyncTask::Sync => {
+                engine::sync_all_locked(&lock, &binding, &progress, Some(&mirror_watch)).await
+            }
             SyncTask::Resolve(args) => {
-                engine::resolve_conflicts_locked(
+                let outcome = engine::resolve_conflicts_locked(
                     &lock,
-                    &cfg,
+                    &binding.primary,
                     &args.review_id,
                     args.default_resolution,
                     args.resolutions,
                     &progress,
                 )
-                .await
+                .await?;
+                engine::publish_mirrors_locked(&lock, &binding, &progress, Some(&mirror_watch))
+                    .await;
+                Ok(outcome)
             }
         }
     })
@@ -483,14 +592,20 @@ async fn perform_sync_task(
     drop(lease);
     match result {
         Ok(outcome) => {
-            emit_state(app, vault_key, "idle", None);
+            emit_state(app, vault_key, "idle", None, None);
             Ok(outcome)
         }
         Err(e) => {
             if e.code() == conflicts::PENDING_CODE {
-                emit_state(app, vault_key, "conflict", None);
+                emit_state(app, vault_key, "conflict", None, None);
             } else {
-                emit_state(app, vault_key, "error", Some(e.to_string()));
+                emit_state(
+                    app,
+                    vault_key,
+                    "error",
+                    Some(e.to_string()),
+                    Some(e.code().to_string()),
+                );
             }
             Err(e)
         }
@@ -533,6 +648,16 @@ fn asks_for_conflicts(vault: &std::path::Path, config: &SyncBackendConfig) -> bo
         && matches!(engine::uses_webdav_journal(vault, config), Ok(false))
 }
 
+fn ensure_no_pending_review(vault: &std::path::Path) -> Result<(), AppError> {
+    if conflicts::read_pending(vault)?.is_some() {
+        return Err(AppError::domain(
+            conflicts::PENDING_CODE,
+            "Resolve the pending sync conflicts before changing the connection",
+        ));
+    }
+    Ok(())
+}
+
 /// Automatic sync waits only for unanswered reviews. A submitted review may
 /// resume after a failure or restart, subject to the same version validation.
 pub(super) fn has_pending_conflicts(app: &AppHandle, vault_path: &str) -> bool {
@@ -543,7 +668,7 @@ pub(super) fn has_pending_conflicts(app: &AppHandle, vault_path: &str) -> bool {
         .ok()
         .flatten()
         .as_ref()
-        .is_some_and(|cfg| asks_for_conflicts(&dir, cfg))
+        .is_some_and(|binding| asks_for_conflicts(&dir, &binding.primary))
         && conflicts::read_pending(&dir).ok().flatten().is_some()
 }
 
@@ -590,6 +715,119 @@ pub struct SyncResolveConflictsArgs {
     /// Fallback for reviewed paths absent from `resolutions`.
     pub default_resolution: ConflictResolution,
     pub resolutions: std::collections::BTreeMap<String, ConflictResolution>,
+}
+
+#[derive(Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncOverwriteArgs {
+    pub vault_path: String,
+    pub direction: engine::OverwriteDirection,
+}
+
+fn ensure_desktop_overwrite() -> Result<(), AppError> {
+    if cfg!(mobile) {
+        return Err(AppError::domain(
+            "sync_overwrite_unavailable_mobile",
+            "Manual sync overwrite is only available on desktop",
+        ));
+    }
+    Ok(())
+}
+
+/// Read-only impact preview for the manual-overwrite confirmation dialog.
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_overwrite_preview(
+    app: AppHandle,
+    args: SyncOverwriteArgs,
+) -> Result<ApiResult<engine::OverwritePreview>, String> {
+    let key = args.vault_path.trim().to_string();
+    let inner = async {
+        ensure_desktop_overwrite()?;
+        let dir = vault_dir(&app, &key)?;
+        let _lock = SyncLock::acquire(&dir)?;
+        let binding = credentials::load(&app, &key)
+            .await?
+            .ok_or_else(|| AppError::message("sync is not configured"))?;
+        engine::overwrite_preview(&dir, &binding.primary, args.direction).await
+    };
+    Ok(match inner.await {
+        Ok(preview) => ApiResult::ok(preview),
+        Err(error) => map_err(error),
+    })
+}
+
+/// Manual overwrite: `remoteToLocal` mirrors the remote HEAD onto disk
+/// (discarding divergent local content); `localToRemote` publishes the local
+/// scan as the new HEAD. The UI confirms with a preview before calling this.
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_overwrite(
+    app: AppHandle,
+    service: State<'_, SyncService>,
+    args: SyncOverwriteArgs,
+) -> Result<ApiResult<SyncOutcome>, String> {
+    use crate::core::log_util::OpTimer;
+
+    let vault_key = args.vault_path.trim().to_string();
+    let op = OpTimer::start_with(
+        "sync_overwrite",
+        format!("vault={vault_key} direction={:?}", args.direction),
+    );
+    let inner = async {
+        ensure_desktop_overwrite()?;
+        let dir = vault_dir(&app, &vault_key)?;
+        let lease = service
+            .try_begin(&vault_key)
+            .ok_or_else(|| AppError::message("sync already running"))?;
+        let lock = SyncLock::acquire(&dir)?;
+        let binding = credentials::load(&app, &vault_key)
+            .await?
+            .ok_or_else(|| AppError::message("sync is not configured"))?;
+        emit_state(&app, &vault_key, "syncing", None, None);
+        let progress_app = app.clone();
+        let progress_key = vault_key.clone();
+        let progress = move |phase: &str, current: usize, total: usize| {
+            let _ = progress_app.emit(
+                "sync:progress",
+                SyncProgressEvent {
+                    vault_path: &progress_key,
+                    phase,
+                    current,
+                    total,
+                },
+            );
+        };
+        let result =
+            engine::overwrite_locked(&lock, &binding.primary, args.direction, &progress).await;
+        drop(lock);
+        // Terminal event consumers immediately re-read status; release first.
+        drop(lease);
+        match &result {
+            Ok(_) => emit_state(&app, &vault_key, "idle", None, None),
+            Err(e) => emit_state(
+                &app,
+                &vault_key,
+                "error",
+                Some(e.to_string()),
+                Some(e.code().to_string()),
+            ),
+        }
+        result
+    };
+    match inner.await {
+        Ok(outcome) => {
+            op.finish_ok_extra(format!(
+                "version={} up={} down={} deletedLocal={}",
+                outcome.version, outcome.uploaded, outcome.downloaded, outcome.deleted_local
+            ));
+            Ok(ApiResult::ok(outcome))
+        }
+        Err(e) => {
+            op.finish_err(&e);
+            Ok(map_err(e))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, specta::Type)]
@@ -696,13 +934,20 @@ pub async fn sync_cloud_usage(
     }))
 }
 
-fn emit_state(app: &AppHandle, vault_path: &str, status: &str, error: Option<String>) {
+fn emit_state(
+    app: &AppHandle,
+    vault_path: &str,
+    status: &str,
+    error: Option<String>,
+    error_code: Option<String>,
+) {
     let _ = app.emit(
         "sync:state",
         SyncStateEvent {
             vault_path,
             status,
             error,
+            error_code,
         },
     );
 }
@@ -716,9 +961,10 @@ fn emit_state(app: &AppHandle, vault_path: &str, status: &str, error: Option<Str
 /// type-bound.
 #[cfg(test)]
 mod events_contract_shape_tests {
-    use super::{SyncProgressEvent, SyncStateEvent};
+    use super::{SyncMirrorEvent, SyncProgressEvent, SyncStateEvent};
     use crate::app::events_contract::{
-        SyncProgressEvent as MirrorSyncProgress, SyncStateEvent as MirrorSyncState,
+        SyncMirrorEvent as MirrorSyncMirror, SyncProgressEvent as MirrorSyncProgress,
+        SyncStateEvent as MirrorSyncState,
     };
 
     #[test]
@@ -727,11 +973,13 @@ mod events_contract_shape_tests {
             vault_path: "/vault",
             status: "configured",
             error: Some("offline".to_string()),
+            error_code: Some("sync_unreachable".to_string()),
         };
         let mirror = MirrorSyncState {
             vault_path: "/vault".to_string(),
             status: "configured".to_string(),
             error: Some("offline".to_string()),
+            error_code: Some("sync_unreachable".to_string()),
         };
         assert_eq!(
             serde_json::to_value(&real).unwrap(),
@@ -742,11 +990,13 @@ mod events_contract_shape_tests {
             vault_path: "/vault",
             status: "disconnected",
             error: None,
+            error_code: None,
         };
         let mirror_none = MirrorSyncState {
             vault_path: "/vault".to_string(),
             status: "disconnected".to_string(),
             error: None,
+            error_code: None,
         };
         assert_eq!(
             serde_json::to_value(&real_none).unwrap(),
@@ -777,5 +1027,51 @@ mod events_contract_shape_tests {
         fn eq_type<T>(_: &T, _: &T) {}
         eq_type(&real.current, &mirror.current);
         eq_type(&real.total, &mirror.total);
+    }
+
+    #[test]
+    fn sync_mirror_mirror_matches_emit_payload_shape() {
+        let real = SyncMirrorEvent {
+            vault_path: "/vault",
+            index: 0,
+            identity: "git|git@example.com:me/vault.git|main",
+            backend: "git",
+            status: "error",
+            error: Some("push rejected"),
+        };
+        let mirror = MirrorSyncMirror {
+            vault_path: "/vault".to_string(),
+            index: 0,
+            identity: "git|git@example.com:me/vault.git|main".to_string(),
+            backend: "git".to_string(),
+            status: "error".to_string(),
+            error: Some("push rejected".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&real).unwrap(),
+            serde_json::to_value(&mirror).unwrap(),
+            "SyncMirrorEvent mirror drifted from the emitted payload"
+        );
+        let real_none = SyncMirrorEvent {
+            vault_path: "/vault",
+            index: 0,
+            identity: "git|git@example.com:me/vault.git|main",
+            backend: "git",
+            status: "published",
+            error: None,
+        };
+        let mirror_none = MirrorSyncMirror {
+            vault_path: "/vault".to_string(),
+            index: 0,
+            identity: "git|git@example.com:me/vault.git|main".to_string(),
+            backend: "git".to_string(),
+            status: "published".to_string(),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&real_none).unwrap(),
+            serde_json::to_value(&mirror_none).unwrap(),
+            "SyncMirrorEvent mirror drifted from the emitted payload (None variant)"
+        );
     }
 }

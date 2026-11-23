@@ -10,6 +10,7 @@ export type PdfViewerCapabilities = Readonly<{
 	apiOnly?: boolean;
 	layoutAnalysis: boolean;
 	layoutTranslation: boolean;
+	translatedEvidenceSelection: boolean;
 	smartHighlights: boolean;
 	latex: boolean;
 	menuContributions: boolean;
@@ -20,6 +21,7 @@ const DESKTOP_CAPABILITIES: PdfViewerCapabilities = Object.freeze({
 	addToChat: true,
 	layoutAnalysis: true,
 	layoutTranslation: true,
+	translatedEvidenceSelection: true,
 	smartHighlights: true,
 	latex: true,
 	menuContributions: true,
@@ -31,6 +33,7 @@ const MOBILE_CAPABILITIES: PdfViewerCapabilities = Object.freeze({
 	apiOnly: true,
 	layoutAnalysis: true,
 	layoutTranslation: true,
+	translatedEvidenceSelection: false,
 	smartHighlights: false,
 	latex: false,
 	menuContributions: false,

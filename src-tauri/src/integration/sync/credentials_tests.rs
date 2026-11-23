@@ -10,17 +10,17 @@ use std::{
 
 #[derive(Default)]
 struct Metadata {
-    values: Mutex<HashMap<String, SyncBackendConfig>>,
+    values: Mutex<HashMap<String, VaultSyncConfig>>,
     fail_set: AtomicU8,
     fail_on_call: AtomicUsize,
     set_calls: AtomicUsize,
     fail_remove: AtomicBool,
 }
 impl ConfigStorage for Metadata {
-    fn get(&self, key: &str) -> Result<Option<SyncBackendConfig>, AppError> {
+    fn get(&self, key: &str) -> Result<Option<VaultSyncConfig>, AppError> {
         Ok(self.values.lock().unwrap().get(key).cloned())
     }
-    fn set(&self, key: &str, cfg: SyncBackendConfig) -> Result<(), AppError> {
+    fn set(&self, key: &str, cfg: VaultSyncConfig) -> Result<(), AppError> {
         let call = self.set_calls.fetch_add(1, Ordering::SeqCst) + 1;
         let selected = self.fail_on_call.load(Ordering::SeqCst);
         let failure = if selected == 0 || selected == call {
@@ -113,19 +113,27 @@ fn s3(secret: &str) -> SyncBackendConfig {
 async fn migration_protects_then_retires_plaintext_and_restores_after_restart() {
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
-    metadata.set("vault", s3("unique-legacy-password")).unwrap();
+    metadata
+        .set("vault", VaultSyncConfig::new(s3("unique-legacy-password")))
+        .unwrap();
     let repo = repository(backend.clone(), metadata.clone());
     let loaded = repo.load("vault").await.unwrap().unwrap();
-    assert_eq!(loaded.secret_key, "unique-legacy-password");
+    assert_eq!(loaded.primary.secret_key, "unique-legacy-password");
     let public = metadata.get("vault").unwrap().unwrap();
-    assert!(public.credential_ref.is_some());
-    assert!(public.secret_key.is_empty());
-    assert!(!serde_json::to_string(&public)
+    assert!(public.primary.credential_ref.is_some());
+    assert!(public.primary.secret_key.is_empty());
+    assert!(!serde_json::to_string(&public.primary)
         .unwrap()
         .contains("unique-legacy-password"));
     let rebooted = repository(Arc::new(backend.restart()), metadata);
     assert_eq!(
-        rebooted.load("vault").await.unwrap().unwrap().secret_key,
+        rebooted
+            .load("vault")
+            .await
+            .unwrap()
+            .unwrap()
+            .primary
+            .secret_key,
         "unique-legacy-password"
     );
 }
@@ -134,7 +142,9 @@ async fn migration_protects_then_retires_plaintext_and_restores_after_restart() 
 async fn locked_migration_retains_legacy_and_never_claims_new_storage() {
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
-    metadata.set("vault", s3("old-password")).unwrap();
+    metadata
+        .set("vault", VaultSyncConfig::new(s3("old-password")))
+        .unwrap();
     backend.locked.store(true, Ordering::SeqCst);
     let repo = repository(backend.clone(), metadata.clone());
     assert_eq!(
@@ -142,7 +152,7 @@ async fn locked_migration_retains_legacy_and_never_claims_new_storage() {
         "sync_credentials_locked"
     );
     assert_eq!(
-        metadata.get("vault").unwrap().unwrap().secret_key,
+        metadata.get("vault").unwrap().unwrap().primary.secret_key,
         "old-password"
     );
     assert!(backend.disk.lock().unwrap().is_empty());
@@ -155,17 +165,33 @@ async fn failed_native_cache_changing_write_retries_only_known_bytes_and_keeps_o
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
     let repo = repository(backend.clone(), metadata.clone());
-    let old = repo.save("vault", s3("old-password")).await.unwrap();
+    let old = repo
+        .save("vault", VaultSyncConfig::new(s3("old-password")))
+        .await
+        .unwrap();
     backend.fail_write.store(true, Ordering::SeqCst);
-    assert!(repo.save("vault", s3("new-password")).await.is_err());
+    assert!(repo
+        .save("vault", VaultSyncConfig::new(s3("new-password")))
+        .await
+        .is_err());
     assert_eq!(
-        metadata.get("vault").unwrap().unwrap().credential_ref,
-        old.credential_ref
+        metadata
+            .get("vault")
+            .unwrap()
+            .unwrap()
+            .primary
+            .credential_ref,
+        old.primary.credential_ref
     );
     assert!(repo.load("vault").await.is_err());
     backend.fail_write.store(false, Ordering::SeqCst);
     assert_eq!(
-        repo.load("vault").await.unwrap().unwrap().secret_key,
+        repo.load("vault")
+            .await
+            .unwrap()
+            .unwrap()
+            .primary
+            .secret_key,
         "old-password"
     );
     assert!(repo.recovery.lock().unwrap().is_empty());
@@ -177,17 +203,28 @@ async fn interrupted_metadata_publication_keeps_both_possible_password_generatio
         let metadata = Arc::new(Metadata::default());
         let backend = Arc::new(Backend::default());
         let repo = repository(backend.clone(), metadata.clone());
-        repo.save("vault", s3("old-password")).await.unwrap();
+        repo.save("vault", VaultSyncConfig::new(s3("old-password")))
+            .await
+            .unwrap();
         metadata.fail_on_call.store(
             metadata.set_calls.load(Ordering::SeqCst) + 2,
             Ordering::SeqCst,
         );
         metadata.fail_set.store(failure, Ordering::SeqCst);
-        assert!(repo.save("vault", s3("new-password")).await.is_err());
+        assert!(repo
+            .save("vault", VaultSyncConfig::new(s3("new-password")))
+            .await
+            .is_err());
         metadata.fail_set.store(0, Ordering::SeqCst);
         let rebooted = repository(Arc::new(backend.restart()), metadata);
         assert_eq!(
-            rebooted.load("vault").await.unwrap().unwrap().secret_key,
+            rebooted
+                .load("vault")
+                .await
+                .unwrap()
+                .unwrap()
+                .primary
+                .secret_key,
             if failure == 1 {
                 "old-password"
             } else {
@@ -202,17 +239,27 @@ async fn retry_cannot_prune_the_last_confirmed_generation_after_visible_unconfir
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
     let repo = repository(backend.clone(), metadata.clone());
-    repo.save("vault", s3("durable-r")).await.unwrap();
+    repo.save("vault", VaultSyncConfig::new(s3("durable-r")))
+        .await
+        .unwrap();
     let durable = metadata.get("vault").unwrap().unwrap();
     metadata.fail_on_call.store(
         metadata.set_calls.load(Ordering::SeqCst) + 2,
         Ordering::SeqCst,
     );
     metadata.fail_set.store(2, Ordering::SeqCst);
-    assert!(repo.save("vault", s3("unconfirmed-n")).await.is_err());
+    assert!(repo
+        .save("vault", VaultSyncConfig::new(s3("unconfirmed-n")))
+        .await
+        .is_err());
     assert_ne!(
-        metadata.get("vault").unwrap().unwrap().credential_ref,
-        durable.credential_ref
+        metadata
+            .get("vault")
+            .unwrap()
+            .unwrap()
+            .primary
+            .credential_ref,
+        durable.primary.credential_ref
     );
     // The next attempt cannot confirm N. It must stop before replacing R+N.
     metadata.fail_on_call.store(
@@ -221,7 +268,10 @@ async fn retry_cannot_prune_the_last_confirmed_generation_after_visible_unconfir
     );
     metadata.fail_set.store(1, Ordering::SeqCst);
     let protected = backend.disk.lock().unwrap().clone();
-    assert!(repo.save("vault", s3("candidate-m")).await.is_err());
+    assert!(repo
+        .save("vault", VaultSyncConfig::new(s3("candidate-m")))
+        .await
+        .is_err());
     assert_eq!(*backend.disk.lock().unwrap(), protected);
     // A power loss rolls the visible but unconfirmed rename back to durable R.
     metadata
@@ -232,7 +282,13 @@ async fn retry_cannot_prune_the_last_confirmed_generation_after_visible_unconfir
     metadata.fail_set.store(0, Ordering::SeqCst);
     let rebooted = repository(Arc::new(backend.restart()), metadata);
     assert_eq!(
-        rebooted.load("vault").await.unwrap().unwrap().secret_key,
+        rebooted
+            .load("vault")
+            .await
+            .unwrap()
+            .unwrap()
+            .primary
+            .secret_key,
         "durable-r"
     );
 }
@@ -242,16 +298,18 @@ async fn protected_passwords_are_bound_to_target_account_backend_and_vault() {
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
     let repo = repository(backend.clone(), metadata.clone());
-    repo.save("vault", s3("protected-password")).await.unwrap();
+    repo.save("vault", VaultSyncConfig::new(s3("protected-password")))
+        .await
+        .unwrap();
     let original = metadata.get("vault").unwrap().unwrap();
     for (index, mut changed) in [original.clone(), original.clone(), original.clone()]
         .into_iter()
         .enumerate()
     {
         match index {
-            0 => changed.endpoint = "https://attacker.example.com".into(),
-            1 => changed.bucket = "other-bucket".into(),
-            _ => changed.prefix = "other-prefix".into(),
+            0 => changed.primary.endpoint = "https://attacker.example.com".into(),
+            1 => changed.primary.bucket = "other-bucket".into(),
+            _ => changed.primary.prefix = "other-prefix".into(),
         }
         metadata.set("vault", changed).unwrap();
         assert_eq!(
@@ -260,13 +318,13 @@ async fn protected_passwords_are_bound_to_target_account_backend_and_vault() {
         );
     }
     let mut account = original.clone();
-    account.access_key = "other-account".into();
+    account.primary.access_key = "other-account".into();
     metadata.set("vault", account).unwrap();
     assert!(repo.load("vault").await.is_err());
     let mut backend_swap = original.clone();
-    backend_swap.backend = SyncBackendKind::Webdav;
-    backend_swap.webdav_url = original.endpoint.clone();
-    backend_swap.webdav_username = "other-account".into();
+    backend_swap.primary.backend = SyncBackendKind::Webdav;
+    backend_swap.primary.webdav_url = original.primary.endpoint.clone();
+    backend_swap.primary.webdav_username = "other-account".into();
     metadata.set("vault", backend_swap).unwrap();
     assert!(repo.load("vault").await.is_err());
     metadata.set("other-vault", original).unwrap();
@@ -293,20 +351,29 @@ async fn missing_device_only_record_never_uses_inline_fallback_and_explicit_pass
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
     let repo = repository(backend.clone(), metadata.clone());
-    repo.save("vault", s3("protected-password")).await.unwrap();
+    repo.save("vault", VaultSyncConfig::new(s3("protected-password")))
+        .await
+        .unwrap();
     backend.cache.lock().unwrap().clear();
     backend.disk.lock().unwrap().clear();
     let mut public = metadata.get("vault").unwrap().unwrap();
-    public.secret_key = "untrusted-inline-fallback".into();
+    public.primary.secret_key = "untrusted-inline-fallback".into();
     metadata.set("vault", public.clone()).unwrap();
     assert_eq!(
         repo.load("vault").await.unwrap_err().code(),
         "sync_credentials_missing"
     );
-    assert_eq!(masked_status_config(&public).secret_key, "********");
-    repo.save("vault", s3("reentered-password")).await.unwrap();
+    assert_eq!(masked_status_config(&public.primary).secret_key, "********");
+    repo.save("vault", VaultSyncConfig::new(s3("reentered-password")))
+        .await
+        .unwrap();
     assert_eq!(
-        repo.load("vault").await.unwrap().unwrap().secret_key,
+        repo.load("vault")
+            .await
+            .unwrap()
+            .unwrap()
+            .primary
+            .secret_key,
         "reentered-password"
     );
 }
@@ -316,7 +383,9 @@ async fn failed_secure_delete_does_not_report_disconnection_or_remove_public_bin
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
     let repo = repository(backend.clone(), metadata.clone());
-    repo.save("vault", s3("protected-password")).await.unwrap();
+    repo.save("vault", VaultSyncConfig::new(s3("protected-password")))
+        .await
+        .unwrap();
     backend.fail_remove.store(true, Ordering::SeqCst);
     assert!(repo.clear("vault").await.is_err());
     assert!(metadata.get("vault").unwrap().is_some());
@@ -331,7 +400,9 @@ async fn failed_metadata_clear_stays_missing_and_explicit_retry_finishes_disconn
     let metadata = Arc::new(Metadata::default());
     let backend = Arc::new(Backend::default());
     let repo = repository(backend.clone(), metadata.clone());
-    repo.save("vault", s3("protected-password")).await.unwrap();
+    repo.save("vault", VaultSyncConfig::new(s3("protected-password")))
+        .await
+        .unwrap();
     metadata.fail_remove.store(true, Ordering::SeqCst);
     assert!(repo.clear("vault").await.is_err());
     assert!(metadata.get("vault").unwrap().is_some());
@@ -343,6 +414,64 @@ async fn failed_metadata_clear_stays_missing_and_explicit_retry_finishes_disconn
     repo.clear("vault").await.unwrap();
     assert!(metadata.get("vault").unwrap().is_none());
     assert!(backend.disk.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn protected_mirrors_round_trip_after_reordering_and_reject_retargeted_secrets() {
+    let metadata = Arc::new(Metadata::default());
+    let backend = Arc::new(Backend::default());
+    let repo = repository(backend.clone(), metadata.clone());
+    let binding = VaultSyncConfig {
+        primary: s3("primary-password"),
+        mirrors: vec![
+            SyncBackendConfig {
+                bucket: "mirror".into(),
+                session_token: Some("temporary-credential".into()),
+                ..s3("mirror-password")
+            },
+            SyncBackendConfig {
+                backend: SyncBackendKind::Webdav,
+                webdav_url: "https://dav.example.com/vault".into(),
+                webdav_username: "mirror-username".into(),
+                webdav_password: "webdav-password".into(),
+                ..SyncBackendConfig::default()
+            },
+        ],
+    };
+    repo.save("vault", binding).await.unwrap();
+    let mut public = metadata.get("vault").unwrap().unwrap();
+    assert!(public.mirrors[0].secret_key.is_empty());
+    assert!(public.mirrors[0].session_token.is_none());
+    assert!(public.mirrors[1].webdav_password.is_empty());
+    public.mirrors.reverse();
+    metadata.set("vault", public.clone()).unwrap();
+    let rebooted = repository(Arc::new(backend.restart()), metadata.clone());
+    let loaded = rebooted.load("vault").await.unwrap().unwrap();
+    assert_eq!(loaded.mirrors[0].webdav_password, "webdav-password");
+    assert_eq!(loaded.mirrors[1].secret_key, "mirror-password");
+    assert_eq!(
+        loaded.mirrors[1].session_token.as_deref(),
+        Some("temporary-credential")
+    );
+    let status = serde_json::to_string(&masked_status_config(&loaded.mirrors[1])).unwrap();
+    assert!(!status.contains("mirror-password"));
+    assert!(!status.contains("temporary-credential"));
+    assert!(!status.contains(public.mirrors[1].credential_ref.as_deref().unwrap()));
+
+    public.mirrors[0].webdav_url = "https://other.example.com/vault".into();
+    metadata.set("vault", public.clone()).unwrap();
+    let loaded = rebooted.load("vault").await.unwrap().unwrap();
+    assert_eq!(loaded.primary.secret_key, "primary-password");
+    assert!(loaded.mirrors[0].validate().is_err());
+    assert!(loaded.mirrors[0].webdav_password.is_empty());
+    assert_eq!(loaded.mirrors[1].secret_key, "mirror-password");
+
+    std::mem::swap(&mut public.primary, &mut public.mirrors[1]);
+    metadata.set("vault", public).unwrap();
+    assert_eq!(
+        rebooted.load("vault").await.unwrap_err().code(),
+        "sync_credentials_invalid"
+    );
 }
 
 #[test]
