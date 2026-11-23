@@ -8,6 +8,12 @@ dsh-remote（ds-harness-remote）默认只提供 GitHub、Google、知乎等第�
 
 实现：[REST 客户端](../../../src-tauri/src/integration/dsh_remote/api.rs)、[登录命令](../../../src-tauri/src/app/remote_agent.rs)、[共享登录组件](../../../src/components/remote-agent/dsh-remote-sign-in.tsx)、[设置分组](../../../src/components/settings/panes/agent/dsh-remote-connection.tsx)。
 
+## 主机在线状态与信任
+
+新版 Server 的设备列表（`GET /api/v1/devices`）不再内联 `online`，在线状态改由 `GET /api/v1/devices/{id}/presence` 提供。客户端与官方 dsh-Go / app-core 一致：列出主机后逐台读取授权描述符（含 identityKey），描述符缺少 `online` 时再查 presence；查询失败只记为「状态未知」，绝不降级成离线。`HostInfo.online` 因此是可空布尔，UI 仅在明确 `false` 时禁用选择。已固定（pin）且密钥与 Server 一致的主机带 `pinned` 标记，列表显示盾牌图标；未固定的主机点击后仍走指纹确认对话框。连接前 Relay 会再次核对描述符，明确离线的主机返回 `HOST_OFFLINE`。设备注册名使用 `Agentero (主机名)`，便于在其他客户端的设备列表中辨认。
+
+移动端设置页另有「Agent」分区（[MobileAgentPane](../../../src/components/mobile/mobile-agent-pane.tsx)）：应用级 Agent 偏好 + 远程 Agent 连接模块；本地 CLI 安装、Node.js 工具与模型席位仍是桌面专属。
+
 ## Bridge 身份与配对
 
 Android/iOS 的 Bridge Ed25519 身份复用应用管理的系统 `CredentialStore`，与 DSH 登录及同步凭据共用后端健康状态和串行读写通道。系统记录为 Rust 私有的 v2 envelope；设备 ID、私钥、公钥和创建时间不进入 IPC。桌面继续使用原有文件身份。
