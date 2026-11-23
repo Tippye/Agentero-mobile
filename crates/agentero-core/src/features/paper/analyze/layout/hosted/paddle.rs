@@ -374,9 +374,10 @@ async fn run_paddle_with_receipt(
     // another paid submission, including after restart.
     if journal.begin("prepared", "submitting")? {
         progress("uploading", None, None);
-        let job_id =
-            submit_job(client, jobs_url, auth, file_bytes, file_name, mime, model, purpose)
-                .await?;
+        let job_id = submit_job(
+            client, jobs_url, auth, file_bytes, file_name, mime, model, purpose,
+        )
+        .await?;
         journal.save("submitted", json!({"id": job_id}))?;
     }
     let job_id = journal.receipt()["id"]
