@@ -94,7 +94,7 @@ export type PaperAssetAvailability = PaperAssetAvailabilityWire;
 export type PaperAvailability = PaperAvailabilityWire;
 export type SyncMirrorStatus = {
 	config: SyncBackendConfig;
-	credentialState?: SyncCredentialState;
+	credentialState: SyncCredentialState;
 	lastSyncAt?: string;
 	lastVersion: number;
 	lastError?: string;
