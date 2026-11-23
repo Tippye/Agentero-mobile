@@ -188,7 +188,8 @@ impl RemoteAgentProvider for FakeProvider {
         Ok(vec![HostInfo {
             host,
             name: "Host".into(),
-            online: true,
+            online: Some(true),
+            pinned: true,
         }])
     }
 

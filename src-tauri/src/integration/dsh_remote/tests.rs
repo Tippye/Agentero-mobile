@@ -310,7 +310,7 @@ async fn real_rest_noise_relay_rpc_timeout_never_replays_mutation() {
     let server_vector = v.clone();
     let server = tokio::spawn(async move {
         let (http, _) = listener.accept().await.unwrap();
-        let request = http_reply(http, json!({"deviceId":"host","name":"Fixture Host","role":"host","platform":"test","membershipId":"member","identityKey":server_vector["staticKeys"]["responder"]["publicKey"]})).await;
+        let request = http_reply(http, json!({"deviceId":"host","name":"Fixture Host","role":"host","platform":"test","membershipId":"member","online":true,"identityKey":server_vector["staticKeys"]["responder"]["publicKey"]})).await;
         assert!(request.starts_with("GET /api/v1/devices/host "));
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(socket).await.unwrap();
@@ -510,6 +510,45 @@ async fn rest_host_discovery_reads_every_page() {
     let hosts = api.list_hosts("fixture-access-token").await.unwrap();
     assert_eq!(hosts.len(), 2);
     timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn host_descriptor_resolves_presence_when_the_server_omits_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = ServerApi::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let public_key = encode_base64(&[7; 32]);
+    let server_key = public_key.clone();
+    let second_key = public_key.clone();
+    let server = tokio::spawn(async move {
+        // Newer Servers omit `online` from the descriptor entirely.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"deviceId":"host-1","name":"Host","role":"host","platform":"test","membershipId":"member","identityKey":server_key})).await;
+        assert!(request.starts_with("GET /api/v1/devices/host-1 "));
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(
+            socket,
+            json!({"deviceId":"host-1","online":true,"lastSeenAt":1_700_000_000_000u64}),
+        )
+        .await;
+        assert!(request.starts_with("GET /api/v1/devices/host-1/presence "));
+        // A presence answer for another device must be refused.
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"deviceId":"host-1","name":"Host","role":"host","platform":"test","membershipId":"member","identityKey":second_key})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"deviceId":"other-device","online":true})).await;
+    });
+    let host = api.host("fixture-access-token", "host-1").await.unwrap();
+    assert_eq!(host.device.online, Some(true));
+    assert_eq!(host.device.last_seen_at, Some(1_700_000_000_000));
+    assert!(api.host("fixture-access-token", "host-1").await.is_err());
+    timeout(Duration::from_secs(5), server)
         .await
         .unwrap()
         .unwrap();

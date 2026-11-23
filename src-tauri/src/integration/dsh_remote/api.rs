@@ -91,8 +91,12 @@ pub struct HostDevice {
     pub role: String,
     pub platform: String,
     pub membership_id: String,
+    /// Newer Servers omit presence from the device list and expose it through
+    /// `/devices/{id}/presence`; absence is not an offline verdict.
     #[serde(default)]
-    pub online: bool,
+    pub online: Option<bool>,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
     pub client_version: Option<String>,
     pub harness_version: Option<String>,
 }
@@ -102,6 +106,15 @@ pub struct AuthorizedHost {
     #[serde(flatten)]
     pub device: HostDevice,
     pub identity_key: String,
+}
+/// Authoritative presence from `GET /api/v1/devices/{id}/presence`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePresence {
+    pub device_id: String,
+    pub online: bool,
+    #[serde(default)]
+    pub last_seen_at: Option<u64>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -455,7 +468,7 @@ impl ServerApi {
             .map_err(|_| RemoteError::invalid("Invalid device URL"))?
             .pop_if_empty()
             .push(host_id);
-        let host: AuthorizedHost = self
+        let mut host: AuthorizedHost = self
             .request_url(Method::GET, url, Some(token), None)
             .await?;
         if host.device.device_id != host_id
@@ -468,7 +481,39 @@ impl ServerApi {
             ));
         }
         key(&host.identity_key)?;
+        // Older deployments inline presence; newer Servers expose it separately.
+        // Absence is not an offline verdict: resolve it before any trust decision.
+        if host.device.online.is_none() {
+            let presence = self.presence(token, host_id).await?;
+            host.device.online = Some(presence.online);
+            host.device.last_seen_at = presence.last_seen_at;
+        }
         Ok(host)
+    }
+    /// Authoritative online state for one authorized device. A failed lookup
+    /// must never be downgraded to an offline Host by the caller.
+    pub async fn presence(&self, token: &str, device_id: &str) -> Result<DevicePresence> {
+        let mut url = self
+            .base
+            .join("api/v1/devices/")
+            .map_err(|_| RemoteError::invalid("Invalid device URL"))?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| RemoteError::invalid("Invalid device URL"))?;
+            segments.pop_if_empty().push(device_id).push("presence");
+        }
+        let presence: DevicePresence = self
+            .request_url(Method::GET, url, Some(token), None)
+            .await?;
+        if presence.device_id != device_id
+            || presence
+                .last_seen_at
+                .is_some_and(|at| at > MAX_SAFE_INTEGER)
+        {
+            return Err(RemoteError::invalid("Invalid device presence response"));
+        }
+        Ok(presence)
     }
     async fn request<T: DeserializeOwned>(
         &self,
