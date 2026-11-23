@@ -398,7 +398,7 @@ fn info(reference: &ConnectionRef, state: &Connection) -> ConnectionInfo {
         capabilities: Capabilities {
             operations,
             authentication: vec![
-                AuthenticationMethod::Password,
+                AuthenticationMethod::Browser,
                 AuthenticationMethod::ExistingCredential,
             ],
             backends: if native {
