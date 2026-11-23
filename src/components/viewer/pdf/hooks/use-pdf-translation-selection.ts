@@ -1,0 +1,572 @@
+/**
+ * Turn a DOM selection on the full-document translation overlay into the same
+ * floating menu the English text layer uses.
+ *
+ * The menu's quote is the English sentence (or the whole block when that block
+ * has no sentence pairs). Copy stays the visible translation. Listeners attach
+ * only while layout translation is painted on the main viewer.
+ */
+
+import type { PdfEngine, Rect } from "@embedpdf/models";
+import type { useDocumentManagerCapability } from "@embedpdf/plugin-document-manager/react";
+import type { FormattedSelection } from "@embedpdf/plugin-selection/react";
+import { type RefObject, useCallback, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import {
+	anchorFromEmbedSelection,
+	EMBED_PAGE_ATTR,
+	pageElByIndex,
+	rectBottomCenterScreen,
+} from "@/components/viewer/pdf/coords";
+import {
+	translationPageFrames,
+	useTranslationSelectionBands,
+} from "@/components/viewer/pdf/hooks/use-translation-selection-bands";
+import {
+	clearDomSelectionInside,
+	isEditableClipboardTarget,
+} from "@/components/viewer/pdf/host-dom";
+import {
+	holdLayoutSentenceHover,
+	releaseHeldLayoutSentenceHover,
+	sentenceForActivation,
+} from "@/components/viewer/pdf/layout-sentence-hover";
+import type { SelectionMenuState } from "@/components/viewer/pdf/types";
+import {
+	selectionFocusRect,
+	selectionSideFromSelection,
+} from "@/lib/agent/selection-side";
+import {
+	createSelectionContext,
+	selectionStore,
+} from "@/lib/agent/selection-store";
+import {
+	bboxToPageRect,
+	locateSelectionGlyphs,
+	type TranslationPagePick,
+	type TranslationSelection,
+	translationHitsFromRange,
+	translationSelectionFromHits,
+	translationTextFromRange,
+} from "@/lib/pdf/layout/layout-sentence-selection";
+import { clearTranslationSelectionBands } from "@/lib/pdf/layout/translation-selection-bands";
+import type { LayoutTranslateItem } from "@/lib/pdf/layout/types";
+import {
+	translatedSelectionLineRects,
+	translatedSentenceAtPoint,
+	visibleMenuPoint,
+	visiblePagesFromClientRects,
+} from "@/lib/pdf/layout/visible-selection-rects";
+import { holdLinkPreviewDrag } from "@/lib/pdf/link-preview-drag";
+import {
+	mergeTightGlyphRects,
+	unionRectsAll,
+} from "@/lib/pdf/selection-appearance";
+import { loadSettings } from "@/lib/settings/store";
+import { langsFromSettings } from "@/lib/translate/lang";
+
+type DocumentManagerCapability = ReturnType<
+	typeof useDocumentManagerCapability
+>["provides"];
+
+export type UsePdfTranslationSelectionOptions = {
+	/** Main viewer with the translation overlay painted. */
+	enabled: boolean;
+	hostRef: RefObject<HTMLDivElement | null>;
+	zoomRef: RefObject<number>;
+	engineRef: RefObject<PdfEngine | null>;
+	docCapRef: RefObject<DocumentManagerCapability>;
+	docId: string;
+	itemsByPage: ReadonlyMap<number, readonly LayoutTranslateItem[]>;
+	selectionMenu: SelectionMenuState | null;
+	setSelectionMenu: (menu: SelectionMenuState | null) => void;
+	paperRelPath: string | null;
+	paperAbsPath: string | null;
+};
+
+function caretInsideLayoutItem(host: HTMLElement | null): boolean {
+	if (!host) return false;
+	const selection = window.getSelection();
+	const node = selection?.anchorNode;
+	if (!node) return false;
+	const el = node instanceof Element ? node : node.parentElement;
+	return Boolean(el && host.contains(el) && el.closest("[data-layout-item]"));
+}
+
+function hostRange(host: HTMLElement): Range | null {
+	const selection = window.getSelection();
+	if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+		return null;
+	}
+	const range = selection.getRangeAt(0);
+	const node = range.commonAncestorContainer;
+	const el = node instanceof Element ? node : node.parentElement;
+	if (!el || !host.contains(el)) return null;
+	return range;
+}
+
+async function locatePages(
+	engine: PdfEngine | null,
+	docCap: DocumentManagerCapability,
+	docId: string,
+	selection: TranslationSelection,
+	generation: () => boolean,
+): Promise<FormattedSelection[] | null> {
+	if (!selection.canLocate) return [];
+	const doc = docCap?.getDocument(docId);
+	const grouped = new Map<number, TranslationPagePick[]>();
+	for (const pick of selection.pages) {
+		const list = grouped.get(pick.pageIndex) ?? [];
+		list.push(pick);
+		grouped.set(pick.pageIndex, list);
+	}
+	const formatted: FormattedSelection[] = [];
+	for (const [pageIndex, picks] of grouped) {
+		if (!generation()) return null;
+		const page = doc?.pages[pageIndex];
+		const size = page?.size;
+		if (!page || !size || size.width <= 0 || size.height <= 0) return [];
+		let glyphs: { text: string; rect: Rect }[] = [];
+		if (engine && doc && picks.some((pick) => !pick.glyphRects?.length)) {
+			try {
+				const raw = await engine.getPageGlyphs(doc, page).toPromise();
+				if (!generation()) return null;
+				const text = await engine
+					.getTextSlices(
+						doc,
+						raw.map((_, charIndex) => ({
+							pageIndex,
+							charIndex,
+							charCount: 1,
+							rawCharacters: true,
+						})),
+					)
+					.toPromise();
+				glyphs = raw.map((glyph, index) => ({
+					text: text[index] ?? "",
+					rect: {
+						origin: glyph.tightOrigin ?? glyph.origin,
+						size: glyph.tightSize ?? glyph.size,
+					},
+				}));
+			} catch {
+				glyphs = [];
+			}
+		}
+		if (!generation()) return null;
+		const locatePick = (pick: TranslationPagePick): Rect[] => {
+			if (pick.glyphRects?.length) return pick.glyphRects;
+			const located = locateSelectionGlyphs(
+				pick,
+				glyphs,
+				size.width,
+				size.height,
+			);
+			if (located.length) return located;
+			// The whole block is the annotation only when the selection is that
+			// block. A sentence that missed the text layer must not fill the block.
+			if (pick.wholeBlock) {
+				return [bboxToPageRect(pick.bbox, size.width, size.height)];
+			}
+			return [];
+		};
+		const rectsByBlock = new Map<TranslationPagePick["bbox"], Rect[]>();
+		for (const pick of picks) {
+			const located = locatePick(pick).filter(
+				(rect) => rect.size.width > 0 && rect.size.height > 0,
+			);
+			// Do not persist only the locatable pieces of a multi-sentence selection.
+			if (!located.length) return [];
+			const rects = rectsByBlock.get(pick.bbox);
+			if (rects) rects.push(...located);
+			else rectsByBlock.set(pick.bbox, located);
+		}
+		const segmentRects = [...rectsByBlock.values()].flatMap(
+			mergeTightGlyphRects,
+		);
+		const rect = unionRectsAll(segmentRects);
+		if (!rect) return [];
+		formatted.push({ pageIndex, rect, segmentRects });
+	}
+	return formatted;
+}
+
+export function usePdfTranslationSelection({
+	enabled,
+	hostRef,
+	zoomRef,
+	engineRef,
+	docCapRef,
+	docId,
+	itemsByPage,
+	selectionMenu,
+	setSelectionMenu,
+	paperRelPath,
+	paperAbsPath,
+}: UsePdfTranslationSelectionOptions) {
+	const { i18n } = useTranslation();
+	const itemsRef = useRef(itemsByPage);
+	itemsRef.current = itemsByPage;
+	const menuRef = useRef(selectionMenu);
+	menuRef.current = selectionMenu;
+	const langRef = useRef(i18n.language);
+	langRef.current = i18n.language;
+	const genRef = useRef(0);
+	const publishedId = useRef<string | null>(null);
+	const clearPublished = useCallback(() => {
+		const active = selectionStore.getState().active;
+		if (active && active.id === publishedId.current) {
+			selectionStore.setState({ active: null });
+		}
+		publishedId.current = null;
+	}, []);
+	const closeSelectionMenu = useCallback(() => {
+		genRef.current += 1;
+		releaseHeldLayoutSentenceHover(docId);
+		clearTranslationSelectionBands(docId);
+		clearDomSelectionInside(hostRef.current);
+		clearPublished();
+		setSelectionMenu(null);
+	}, [docId, hostRef, clearPublished, setSelectionMenu]);
+
+	useTranslationSelectionBands(docId, hostRef, enabled);
+
+	useEffect(() => {
+		if (!enabled || !selectionMenu) return;
+		const onPointerDown = (event: PointerEvent) => {
+			if (
+				event.target instanceof Element &&
+				event.target.closest(
+					"[data-selection-ui], [data-selection-menu], [data-selection-comment]",
+				)
+			)
+				return;
+			closeSelectionMenu();
+		};
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") closeSelectionMenu();
+		};
+		document.addEventListener("pointerdown", onPointerDown, true);
+		window.addEventListener("keydown", onKeyDown, true);
+		return () => {
+			document.removeEventListener("pointerdown", onPointerDown, true);
+			window.removeEventListener("keydown", onKeyDown, true);
+		};
+	}, [enabled, selectionMenu, closeSelectionMenu]);
+
+	useEffect(() => {
+		if (!enabled) return;
+		const host = hostRef.current;
+		if (!host) return;
+		let disposed = false;
+		let visible = true;
+		let pointerDown = false;
+		let releaseDrag: (() => void) | null = null;
+		let releaseFrame = 0;
+		const inflight = new Set<number>();
+		const reset = () => {
+			genRef.current += 1;
+			pointerDown = false;
+			inflight.clear();
+			if (releaseFrame) cancelAnimationFrame(releaseFrame);
+			releaseFrame = 0;
+			clearTranslationSelectionBands(docId);
+			releaseDrag?.();
+			releaseDrag = null;
+		};
+		// Dockview retains hidden tabs. Visibility, rather than workspace focus,
+		// ends a drag so a visible split pane can still select translated text.
+		const observer =
+			typeof IntersectionObserver === "undefined"
+				? null
+				: new IntersectionObserver((entries) => {
+						visible = entries.some((entry) => entry.isIntersecting);
+						if (visible) return;
+						reset();
+						closeSelectionMenu();
+					});
+		observer?.observe(host);
+
+		// Drop the hold once the locate has settled and React has painted the
+		// selection menu, which suppresses previews on its own. A locate that
+		// finishes mid-drag must not release early.
+		const scheduleReleaseDrag = () => {
+			if (releaseFrame || !releaseDrag) return;
+			releaseFrame = requestAnimationFrame(() => {
+				releaseFrame = 0;
+				if (pointerDown || inflight.size > 0) return;
+				releaseDrag?.();
+				releaseDrag = null;
+			});
+		};
+
+		const commit = () => {
+			if (!visible) return;
+			const root = hostRef.current;
+			if (!root) return;
+			const range = hostRange(root);
+			if (!range) {
+				// Do not bump the generation. A focus move collapses the range
+				// after pointerup, and that must not cancel the locate already
+				// started for the text the reader just selected.
+				if (menuRef.current?.fromTranslation && caretInsideLayoutItem(root)) {
+					closeSelectionMenu();
+				}
+				return;
+			}
+			const selectedText = range.toString();
+			const generation = ++genRef.current;
+			const alive = () => genRef.current === generation;
+			const hits = translationHitsFromRange(range, root);
+			if (!hits.length) return;
+			const items = [...itemsRef.current.values()].flat();
+			const lastHit = hits.at(-1);
+			const preferredPageIndex = items.find(
+				(item) => item.id === lastHit?.itemId,
+			)?.pageIndex;
+			const targetLang = langsFromSettings(
+				loadSettings().translate,
+				langRef.current ?? "en",
+			).targetLang;
+			const resolved = translationSelectionFromHits(
+				hits,
+				items,
+				targetLang,
+				translationTextFromRange(range, root),
+			);
+			if (!resolved) return;
+			void (async () => {
+				inflight.add(generation);
+				try {
+					const pages = await locatePages(
+						engineRef.current,
+						docCapRef.current,
+						docId,
+						resolved,
+						alive,
+					);
+					if (!pages || !alive()) return;
+					const live = hostRange(root);
+					if (
+						!live ||
+						live.toString() !== selectedText ||
+						translationHitsFromRange(live, root).length === 0 ||
+						!alive()
+					) {
+						return;
+					}
+					const doc = docCapRef.current?.getDocument(docId);
+					const anchorPage =
+						pages.find((page) => page.pageIndex === preferredPageIndex) ??
+						pages.at(-1);
+					const pageIndex =
+						anchorPage?.pageIndex ??
+						preferredPageIndex ??
+						resolved.pages.at(-1)?.pageIndex;
+					if (pageIndex == null) return;
+					// A geometry miss still has a quote for copy and chat. It has no
+					// original rectangles for a persisted highlight or note.
+					const anchor = anchorFromEmbedSelection(
+						pages,
+						resolved.quote,
+						(pageIndex) => doc?.pages[pageIndex]?.size ?? null,
+						"selection",
+						pageIndex,
+					) ?? {
+						page: pageIndex + 1,
+						rects: [],
+						quote: resolved.quote,
+						trigger: "selection" as const,
+					};
+					const frames = translationPageFrames(root);
+					const visiblePages = visiblePagesFromClientRects(
+						translatedSelectionLineRects(root, live),
+						frames,
+					);
+					const pageEl = pageElByIndex(root, pageIndex);
+					const domSelection = window.getSelection();
+					const side = selectionSideFromSelection(domSelection);
+					const focusRect = selectionFocusRect(domSelection);
+					const anchorFrame = frames.find(
+						(frame) => frame.pageIndex === pageIndex,
+					);
+					const cursorXFraction =
+						focusRect && anchorFrame && anchorFrame.width > 0
+							? (focusRect.left - anchorFrame.left) / anchorFrame.width
+							: undefined;
+					const visibleScreen = visibleMenuPoint(
+						visiblePages,
+						pageIndex,
+						(pageIndex) =>
+							frames.find((frame) => frame.pageIndex === pageIndex) ?? null,
+						cursorXFraction,
+					);
+					const fallbackBox =
+						!visibleScreen && pageEl && anchorPage
+							? rectBottomCenterScreen(pageEl, anchorPage.rect, zoomRef.current)
+							: null;
+					const screen = visibleScreen
+						? { ...visibleScreen, side }
+						: fallbackBox
+							? {
+									x: fallbackBox.x,
+									y: fallbackBox.top,
+									top: fallbackBox.top,
+									bottom: fallbackBox.bottom,
+									side,
+									cursorX: focusRect?.left,
+								}
+							: null;
+					if (!screen || !alive()) return;
+					setSelectionMenu({
+						screen,
+						cursorXFraction,
+						anchor,
+						pages,
+						copyText: resolved.copyText,
+						fromTranslation: true,
+						pairedTranslation: resolved.paired || undefined,
+						visiblePages: visiblePages.length ? visiblePages : undefined,
+					});
+					const context = createSelectionContext({
+						text: resolved.quote,
+						sourcePath: paperRelPath ?? paperAbsPath ?? "PDF",
+						origin: "pdf",
+						page: anchor.page,
+						rects: anchor.rects,
+						paperAbsPath: paperAbsPath ?? undefined,
+						context: resolved.paired
+							? { status: "unavailable", translation: resolved.paired }
+							: undefined,
+					});
+					if (context) {
+						publishedId.current = context.id;
+						selectionStore.setState({ active: context });
+					}
+				} finally {
+					inflight.delete(generation);
+					if (!disposed && visible && !pointerDown) scheduleReleaseDrag();
+				}
+			})();
+		};
+
+		const onPointerDown = (event: PointerEvent) => {
+			if (!visible || event.button !== 0) return;
+			const target = event.target;
+			const el =
+				target instanceof Element
+					? target
+					: target instanceof Node
+						? target.parentElement
+						: null;
+			if (!el?.closest("[data-layout-item]")) return;
+			pointerDown = true;
+			if (!releaseDrag) {
+				releaseDrag = holdLinkPreviewDrag();
+			}
+		};
+		// A drag can end outside the viewport. Let the release reach other handlers.
+		const onPointerUp = () => {
+			if (!pointerDown) return;
+			pointerDown = false;
+			commit();
+			scheduleReleaseDrag();
+		};
+		const onPointerCancel = () => {
+			if (!pointerDown) return;
+			reset();
+			closeSelectionMenu();
+		};
+		const onCopy = (event: ClipboardEvent) => {
+			if (
+				!visible ||
+				!event.clipboardData ||
+				isEditableClipboardTarget(event.target)
+			)
+				return;
+			const range = hostRange(host);
+			if (!range || !translationHitsFromRange(range, host).length) return;
+			const text = translationTextFromRange(range, host);
+			if (!text) return;
+			event.clipboardData.setData("text/plain", text);
+			event.preventDefault();
+		};
+		const onSelectionChange = () => {
+			if (!visible) return;
+			if (pointerDown) return;
+			commit();
+		};
+
+		const onDoubleClick = (event: MouseEvent) => {
+			const target = event.target;
+			if (
+				!visible ||
+				!(target instanceof Element) ||
+				target.closest("[data-pdf-chrome], [data-selection-menu]")
+			)
+				return;
+			const sentence = translatedSentenceAtPoint(
+				target,
+				event.clientX,
+				event.clientY,
+			);
+			if (!sentence || !host.contains(sentence)) return;
+			event.preventDefault();
+			event.stopPropagation();
+			const item = sentence.closest<HTMLElement>("[data-layout-item]");
+			const page = sentence.closest<HTMLElement>(`[${EMBED_PAGE_ATTR}]`);
+			const index = sentence.getAttribute("data-sentence");
+			if (item && page && index !== null) {
+				sentenceForActivation({
+					docId,
+					regionId: item.dataset.layoutItem ?? "",
+					pageIndex: Number(page.getAttribute(EMBED_PAGE_ATTR)),
+					x: 0,
+					y: 0,
+					span: {
+						itemId: item.dataset.layoutItem ?? "",
+						sentenceIndex: Number(index),
+					},
+				});
+				holdLayoutSentenceHover(docId);
+			}
+			const range = document.createRange();
+			range.selectNodeContents(sentence);
+			const selection = window.getSelection();
+			selection?.removeAllRanges();
+			selection?.addRange(range);
+			pointerDown = false;
+			commit();
+		};
+		host.addEventListener("dblclick", onDoubleClick, true);
+		host.addEventListener("pointerdown", onPointerDown);
+		document.addEventListener("pointerup", onPointerUp, true);
+		document.addEventListener("pointercancel", onPointerCancel, true);
+		document.addEventListener("selectionchange", onSelectionChange);
+		document.addEventListener("copy", onCopy);
+		return () => {
+			disposed = true;
+			observer?.disconnect();
+			reset();
+			closeSelectionMenu();
+			host.removeEventListener("dblclick", onDoubleClick, true);
+			host.removeEventListener("pointerdown", onPointerDown);
+			document.removeEventListener("pointerup", onPointerUp, true);
+			document.removeEventListener("pointercancel", onPointerCancel, true);
+			document.removeEventListener("selectionchange", onSelectionChange);
+			document.removeEventListener("copy", onCopy);
+		};
+	}, [
+		enabled,
+		hostRef,
+		zoomRef,
+		engineRef,
+		docCapRef,
+		docId,
+		setSelectionMenu,
+		closeSelectionMenu,
+		paperRelPath,
+		paperAbsPath,
+	]);
+	return { closeSelectionMenu };
+}

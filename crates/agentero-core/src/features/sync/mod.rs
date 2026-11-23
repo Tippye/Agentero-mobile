@@ -15,6 +15,10 @@
 /// configuration and HTTP-status errors because it is the only class that a
 /// later pass can clear on its own — the auto-sync scheduler retries it.
 pub const SYNC_UNREACHABLE: &str = "sync_unreachable";
+/// Wire code for the conditional-write hard stop: the store ignores
+/// `If-Match` / `If-None-Match` and the device has not opted into the
+/// degraded protocol. Localized by the settings pane.
+pub const SYNC_NO_CONDITIONAL_WRITES: &str = "sync_no_conditional_writes";
 
 mod agentero;
 pub mod availability;

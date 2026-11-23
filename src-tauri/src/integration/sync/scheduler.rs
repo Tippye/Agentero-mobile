@@ -73,7 +73,7 @@ impl SyncService {
         if let Some(old) = schedulers.remove(vault_key) {
             stop_task(old);
         }
-        let Some(cfg) = cfg.filter(|cfg| cfg.auto_sync) else {
+        let Some(cfg) = cfg.filter(|cfg| cfg.auto_sync()) else {
             return;
         };
         let dir = PathBuf::from(vault_key);
@@ -86,7 +86,7 @@ impl SyncService {
                 app.clone(),
                 vault_key.to_owned(),
                 dir,
-                cfg.interval_minutes,
+                cfg.interval_minutes(),
             )),
         };
         #[cfg(mobile)]
@@ -97,7 +97,7 @@ impl SyncService {
             let key = vault_key.to_owned();
             let task = tauri::async_runtime::spawn(run_mobile_schedule(
                 receiver,
-                interval_duration(cfg.interval_minutes),
+                interval_duration(cfg.interval_minutes()),
                 move || {
                     let app = app.clone();
                     let key = key.clone();
@@ -107,7 +107,7 @@ impl SyncService {
                             return PassControl::Retry;
                         }
                         match config::try_get(&key) {
-                            Ok(Some(cfg)) if cfg.auto_sync => {}
+                            Ok(Some(cfg)) if cfg.auto_sync() => {}
                             Ok(_) => return PassControl::Stop,
                             Err(_) => {
                                 log::warn!(target: "agentero::sync", "auto-sync configuration unavailable for {key}");
@@ -180,7 +180,7 @@ impl SyncService {
                 }
             };
             for (key, cfg) in configs {
-                if !cfg.auto_sync || !relevant_to_vault(Path::new(&key), path) {
+                if !cfg.auto_sync() || !relevant_to_vault(Path::new(&key), path) {
                     continue;
                 }
                 let exists = self
@@ -236,7 +236,7 @@ impl SyncService {
                     return;
                 };
                 for (key, cfg) in configs {
-                    if !cfg.auto_sync {
+                    if !cfg.auto_sync() {
                         continue;
                     }
                     let exists = self
@@ -260,31 +260,12 @@ impl SyncService {
         };
         let token = tauri::async_runtime::block_on(super::commands::session_bearer(app));
         for (key, metadata) in configs {
-            if !metadata.auto_sync || metadata.backend == config::SyncBackendKind::Git {
+            if !metadata.auto_sync() || metadata.primary.backend == config::SyncBackendKind::Git {
                 continue;
             }
             let dir = PathBuf::from(&key);
             if !dir.is_dir() {
                 continue;
-            }
-            let resolved = tauri::async_runtime::block_on(super::credentials::load(app, &key));
-            let mut cfg = match resolved {
-                Ok(Some(cfg)) if cfg.auto_sync && cfg.backend != config::SyncBackendKind::Git => {
-                    cfg
-                }
-                Ok(_) => continue,
-                Err(_) => {
-                    log::warn!(target: "agentero::sync", "exit flush {key}: credentials unavailable; skipped");
-                    continue;
-                }
-            };
-            if cfg.backend == config::SyncBackendKind::Agentero {
-                if cfg.agentero_api.trim().is_empty() {
-                    cfg.agentero_api = super::commands::account_api_origin();
-                }
-                if let Some(token) = token.clone() {
-                    cfg.agentero_token = token;
-                }
             }
             let Some(_lease) = self.try_begin(&key) else {
                 log::info!(target: "agentero::sync", "exit flush {key}: sync already running; skipped");
@@ -297,10 +278,31 @@ impl SyncService {
                 log::info!(target: "agentero::sync", "exit flush {key}: vault lock busy; skipped");
                 continue;
             };
+            let resolved = tauri::async_runtime::block_on(super::credentials::load(app, &key));
+            let mut cfg = match resolved {
+                Ok(Some(cfg))
+                    if cfg.auto_sync() && cfg.primary.backend != config::SyncBackendKind::Git =>
+                {
+                    cfg
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    log::warn!(target: "agentero::sync", "exit flush {key}: credentials unavailable; skipped");
+                    continue;
+                }
+            };
+            if cfg.primary.backend == config::SyncBackendKind::Agentero {
+                if cfg.primary.agentero_api.trim().is_empty() {
+                    cfg.primary.agentero_api = super::commands::account_api_origin();
+                }
+                if let Some(token) = token.clone() {
+                    cfg.primary.agentero_token = token;
+                }
+            }
             let result = tauri::async_runtime::block_on(async {
                 tokio::time::timeout(
                     Duration::from_secs(EXIT_FLUSH_TIMEOUT_SECS),
-                    super::engine::sync_vault_locked(&_lock, &cfg, &|_, _, _| {}),
+                    super::engine::sync_vault_locked(&_lock, &cfg.primary, &|_, _, _| {}),
                 )
                 .await
             });

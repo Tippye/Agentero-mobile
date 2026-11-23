@@ -32,6 +32,7 @@ import {
 	subscribeSettings,
 } from "@/lib/settings";
 import { DEFAULT_SETTINGS } from "@/lib/settings/defaults";
+import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 
 // The sync pane pulls in the full storage configuration surface; load it on
 // demand like the desktop shell so opening settings stays cheap.
@@ -72,8 +73,6 @@ const NAV: {
 	{ id: "about", icon: Info, label: "settings:nav.about" },
 ];
 
-const noop = () => {};
-
 export type MobileSettingsPageProps = {
 	open: boolean;
 	section: MobileSettingsSection;
@@ -81,7 +80,7 @@ export type MobileSettingsPageProps = {
 	onClose: () => void;
 	vaultPath: string | null;
 	onSynced?: () => void | Promise<void>;
-	onReviewSyncConflicts: () => void;
+	onReviewSyncConflicts?: () => void;
 };
 
 /** Full-screen in-shell settings surface — aggregates every mobile option. */
@@ -374,11 +373,13 @@ export function MobileSettingsPage({
 									<SyncPane
 										vaultPath={vaultPath}
 										mobile
-										onSynced={onSynced ?? noop}
+										onSynced={onSynced}
 										onReviewConflicts={onReviewSyncConflicts}
 									/>
 								</Suspense>
-								<MobileDownloadSettings vaultPath={vaultPath} />
+								{vaultPath && !isRemoteVaultHandle(vaultPath) ? (
+									<MobileDownloadSettings vaultPath={vaultPath} />
+								) : null}
 							</>
 						) : section === "background" ? (
 							<MobileBackgroundSettingsPanel active />

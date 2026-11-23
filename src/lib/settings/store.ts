@@ -27,6 +27,7 @@ import {
 import {
 	clampEditorLineHeight,
 	clampMarkdownMaxWidth,
+	clampUiScale,
 	clampWikiEmbedFontSize,
 	DECISION_PROVIDER_PRESETS,
 	DEFAULT_DECISION_SETTINGS,
@@ -42,6 +43,7 @@ import {
 import { normalizeFontFamilyValue } from "@/lib/settings/fonts";
 import { normalizeShortcutOverrides } from "@/lib/settings/shortcut-bindings";
 import {
+	type AlphaXivSettings,
 	type AppSettings,
 	DEFAULT_LIBRARY_COLUMNS,
 	type DecisionSettings,
@@ -104,6 +106,7 @@ let cache: AppSettings = {
 	embedding: { ...DEFAULT_EMBEDDING_SETTINGS },
 	dismissedReminders: [],
 	decision: { ...DEFAULT_DECISION_SETTINGS },
+	alphaxiv: { ...DEFAULT_SETTINGS.alphaxiv },
 };
 let loaded = false;
 let loadPromise: Promise<AppSettings> | null = null;
@@ -121,6 +124,7 @@ function cloneSettings(s: AppSettings): AppSettings {
 		layout: { ...s.layout, providerConfigs: { ...s.layout.providerConfigs } },
 		dismissedReminders: [...s.dismissedReminders],
 		decision: { ...s.decision },
+		alphaxiv: { ...s.alphaxiv },
 	};
 }
 
@@ -356,6 +360,27 @@ function migrateTranslateFinalCacheDefault(settings: AppSettings): AppSettings {
 	};
 }
 
+function normalizeAlphaXiv(raw: unknown): AlphaXivSettings {
+	const empty: AlphaXivSettings = {
+		apiKey: "",
+		username: "",
+		email: "",
+		realName: "",
+	};
+	if (!raw || typeof raw !== "object") return empty;
+	const record = raw as Record<string, unknown>;
+	const text = (key: string) =>
+		typeof record[key] === "string" ? record[key].trim() : "";
+	const apiKey = text("apiKey");
+	if (!apiKey) return empty;
+	return {
+		apiKey,
+		username: text("username"),
+		email: text("email"),
+		realName: text("realName"),
+	};
+}
+
 function normalizeSettings(raw: AppSettings): AppSettings {
 	return normalizePartial(raw);
 }
@@ -416,6 +441,7 @@ function normalizePartial(
 	} else {
 		merged.networkProxyUrl = parsed.networkProxyUrl.trim();
 	}
+	merged.alphaxiv = normalizeAlphaXiv(parsed.alphaxiv);
 	if (typeof parsed.openreviewCookie !== "string") {
 		merged.openreviewCookie = DEFAULT_SETTINGS.openreviewCookie;
 	} else {
@@ -567,7 +593,7 @@ function normalizePartial(
 			merged.uiScale = DEFAULT_SETTINGS.uiScale;
 		}
 	} else {
-		merged.uiScale = snapUiScale(merged.uiScale);
+		merged.uiScale = clampUiScale(merged.uiScale);
 	}
 	if (
 		merged.locale !== "system" &&

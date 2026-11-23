@@ -1,4 +1,15 @@
-import { ChevronRight, CloudUpload, LoaderCircle, Unplug } from "lucide-react";
+import {
+	ArrowDownToLine,
+	ArrowUpFromLine,
+	ChevronRight,
+	CloudUpload,
+	LoaderCircle,
+	Plus,
+	Trash2,
+	TriangleAlert,
+	Unplug,
+	X,
+} from "lucide-react";
 import type { ComponentProps, ComponentType } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -30,6 +41,14 @@ import {
 	CollapsibleContent,
 	CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
 	Select,
@@ -56,16 +75,23 @@ import {
 } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import { displayPath } from "@/lib/core/path";
+import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
 import { isTauri } from "@/lib/core/tauri";
 import { toSafeDisposer } from "@/lib/core/tauri-events";
 import { cn } from "@/lib/core/utils";
 import {
 	emptySyncConfig,
 	isSyncConflictPending,
+	isSyncMirrorPhase,
 	isSyncProgressPhase,
 	SYNC_INTERVAL_CHOICES,
 	type SyncBackendConfig,
 	type SyncCloudUsage,
+	type SyncCredentialState,
+	type SyncMirrorPhase,
+	type SyncMirrorStatus,
+	type SyncOverwriteDirection,
+	type SyncOverwritePreview,
 	type SyncProgressEvent,
 	type SyncScopeSizes,
 	type SyncStateEvent,
@@ -74,6 +100,8 @@ import {
 	syncDisconnect,
 	syncGetStatus,
 	syncNow,
+	syncOverwrite,
+	syncOverwritePreview,
 	syncScopeSizes,
 } from "@/lib/sync/api";
 import { vaultDisplayName } from "@/lib/vault/path";
@@ -174,6 +202,70 @@ const BACKEND_OPTIONS = [
 	{ value: "git", labelKey: "sync.backendGit" },
 ] as const;
 
+function credentialNoticeKey(state: SyncCredentialState | undefined) {
+	switch (state) {
+		case "locked":
+			return "sync.credentialLocked";
+		case "unavailable":
+			return "sync.credentialUnavailable";
+		case "missing":
+			return "sync.credentialMissing";
+		case "invalid":
+			return "sync.credentialInvalid";
+	}
+	return null;
+}
+
+function credentialBlocked(state: SyncCredentialState | undefined) {
+	return state === "locked" || state === "unavailable";
+}
+
+function credentialMissing(state: SyncCredentialState | undefined) {
+	return state === "missing" || state === "invalid";
+}
+
+function secretField(config: SyncBackendConfig) {
+	return config.backend === "webdav" ? "webdavPassword" : "secretKey";
+}
+
+function secretFieldLabel(config: SyncBackendConfig) {
+	return config.backend === "webdav" ? "sync.password" : "sync.secretKey";
+}
+
+function isMaskedSecret(value: string | null | undefined) {
+	return /^\*+$/.test(value?.trim() ?? "");
+}
+
+function hasNewSecret(config: SyncBackendConfig) {
+	const secret = config[secretField(config)].trim();
+	return secret.length > 0 && !isMaskedSecret(secret);
+}
+
+function resetSavedCredentials(config: SyncBackendConfig) {
+	const field = secretField(config);
+	return {
+		...config,
+		credentialRef: null,
+		[field]: isMaskedSecret(config[field]) ? "" : config[field],
+		sessionToken: isMaskedSecret(config.sessionToken)
+			? null
+			: config.sessionToken,
+	};
+}
+
+function editableConfig(
+	config: SyncBackendConfig,
+	state: SyncCredentialState | undefined,
+) {
+	return credentialMissing(state)
+		? { ...config, [secretField(config)]: "", sessionToken: null }
+		: config;
+}
+
+/** Dismissing the conditional-writes notice is a permanent, device-local choice. */
+const DEGRADED_NOTICE_DISMISSED_KEY =
+	"agentero.sync.degradedNoticeDismissed.v1";
+
 /** Local Vaults this pane can edit: the opener plus the shared MRU list. */
 function localVaultChoices(primary: string | null, mobile: boolean): string[] {
 	const out: string[] = [];
@@ -270,7 +362,7 @@ function VaultSyncForm({
 		}
 		return config;
 	}, [mobile]);
-	const formVersion = useRef(0);
+	const formDirty = useRef(false);
 	const requestId = useRef(0);
 
 	const [status, setStatus] = useState<SyncStatus | null>(null);
@@ -281,12 +373,42 @@ function VaultSyncForm({
 	const [progress, setProgress] = useState<SyncProgressEvent | null>(null);
 	const [syncError, setSyncError] = useState<string | null>(null);
 	const [advancedOpen, setAdvancedOpen] = useState(false);
+	const [degradedNoticeDismissed, setDegradedNoticeDismissed] = useState(() =>
+		readJsonStorage<boolean>(DEGRADED_NOTICE_DISMISSED_KEY, false),
+	);
+	const [overwriteDialog, setOverwriteDialog] = useState<{
+		direction: SyncOverwriteDirection;
+		preview: SyncOverwritePreview;
+	} | null>(null);
+	const [overwriting, setOverwriting] = useState(false);
 	const [scopeSizes, setScopeSizes] = useState<SyncScopeSizes | null>(null);
+	const [mirrors, setMirrors] = useState<SyncBackendConfig[]>([]);
+	const mirrorsDirty = useRef(false);
+	// Live per-mirror state from `sync:mirror`, replaced by the persisted
+	// `lastSyncAt` / `lastError` on the next status refresh.
+	const [mirrorLive, setMirrorLive] = useState<MirrorLive>({});
 	const [activeOrgId, setActiveOrgId] = useState("");
 	const cloudSubject =
 		form.agenteroSubject === "organization" ? "organization" : "user";
 	const [cloudUsage, setCloudUsage] = useState<SyncCloudUsage | null>(null);
 	const pendingConflicts = status?.pendingConflicts ?? null;
+	const describeSyncError = useCallback(
+		(detail: string, code?: string | null) => {
+			if (code === "sync_no_conditional_writes")
+				return t("sync.noConditionalWrites");
+			if (code === "sync_mirror_no_conditional_writes")
+				return t("sync.mirrorNoConditionalWrites");
+			if (code === "sync_credentials_target_changed")
+				return t("sync.credentialTargetChanged");
+			if (code === "git_auth_failed")
+				return t("sync.gitAuthFailed", { detail });
+			if (code === "git_tls_failed") return t("sync.gitTlsFailed", { detail });
+			if (code === "sync_unreachable" || isLikelyNetworkFailure(detail))
+				return t("sync.unreachable");
+			return detail;
+		},
+		[t],
+	);
 
 	const refresh = useCallback(async () => {
 		if (!localVault) return;
@@ -295,27 +417,30 @@ function VaultSyncForm({
 		if (id !== requestId.current) return;
 		setStatus(next);
 		setSyncing(next.running);
-		// Preserve an in-progress draft across background status updates; only
-		// the first load seeds the form (upstream draft-preservation guard).
-		if (formVersion.current !== 0) return;
-		formVersion.current++;
+		if (!mirrorsDirty.current) {
+			setMirrors(
+				next.mirrors.map(({ config, credentialState }) =>
+					editableConfig(config, credentialState),
+				),
+			);
+		}
+		// Background status updates can change capabilities or credential state.
+		// Keep any in-progress edit until it has been saved.
+		if (formDirty.current) return;
 		if (
 			next.config &&
 			(!mobile ||
 				next.config.backend === "s3" ||
 				next.config.backend === "webdav")
 		) {
-			setForm(
-				next.credentialState === "missing" || next.credentialState === "invalid"
-					? { ...next.config, secretKey: "", webdavPassword: "" }
-					: next.config,
-			);
+			setForm(editableConfig(next.config, next.credentialState));
 			// Surface the advanced group when it holds non-default values.
 			if (
 				next.config.backend === "s3" &&
 				(next.config.region !== "us-east-1" ||
 					next.config.prefix !== "" ||
-					!next.config.forcePathStyle)
+					!next.config.forcePathStyle ||
+					Boolean(next.config.sessionToken))
 			) {
 				setAdvancedOpen(true);
 			}
@@ -357,7 +482,8 @@ function VaultSyncForm({
 		setProgress(null);
 		setScopeSizes(null);
 		setAdvancedOpen(false);
-		formVersion.current = 0;
+		formDirty.current = false;
+		mirrorsDirty.current = false;
 		void loadStatus();
 		return () => {
 			requestId.current++;
@@ -377,21 +503,21 @@ function VaultSyncForm({
 							? (payload.error ?? t("sync.statusError"))
 							: null,
 					);
-					if (payload.status === "error" && !onReviewConflicts) {
-						// The Host retries transport failures on its own; telling
-						// the user what to check beats reqwest's error chain.
-						const detail = payload.error ?? t("sync.statusError");
-						const unreachable = isLikelyNetworkFailure(detail);
-						notifyError(unreachable ? t("sync.unreachable") : detail, {
-							id: `sync:${localVault}`,
-							description: unreachable ? detail : undefined,
-						});
-					}
 					if (payload.status !== "syncing") {
 						setProgress(null);
+						setMirrorLive({});
 						void refresh().catch((error) =>
 							notifyError(errorMessage(error), { id: `sync:${localVault}` }),
 						);
+					}
+					// The mobile shell already reports vault-level background errors.
+					if (payload.status === "error" && !onReviewConflicts) {
+						const detail = payload.error ?? t("sync.statusError");
+						const message = describeSyncError(detail, payload.errorCode);
+						notifyError(message, {
+							id: `sync:${localVault}`,
+							...(message === detail ? {} : { description: detail }),
+						});
 					}
 				}),
 			),
@@ -403,11 +529,29 @@ function VaultSyncForm({
 					}
 				}),
 			),
+			toSafeDisposer(
+				events.syncMirror.listen((event) => {
+					const payload = event.payload;
+					if (payload.vaultPath !== localVault) return;
+					const { status } = payload;
+					if (!isSyncMirrorPhase(status)) return;
+					setMirrorLive((prev) => ({
+						...prev,
+						[payload.index]: {
+							status,
+							error: payload.error ?? undefined,
+						},
+					}));
+					if (payload.status !== "started") {
+						void refresh().catch(() => undefined);
+					}
+				}),
+			),
 		];
 		return () => {
 			for (const off of offs) off();
 		};
-	}, [localVault, onReviewConflicts, refresh, t]);
+	}, [describeSyncError, localVault, onReviewConflicts, refresh, t]);
 
 	useEffect(() => {
 		if (!localVault) return;
@@ -434,8 +578,13 @@ function VaultSyncForm({
 	}
 
 	const patch = (partial: Partial<SyncBackendConfig>) => {
-		formVersion.current++;
-		setForm((prev) => ({ ...prev, ...partial }));
+		formDirty.current = true;
+		setForm((prev) => {
+			const next = { ...prev, ...partial };
+			return prev.credentialRef && !sameSyncTarget(prev, next)
+				? resetSavedCredentials(next)
+				: next;
+		});
 	};
 
 	const scope = form.scope;
@@ -445,26 +594,53 @@ function VaultSyncForm({
 	const isAgentero = form.backend === "agentero";
 	const isWebdav = form.backend === "webdav";
 	const isGit = form.backend === "git";
-	const credentialBlocked =
-		status?.credentialState === "locked" ||
-		status?.credentialState === "unavailable";
-	const credentialNeedsInput =
-		status?.credentialState === "missing" ||
-		status?.credentialState === "invalid";
-	const secret = (isWebdav ? form.webdavPassword : form.secretKey).trim();
-	const secretEntered = Boolean(secret) && secret !== "***";
-	const credentialNotice =
-		status?.credentialState === "locked"
-			? "sync.credentialLocked"
-			: status?.credentialState === "unavailable"
-				? "sync.credentialUnavailable"
-				: status?.credentialState === "missing"
-					? "sync.credentialMissing"
-					: status?.credentialState === "invalid"
-						? "sync.credentialInvalid"
-						: null;
+	const primaryCredentialBlocked = credentialBlocked(status?.credentialState);
+	const credentialNeedsInput = credentialMissing(status?.credentialState);
 	const controlsDisabled =
-		loading || !status || saving || syncing || credentialBlocked;
+		loading || !status || saving || syncing || overwriting;
+	const primaryFieldsDisabled = controlsDisabled || primaryCredentialBlocked;
+	const scopeDisabled = primaryFieldsDisabled || Boolean(pendingConflicts);
+	const savedMirrors = status?.mirrors ?? [];
+	const mirrorCredentialsIncomplete = mirrors.some((mirror) => {
+		if (mobile && mirror.backend === "git") return true;
+		if (mirror.backend === "git") return false;
+		const saved = savedMirrors.find((entry) =>
+			sameSyncTarget(entry.config, mirror),
+		);
+		if (credentialBlocked(saved?.credentialState)) return true;
+		return (
+			!hasNewSecret(mirror) &&
+			!(
+				saved &&
+				!credentialMissing(saved.credentialState) &&
+				isMaskedSecret(mirror[secretField(mirror)])
+			)
+		);
+	});
+	const savedPrimary = status?.config;
+	const primaryTargetChanged = Boolean(
+		savedPrimary && !sameSyncTarget(savedPrimary, form),
+	);
+	const requiresReplacement =
+		credentialNeedsInput ||
+		Boolean(savedPrimary?.credentialRef && primaryTargetChanged);
+	const credentialNotice =
+		savedPrimary?.credentialRef && primaryTargetChanged
+			? "sync.credentialTargetChanged"
+			: credentialNoticeKey(status?.credentialState);
+	const changesPendingReview = Boolean(
+		pendingConflicts &&
+			savedPrimary &&
+			(primaryTargetChanged ||
+				savedPrimary.conflictPolicy !== form.conflictPolicy ||
+				JSON.stringify(savedPrimary.scope) !== JSON.stringify(form.scope)),
+	);
+	const saveBlocked =
+		controlsDisabled ||
+		primaryCredentialBlocked ||
+		changesPendingReview ||
+		(requiresReplacement && !hasNewSecret(form)) ||
+		mirrorCredentialsIncomplete;
 	const backendLocked = status?.configured === true;
 	const providerLinks = isAgentero
 		? []
@@ -480,44 +656,39 @@ function VaultSyncForm({
 			(cloudSubject === "organization" && !activeOrgId));
 
 	function reportSyncError(error: unknown) {
+		if (isSyncConflictPending(error)) {
+			setSyncError(null);
+			reviewPending();
+			void refresh().catch((error) => notifyError(errorMessage(error)));
+			return;
+		}
 		const detail = errorMessage(error);
 		const code = error instanceof Error ? (error as ApiError).code : undefined;
-		if (code === "git_auth_failed" || code === "git_tls_failed") {
-			const message =
-				code === "git_auth_failed"
-					? t("sync.gitAuthFailed", { detail })
-					: t("sync.gitTlsFailed", { detail });
-			setSyncError(message);
-			notifyError(message, { id: `sync:${localVault}` });
-			return;
-		}
-		// DNS / connection / timeout failures are retried by the Host and can
-		// clear without user action; surface an actionable sentence and keep
-		// the raw chain as the secondary line for diagnostics.
-		if (code === "sync_unreachable" || isLikelyNetworkFailure(detail)) {
-			setSyncError(detail);
-			notifyError(t("sync.unreachable"), {
-				id: `sync:${localVault}`,
-				description: detail,
-			});
-			return;
-		}
-		setSyncError(detail);
-		notifyError(detail, { id: `sync:${localVault}` });
+		const message = describeSyncError(detail, code);
+		setSyncError(message);
+		notifyError(message, {
+			id: `sync:${localVault}`,
+			...(message === detail ? {} : { description: detail }),
+		});
 	}
 
 	const save = async () => {
-		if (credentialBlocked || (credentialNeedsInput && !secretEntered)) return;
-		const version = formVersion.current;
+		if (saveBlocked || cloudBlocked) return;
 		setSaving(true);
 		try {
-			const next = await syncConfigure(localVault, form);
+			const next = await syncConfigure(localVault, form, mirrors);
 			requestId.current++;
 			setStatus(next);
-			if (next.config && formVersion.current === version) {
-				formVersion.current++;
-				setForm(next.config);
-			}
+			setSyncing(next.running);
+			setMirrors(
+				next.mirrors.map(({ config, credentialState }) =>
+					editableConfig(config, credentialState),
+				),
+			);
+			mirrorsDirty.current = false;
+			formDirty.current = false;
+			if (next.config)
+				setForm(editableConfig(next.config, next.credentialState));
 			setSyncError(null);
 			notifySuccess(t("sync.saved"));
 		} catch (error) {
@@ -528,7 +699,13 @@ function VaultSyncForm({
 	};
 
 	const runSync = async () => {
-		if (credentialBlocked || credentialNeedsInput) return;
+		if (
+			controlsDisabled ||
+			primaryCredentialBlocked ||
+			credentialNeedsInput ||
+			pendingConflicts
+		)
+			return;
 		setSyncing(true);
 		try {
 			const outcome = await syncNow(localVault);
@@ -546,12 +723,7 @@ function VaultSyncForm({
 				);
 			}
 		} catch (error) {
-			if (isSyncConflictPending(error)) {
-				setSyncError(null);
-				reviewPending();
-			} else {
-				reportSyncError(error);
-			}
+			reportSyncError(error);
 		} finally {
 			setSyncing(false);
 			setProgress(null);
@@ -560,16 +732,23 @@ function VaultSyncForm({
 	};
 
 	const disconnect = async () => {
+		if (controlsDisabled || pendingConflicts) return;
+		setSaving(true);
 		try {
 			await syncDisconnect(localVault);
 			requestId.current++;
-			formVersion.current++;
+			formDirty.current = false;
+			mirrorsDirty.current = false;
+			setMirrors([]);
+			setMirrorLive({});
 			setStatus(null);
 			setForm(newConfig());
 			setSyncError(null);
-			void refresh().catch(() => undefined);
+			await refresh();
 		} catch (error) {
 			reportSyncError(error);
+		} finally {
+			setSaving(false);
 		}
 	};
 
@@ -590,12 +769,68 @@ function VaultSyncForm({
 					variant="outline"
 					className="min-h-11"
 					onClick={() => void disconnect()}
-					disabled={syncing}
+					disabled={controlsDisabled || Boolean(pendingConflicts)}
 				>
 					{t("sync.disconnect")}
 				</Button>
 			</section>
 		);
+
+	const configChanged =
+		JSON.stringify(form) !== JSON.stringify(status?.config) ||
+		(mirrorsDirty.current &&
+			JSON.stringify(mirrors) !==
+				JSON.stringify(
+					savedMirrors.map(({ config, credentialState }) =>
+						editableConfig(config, credentialState),
+					),
+				));
+	const canOverwrite =
+		!mobile &&
+		isWebdav &&
+		status?.configured &&
+		!configChanged &&
+		!pendingConflicts &&
+		form.conflictPolicy !== "ask" &&
+		!primaryFieldsDisabled &&
+		!credentialNeedsInput;
+
+	const openOverwrite = async (direction: SyncOverwriteDirection) => {
+		if (!canOverwrite) return;
+		try {
+			const preview = await syncOverwritePreview(localVault, direction);
+			setOverwriteDialog({ direction, preview });
+		} catch (error) {
+			reportSyncError(error);
+		}
+	};
+
+	const confirmOverwrite = async () => {
+		if (!overwriteDialog || !canOverwrite) return;
+		setOverwriting(true);
+		try {
+			const outcome = await syncOverwrite(
+				localVault,
+				overwriteDialog.direction,
+			);
+			setOverwriteDialog(null);
+			await onSynced?.();
+			setSyncError(null);
+			notifySuccess(
+				t("sync.overwriteDone", {
+					version: outcome.version,
+					up: outcome.uploaded,
+					down: outcome.downloaded,
+					deleted: outcome.deletedLocal,
+				}),
+			);
+		} catch (error) {
+			reportSyncError(error);
+		} finally {
+			setOverwriting(false);
+			void refresh().catch(() => undefined);
+		}
+	};
 
 	const field = (
 		key: keyof SyncBackendConfig,
@@ -604,10 +839,13 @@ function VaultSyncForm({
 		<Input
 			id={`sync-${key}`}
 			className={mobile ? "w-full min-w-0 sm:w-64" : "w-64"}
-			disabled={controlsDisabled}
+			disabled={
+				primaryFieldsDisabled ||
+				Boolean(pendingConflicts && opts?.type !== "password")
+			}
 			type={opts?.type ?? "text"}
 			placeholder={opts?.placeholder}
-			value={String(form[key])}
+			value={String(form[key] ?? "")}
 			onChange={(e) => patch({ [key]: e.target.value })}
 			autoComplete="off"
 			spellCheck={false}
@@ -647,7 +885,6 @@ function VaultSyncForm({
 						? "bg-amber-500"
 						: "bg-emerald-500"
 					: "bg-muted-foreground/35";
-	const configChanged = JSON.stringify(form) !== JSON.stringify(status?.config);
 	const primaryAction = !status ? (
 		<Button
 			type="button"
@@ -663,14 +900,7 @@ function VaultSyncForm({
 			type="button"
 			size="sm"
 			onClick={() => void save()}
-			disabled={
-				loading ||
-				saving ||
-				syncing ||
-				cloudBlocked ||
-				credentialBlocked ||
-				(credentialNeedsInput && !secretEntered)
-			}
+			disabled={saveBlocked || cloudBlocked}
 		>
 			{saving ? (
 				<LoaderCircle data-icon="inline-start" className="animate-spin" />
@@ -686,7 +916,12 @@ function VaultSyncForm({
 			type="button"
 			size="sm"
 			onClick={() => void runSync()}
-			disabled={loading || syncing || credentialBlocked || credentialNeedsInput}
+			disabled={
+				controlsDisabled ||
+				primaryCredentialBlocked ||
+				credentialNeedsInput ||
+				Boolean(pendingConflicts)
+			}
 		>
 			{syncing ? (
 				<LoaderCircle data-icon="inline-start" className="animate-spin" />
@@ -766,10 +1001,10 @@ function VaultSyncForm({
 				<div className="mb-5 space-y-3 rounded-xl border bg-muted/30 p-3.5">
 					<p className="text-sm">
 						{t(credentialNotice, {
-							field: t(isWebdav ? "sync.password" : "sync.secretKey"),
+							field: t(secretFieldLabel(form)),
 						})}
 					</p>
-					{credentialBlocked ? (
+					{primaryCredentialBlocked ? (
 						<Button
 							type="button"
 							variant="outline"
@@ -820,12 +1055,6 @@ function VaultSyncForm({
 				</div>
 			) : null}
 
-			{status?.configured && !isGit && !form.conditionalWrites ? (
-				<p className="mb-3 text-muted-foreground text-xs">
-					{t("sync.noConditionalWrites")}
-				</p>
-			) : null}
-
 			<div className="mb-3 flex flex-wrap items-center gap-2">
 				<span id="sync-backend-label" className="text-muted-foreground text-xs">
 					{t("sync.backend")}
@@ -846,7 +1075,7 @@ function VaultSyncForm({
 										patch({ backend: value });
 									}
 								}}
-								disabled={backendLocked || controlsDisabled}
+								disabled={backendLocked || primaryFieldsDisabled}
 							>
 								<SelectTrigger
 									id="sync-backend"
@@ -924,7 +1153,7 @@ function VaultSyncForm({
 									agenteroOrgId: value === "organization" ? activeOrgId : "",
 								});
 							}}
-							disabled={backendLocked || controlsDisabled}
+							disabled={backendLocked || primaryFieldsDisabled}
 						>
 							<SelectTrigger id="sync-space" size="sm" className="w-44">
 								<SelectValue />
@@ -998,31 +1227,104 @@ function VaultSyncForm({
 					</SyncSettingsRow>
 				</SettingsGroup>
 			) : isWebdav ? (
-				<SettingsGroup>
-					<SyncSettingsRow
-						mobile={mobile}
-						label={t("sync.serverUrl")}
-						htmlFor="sync-webdavUrl"
-					>
-						{field("webdavUrl", {
-							placeholder: "https://dav.jianguoyun.com/dav/agentero",
-						})}
-					</SyncSettingsRow>
-					<SyncSettingsRow
-						mobile={mobile}
-						label={t("sync.username")}
-						htmlFor="sync-webdavUsername"
-					>
-						{field("webdavUsername")}
-					</SyncSettingsRow>
-					<SyncSettingsRow
-						mobile={mobile}
-						label={t("sync.password")}
-						htmlFor="sync-webdavPassword"
-					>
-						{field("webdavPassword", { type: "password" })}
-					</SyncSettingsRow>
-				</SettingsGroup>
+				<>
+					{status?.configured &&
+					!form.conditionalWrites &&
+					!form.allowDegradedSync &&
+					!degradedNoticeDismissed ? (
+						<div className="mb-3 flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/5 px-3.5 py-2 text-xs">
+							<TriangleAlert
+								className="size-4 shrink-0 text-amber-600 dark:text-amber-500"
+								aria-hidden
+							/>
+							<span className="min-w-0 flex-1">
+								{t("sync.noConditionalWritesShort")}
+							</span>
+							<button
+								type="button"
+								className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+								aria-label={t("sync.dismissNotice")}
+								onClick={() => {
+									writeJsonStorage(DEGRADED_NOTICE_DISMISSED_KEY, true);
+									setDegradedNoticeDismissed(true);
+								}}
+							>
+								<X className="size-3.5" aria-hidden />
+							</button>
+						</div>
+					) : null}
+					<SettingsGroup>
+						<SyncSettingsRow
+							mobile={mobile}
+							label={t("sync.serverUrl")}
+							htmlFor="sync-webdavUrl"
+						>
+							{field("webdavUrl", {
+								placeholder: "https://dav.jianguoyun.com/dav/agentero",
+							})}
+						</SyncSettingsRow>
+						<SyncSettingsRow
+							mobile={mobile}
+							label={t("sync.username")}
+							htmlFor="sync-webdavUsername"
+						>
+							{field("webdavUsername")}
+						</SyncSettingsRow>
+						<SyncSettingsRow
+							mobile={mobile}
+							label={t("sync.password")}
+							description={t("sync.webdavPasswordHint")}
+							htmlFor="sync-webdavPassword"
+						>
+							{field("webdavPassword", { type: "password" })}
+						</SyncSettingsRow>
+						{status?.configured && !form.conditionalWrites ? (
+							<SyncSettingsRow
+								mobile={mobile}
+								label={
+									<HelpLabel
+										label={t("sync.allowDegradedSync")}
+										help={t("sync.degradedSyncRisk")}
+									/>
+								}
+								htmlFor="sync-allowDegradedSync"
+							>
+								<Switch
+									id="sync-allowDegradedSync"
+									checked={form.allowDegradedSync}
+									onCheckedChange={(value) =>
+										patch({ allowDegradedSync: value })
+									}
+									disabled={primaryFieldsDisabled || Boolean(pendingConflicts)}
+								/>
+							</SyncSettingsRow>
+						) : null}
+						{canOverwrite ? (
+							<div className="flex flex-wrap items-center gap-2 px-3.5 py-2.5">
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={syncing || saving}
+									onClick={() => void openOverwrite("remoteToLocal")}
+								>
+									<ArrowDownToLine data-icon="inline-start" />
+									{t("sync.overwritePull")}
+								</Button>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={syncing || saving}
+									onClick={() => void openOverwrite("localToRemote")}
+								>
+									<ArrowUpFromLine data-icon="inline-start" />
+									{t("sync.overwritePush")}
+								</Button>
+							</div>
+						) : null}
+					</SettingsGroup>
+				</>
 			) : (
 				<SettingsGroup>
 					<SyncSettingsRow
@@ -1119,7 +1421,7 @@ function VaultSyncForm({
 							</span>
 						) : null}
 						<Switch
-							disabled={controlsDisabled}
+							disabled={scopeDisabled}
 							className={mobile ? "after:-inset-y-3.5" : undefined}
 							id="sync-scope-pdf"
 							checked={scope.pdf}
@@ -1139,7 +1441,7 @@ function VaultSyncForm({
 							</span>
 						) : null}
 						<Switch
-							disabled={controlsDisabled}
+							disabled={scopeDisabled}
 							className={mobile ? "after:-inset-y-3.5" : undefined}
 							id="sync-scope-source"
 							checked={scope.source}
@@ -1159,7 +1461,7 @@ function VaultSyncForm({
 							</span>
 						) : null}
 						<Switch
-							disabled={controlsDisabled}
+							disabled={scopeDisabled}
 							className={mobile ? "after:-inset-y-3.5" : undefined}
 							id="sync-scope-attachments"
 							checked={scope.attachments}
@@ -1184,7 +1486,7 @@ function VaultSyncForm({
 							</span>
 						) : null}
 						<Switch
-							disabled={controlsDisabled}
+							disabled={scopeDisabled}
 							className={mobile ? "after:-inset-y-3.5" : undefined}
 							id="sync-scope-translated"
 							checked={scope.translated}
@@ -1205,7 +1507,7 @@ function VaultSyncForm({
 								</span>
 							) : null}
 							<Switch
-								disabled={controlsDisabled}
+								disabled={scopeDisabled}
 								className="after:-inset-y-3.5"
 								id="sync-scope-ink"
 								checked={scope.ink}
@@ -1244,6 +1546,13 @@ function VaultSyncForm({
 							</SyncSettingsRow>
 							<SyncSettingsRow
 								mobile={mobile}
+								label={t("sync.sessionToken")}
+								htmlFor="sync-sessionToken"
+							>
+								{field("sessionToken", { type: "password" })}
+							</SyncSettingsRow>
+							<SyncSettingsRow
+								mobile={mobile}
 								label={
 									<HelpLabel
 										label={t("sync.prefix")}
@@ -1265,7 +1574,7 @@ function VaultSyncForm({
 								htmlFor="sync-pathStyle"
 							>
 								<Switch
-									disabled={controlsDisabled}
+									disabled={scopeDisabled}
 									className={mobile ? "after:-inset-y-3.5" : undefined}
 									id="sync-pathStyle"
 									checked={form.forcePathStyle}
@@ -1278,6 +1587,20 @@ function VaultSyncForm({
 					</CollapsibleContent>
 				</Collapsible>
 			) : null}
+
+			<MirrorSection
+				mobile={mobile}
+				disabled={controlsDisabled}
+				mirrors={mirrors}
+				statuses={savedMirrors}
+				live={mirrorLive}
+				onRetry={() => void loadStatus()}
+				onChange={(next) => {
+					mirrorsDirty.current = true;
+					setMirrors(next);
+				}}
+			/>
+
 			<div className="flex items-center gap-2">
 				{status?.configured ? (
 					<Button
@@ -1285,21 +1608,79 @@ function VaultSyncForm({
 						size="sm"
 						variant="ghost"
 						onClick={() => void disconnect()}
-						disabled={syncing}
+						disabled={controlsDisabled || Boolean(pendingConflicts)}
 					>
 						<Unplug data-icon="inline-start" />
 						{t("sync.disconnect")}
 					</Button>
 				) : null}
 			</div>
-			{!mobile ? (
+			{!onReviewConflicts ? (
 				<SyncConflictDialog
+					mobile={mobile}
 					pending={pendingConflicts}
 					open={conflictReview.open}
 					resolving={conflictReview.resolving}
 					onResolve={conflictReview.apply}
 					onDismiss={conflictReview.dismiss}
 				/>
+			) : null}
+			{overwriteDialog ? (
+				<Dialog
+					open
+					onOpenChange={(open) => {
+						if (!open && !overwriting) setOverwriteDialog(null);
+					}}
+				>
+					<DialogContent className="sm:max-w-md">
+						<DialogHeader>
+							<DialogTitle>
+								{t(
+									overwriteDialog.direction === "remoteToLocal"
+										? "sync.overwritePullTitle"
+										: "sync.overwritePushTitle",
+								)}
+							</DialogTitle>
+							<DialogDescription>
+								{overwriteDialog.direction === "remoteToLocal"
+									? t("sync.overwritePullBody", {
+											delete: overwriteDialog.preview.willDeleteLocal,
+											download: overwriteDialog.preview.willDownload,
+											version: overwriteDialog.preview.remoteVersion,
+										})
+									: t("sync.overwritePushBody", {
+											upload: overwriteDialog.preview.willUpload,
+											remove: overwriteDialog.preview.willRemoveRemote,
+											version: overwriteDialog.preview.remoteVersion,
+										})}
+							</DialogDescription>
+						</DialogHeader>
+						<DialogFooter>
+							<Button
+								type="button"
+								variant="outline"
+								onClick={() => setOverwriteDialog(null)}
+								disabled={overwriting}
+							>
+								{t("sync.cancel")}
+							</Button>
+							<Button
+								type="button"
+								variant="destructive"
+								onClick={() => void confirmOverwrite()}
+								disabled={!canOverwrite}
+							>
+								{overwriting ? (
+									<LoaderCircle
+										data-icon="inline-start"
+										className="animate-spin"
+									/>
+								) : null}
+								{t("sync.overwriteConfirm")}
+							</Button>
+						</DialogFooter>
+					</DialogContent>
+				</Dialog>
 			) : null}
 		</section>
 	);
@@ -1353,5 +1734,287 @@ function SyncSettingsRow({
 				className,
 			)}
 		/>
+	);
+}
+
+/** True when two bindings point at the same mirror store (compare like
+ * `remote_identity` does: backend + address + account, never secrets). */
+function sameSyncTarget(a: SyncBackendConfig, b: SyncBackendConfig): boolean {
+	if (a.backend !== b.backend) return false;
+	if (a.backend === "webdav") {
+		return (
+			a.webdavUrl.trim().replace(/\/+$/, "") ===
+				b.webdavUrl.trim().replace(/\/+$/, "") &&
+			a.webdavUsername.trim() === b.webdavUsername.trim()
+		);
+	}
+	if (a.backend === "git") {
+		return (
+			a.gitRemote.trim() === b.gitRemote.trim() &&
+			a.gitBranch.trim() === b.gitBranch.trim()
+		);
+	}
+	if (a.backend === "s3") {
+		return (
+			a.endpoint.trim().replace(/\/+$/, "") ===
+				b.endpoint.trim().replace(/\/+$/, "") &&
+			(a.region.trim() || "us-east-1") === (b.region.trim() || "us-east-1") &&
+			a.forcePathStyle === b.forcePathStyle &&
+			a.bucket.trim() === b.bucket.trim() &&
+			a.prefix.trim().replace(/^\/+|\/+$/g, "") ===
+				b.prefix.trim().replace(/^\/+|\/+$/g, "") &&
+			a.accessKey.trim() === b.accessKey.trim()
+		);
+	}
+	return (
+		a.agenteroApi.trim().replace(/\/+$/, "") ===
+			b.agenteroApi.trim().replace(/\/+$/, "") &&
+		a.agenteroSubject === b.agenteroSubject &&
+		a.agenteroOrgId === b.agenteroOrgId
+	);
+}
+
+type MirrorLive = Record<number, { status: SyncMirrorPhase; error?: string }>;
+
+/** Read-only mirrors: published after each primary pass, never read back. */
+function MirrorSection({
+	mobile,
+	disabled,
+	mirrors,
+	statuses,
+	live,
+	onChange,
+	onRetry,
+}: {
+	mobile: boolean;
+	disabled: boolean;
+	mirrors: SyncBackendConfig[];
+	statuses: SyncMirrorStatus[];
+	live: MirrorLive;
+	onChange: (next: SyncBackendConfig[]) => void;
+	onRetry: () => void;
+}) {
+	const { t } = useTranslation("settings");
+	const patch = (index: number, partial: Partial<SyncBackendConfig>) => {
+		const before = mirrors[index];
+		const next = { ...before, ...partial };
+		// A saved secret belongs to its original destination and account.
+		const edited = sameSyncTarget(before, next)
+			? next
+			: resetSavedCredentials(next);
+		onChange(mirrors.map((mirror, i) => (i === index ? edited : mirror)));
+	};
+	const field = (
+		index: number,
+		key: keyof SyncBackendConfig,
+		label: string,
+		options: { type?: "password"; placeholder?: string } = {},
+	) => (
+		<Input
+			type={options.type ?? "text"}
+			value={String(mirrors[index][key] ?? "")}
+			onChange={(event) => patch(index, { [key]: event.target.value })}
+			placeholder={options.placeholder ?? label}
+			aria-label={label}
+			disabled={disabled}
+			autoComplete="off"
+			spellCheck={false}
+			className={mobile ? undefined : "h-8 text-xs"}
+		/>
+	);
+
+	return (
+		<>
+			<SettingsSectionLabel className="mt-4">
+				<HelpLabel label={t("sync.mirrors")} help={t("sync.mirrorsHint")} />
+			</SettingsSectionLabel>
+			<SettingsGroup>
+				{mirrors.map((mirror, index) => {
+					const savedIndex = statuses.findIndex((entry) =>
+						sameSyncTarget(entry.config, mirror),
+					);
+					const status = statuses[savedIndex];
+					const liveState = live[savedIndex];
+					const unsupported = mobile && mirror.backend === "git";
+					const credentialNotice = credentialNoticeKey(status?.credentialState);
+					const error = liveState ? liveState.error : status?.lastError;
+					const failure =
+						mobile &&
+						error === "Download deferred vault assets to publish this mirror"
+							? t("sync.mirrorDeferredAssets")
+							: error;
+					const issue = unsupported
+						? t("sync.mirrorUnsupportedBackend")
+						: credentialNotice
+							? t(credentialNotice, { field: t(secretFieldLabel(mirror)) })
+							: failure;
+					const dot =
+						issue || liveState?.status === "error"
+							? "bg-destructive"
+							: liveState?.status === "started"
+								? "bg-sky-500"
+								: liveState?.status === "published" || status?.lastSyncAt
+									? "bg-emerald-500"
+									: "bg-muted-foreground/35";
+					const statusLabel =
+						issue || liveState?.status === "error"
+							? t("sync.mirrorError")
+							: liveState?.status === "started"
+								? t("sync.mirrorPublishing")
+								: status?.lastSyncAt
+									? t("sync.mirrorLastPublished", {
+											time: formatLocaleTimestamp(status.lastSyncAt),
+										})
+									: t("sync.mirrorNeverPublished");
+					return (
+						<div
+							// biome-ignore lint/suspicious/noArrayIndexKey: controlled rows, append/remove only
+							key={`${mirror.backend}-${index}`}
+							className="space-y-2 border-border/50 border-t px-3 py-2 first:border-t-0"
+						>
+							<div className="flex flex-wrap items-center gap-2">
+								<Select
+									value={mirror.backend}
+									disabled={disabled || unsupported}
+									onValueChange={(value) => {
+										if (
+											value === "s3" ||
+											value === "webdav" ||
+											(!mobile && value === "git")
+										) {
+											patch(index, emptySyncConfig(value));
+										}
+									}}
+								>
+									<SelectTrigger
+										size="sm"
+										className="w-36"
+										aria-label={t("sync.mirrorBackend")}
+									>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent
+										className={
+											mobile ? "[&_[role=option]]:min-h-11" : undefined
+										}
+									>
+										{BACKEND_OPTIONS.filter(
+											({ value }) =>
+												value !== "agentero" &&
+												(value !== "git" || !mobile || unsupported),
+										).map(({ value, labelKey }) => (
+											<SelectItem key={value} value={value}>
+												{t(labelKey)}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+								<span className="text-muted-foreground text-xs">
+									{t("sync.mirrorReadOnly")}
+								</span>
+								<span className={cn("size-2 rounded-full", dot)} aria-hidden />
+								<span
+									role="status"
+									className="text-muted-foreground text-xs"
+									title={issue ?? undefined}
+								>
+									{statusLabel}
+								</span>
+								<Button
+									type="button"
+									size="icon"
+									variant="ghost"
+									className={cn("ml-auto", mobile && "size-11")}
+									aria-label={t("sync.mirrorRemove")}
+									disabled={disabled}
+									onClick={() =>
+										onChange(mirrors.filter((_, i) => i !== index))
+									}
+								>
+									<Trash2 className="size-4" />
+								</Button>
+							</div>
+							{issue ? (
+								<p className="wrap-anywhere text-muted-foreground text-xs">
+									{issue}
+								</p>
+							) : null}
+							{credentialBlocked(status?.credentialState) ? (
+								<Button
+									type="button"
+									size="sm"
+									variant="outline"
+									onClick={onRetry}
+									disabled={disabled}
+								>
+									{t("sync.retryCredentials")}
+								</Button>
+							) : null}
+							<div className="grid gap-2 sm:grid-cols-2">
+								{mirror.backend === "webdav" ? (
+									<>
+										{field(index, "webdavUrl", t("sync.serverUrl"), {
+											placeholder: "https://dav.example.com/dav/agentero/",
+										})}
+										{field(index, "webdavUsername", t("sync.username"))}
+										{field(index, "webdavPassword", t("sync.password"), {
+											type: "password",
+										})}
+									</>
+								) : mirror.backend === "git" ? (
+									unsupported ? null : (
+										<>
+											{field(index, "gitRemote", t("sync.gitRemote"), {
+												placeholder: "git@github.com:you/vault.git",
+											})}
+											{field(index, "gitBranch", t("sync.gitBranch"))}
+										</>
+									)
+								) : (
+									<>
+										{field(index, "endpoint", t("sync.endpoint"))}
+										{field(index, "bucket", t("sync.bucket"))}
+										{field(index, "region", t("sync.region"))}
+										{field(index, "prefix", t("sync.prefix"))}
+										{field(index, "accessKey", t("sync.accessKey"))}
+										{field(index, "secretKey", t("sync.secretKey"), {
+											type: "password",
+										})}
+										{field(index, "sessionToken", t("sync.sessionToken"), {
+											type: "password",
+										})}
+										<div className="flex items-center gap-2 text-xs">
+											<Switch
+												id={`sync-mirror-path-style-${index}`}
+												disabled={disabled}
+												checked={mirror.forcePathStyle}
+												onCheckedChange={(checked) =>
+													patch(index, { forcePathStyle: checked })
+												}
+											/>
+											<label htmlFor={`sync-mirror-path-style-${index}`}>
+												{t("sync.pathStyle")}
+											</label>
+										</div>
+									</>
+								)}
+							</div>
+						</div>
+					);
+				})}
+				<div className="px-3 py-2">
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						onClick={() => onChange([...mirrors, emptySyncConfig("webdav")])}
+						disabled={disabled || mirrors.length >= 3}
+					>
+						<Plus data-icon="inline-start" />
+						{t("sync.mirrorAdd")}
+					</Button>
+				</div>
+			</SettingsGroup>
+		</>
 	);
 }
