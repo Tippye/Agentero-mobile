@@ -17,6 +17,7 @@ import { AgentEmbeddingBlock } from "@/components/settings/panes/agent/agent-emb
 import { AgentNodeNotice } from "@/components/settings/panes/agent/agent-node-notice";
 import { AgentPersonalPromptBlock } from "@/components/settings/panes/agent/agent-personal-prompt-block";
 import { AgentUserAgentBlock } from "@/components/settings/panes/agent/agent-user-agent-block";
+import { DshRemoteConnectionSection } from "@/components/settings/panes/agent/dsh-remote-connection";
 import { useAgentCatalog } from "@/components/settings/panes/agent/use-agent-catalog";
 import { useAgentRegistry } from "@/components/settings/panes/agent/use-agent-registry";
 import { useAgentUninstall } from "@/components/settings/panes/agent/use-agent-uninstall";
@@ -236,6 +237,8 @@ export function AgentPane({
 			</p>
 
 			<DesktopAppsSection />
+
+			<DshRemoteConnectionSection />
 
 			<AgentPersonalPromptBlock settings={settings} patch={patch} />
 

@@ -5,7 +5,6 @@ import {
 	type HostRef,
 	type OperationOutcome,
 	type OperationRequest,
-	type RemoteAgentLogin,
 	type SessionRef,
 	type WorkspaceRef,
 } from "@/lib/core/bindings";
@@ -31,8 +30,14 @@ async function mutationResult(
 // Every operation uses the generated Rust contract. Provider wire formats stay in Rust.
 export const remoteAgent = {
 	catalog: () => callApiResult(() => commands.remoteAgentCatalog()),
-	login: (request: RemoteAgentLogin) =>
-		callApiResult(() => commands.remoteAgentLogin(request)),
+	oauthProviders: (server: string) =>
+		callApiResult(() => commands.remoteAgentOauthProviders(server)),
+	oauthStart: (server: string, providerId: string) =>
+		callApiResult(() => commands.remoteAgentOauthStart(server, providerId)),
+	oauthPoll: (qrId: string) =>
+		callApiResult(() => commands.remoteAgentOauthPoll(qrId)),
+	oauthCancel: (qrId: string) =>
+		callApiResult(() => commands.remoteAgentOauthCancel(qrId)),
 	logout: () => callApiResult(() => commands.remoteAgentLogout()),
 	hosts: (connection: ConnectionRef) =>
 		callApiResult(() => commands.remoteAgentHosts(connection)),

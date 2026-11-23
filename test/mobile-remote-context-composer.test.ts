@@ -94,6 +94,7 @@ function catalog(): RemoteAgentCatalog {
 			server: "https://remote.example",
 			expiresAt: 9999999999999,
 			persistence: "systemStore",
+			loginProvider: "github",
 			info: { connection: session.workspace.host.connection, capabilities },
 		},
 	};

@@ -15,6 +15,7 @@ import {
 	MessageResponse,
 } from "@/components/agent/message";
 import { RemoteRegionContextPreview } from "@/components/mobile/remote/remote-region-context-preview";
+import { DshRemoteSignIn } from "@/components/remote-agent/dsh-remote-sign-in";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -50,7 +51,6 @@ import {
 } from "@/lib/mobile/paper-context";
 import {
 	canRetrySavedSignIn,
-	canSignIn,
 	credentialMessageKey,
 } from "@/lib/remote-agent/credentials";
 import {
@@ -91,10 +91,6 @@ export function MobileRemoteAgentPage({
 	const [catalog, setCatalog] = useState<RemoteAgentCatalog | null>(null);
 	const [account, setAccount] = useState<RemoteAgentAccount | null>(null);
 	const [providerId, setProviderId] = useState("");
-	// Hosted default: https://github.com/liguobao/ds-harness-remote/blob/11064af/README.md#quick-start. Sign-in is explicit.
-	const [server, setServer] = useState("https://dsh.r2049.cn");
-	const [email, setEmail] = useState("");
-	const [password, setPassword] = useState("");
 	const [hosts, setHosts] = useState<HostInfo[]>([]);
 	const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
 	const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
@@ -149,7 +145,6 @@ export function MobileRemoteAgentPage({
 	const credentialMessage = catalog
 		? credentialMessageKey(catalog.credentialState)
 		: null;
-	const signInAllowed = canSignIn(catalog);
 	const selectedKey = session ? sessionKey(session) : null;
 	const currentSelectionKey = useRef(selectedKey);
 	currentSelectionKey.current = selectedKey;
@@ -420,15 +415,7 @@ export function MobileRemoteAgentPage({
 		}
 		return outcome;
 	}
-	async function login() {
-		if (!signInAllowed) return;
-		const submitted = password;
-		setPassword("");
-		const value = await remoteAgent.login({
-			server,
-			email,
-			password: submitted,
-		});
+	async function signedIn(value: RemoteAgentAccount) {
 		setAccount(value);
 		await reloadCatalog();
 		setHosts(await remoteAgent.hosts(value.info.connection));
@@ -608,7 +595,7 @@ export function MobileRemoteAgentPage({
 				)}
 			</div>
 			<div className="min-h-0 flex-1 overflow-auto">
-				{catalog && credentialMessage && (
+				{catalog && credentialMessage && account && (
 					<div className="m-4 space-y-3 rounded-lg border p-3" role="status">
 						<p className="text-sm">{t(credentialMessage)}</p>
 						<div className="flex flex-wrap gap-2">
@@ -646,13 +633,7 @@ export function MobileRemoteAgentPage({
 					</div>
 				)}
 				{!account ? (
-					<form
-						className="mx-auto flex max-w-md flex-col gap-4 p-4"
-						onSubmit={(event) => {
-							event.preventDefault();
-							void run(login);
-						}}
-					>
+					<div className="mx-auto flex max-w-md flex-col gap-4 p-4">
 						<label className="grid gap-1 text-sm">
 							{t("remote.provider")}
 							<select
@@ -669,87 +650,29 @@ export function MobileRemoteAgentPage({
 							</select>
 						</label>
 						{providerId === "ds-harness-remote" ? (
-							<>
-								<label
-									htmlFor={`${formId}-server`}
-									className="grid gap-1 text-sm"
-								>
-									{t("remote.server")}
-									<Input
-										id={`${formId}-server`}
-										className="min-h-12"
-										value={server}
-										placeholder={t("remote.serverPlaceholder")}
-										onChange={(event) => setServer(event.target.value)}
-										type="url"
-										required
-										autoCapitalize="none"
-										autoCorrect="off"
-										disabled={busy}
-									/>
-								</label>
-								<label
-									htmlFor={`${formId}-email`}
-									className="grid gap-1 text-sm"
-								>
-									{t("remote.email")}
-									<Input
-										id={`${formId}-email`}
-										className="min-h-12"
-										value={email}
-										onChange={(event) => setEmail(event.target.value)}
-										autoComplete="username"
-										autoCapitalize="none"
-										autoCorrect="off"
-										required
-										disabled={busy}
-									/>
-								</label>
-								<label
-									htmlFor={`${formId}-password`}
-									className="grid gap-1 text-sm"
-								>
-									{t("remote.password")}
-									<Input
-										id={`${formId}-password`}
-										className="min-h-12"
-										value={password}
-										onChange={(event) => setPassword(event.target.value)}
-										type="password"
-										autoComplete="off"
-										required
-										disabled={busy}
-									/>
-								</label>
-								<p className="text-muted-foreground text-sm">
-									{catalog
-										? t(
-												catalog.persistence === "systemStore"
-													? "remote.secureSignIn"
-													: "remote.launchOnly",
-											)
-										: t("remote.credentials.checking")}
-								</p>
-								<Button
-									className="min-h-12"
-									type="submit"
-									disabled={busy || !password || !providerId || !signInAllowed}
-								>
-									{t("remote.login")}
-								</Button>
-							</>
+							<DshRemoteSignIn
+								mobile
+								onCatalog={adoptCatalog}
+								onSignedIn={(value) => run(() => signedIn(value))}
+							/>
 						) : (
 							<p className="text-muted-foreground text-sm">
 								{t("remote.providerSetup")}
 							</p>
 						)}
-					</form>
+					</div>
 				) : (
 					<>
 						<div className="flex flex-wrap items-center gap-2 border-b p-3 text-sm">
 							<div className="min-w-0 flex-1">
 								<p className="truncate">{account.account}</p>
 								<p className="text-muted-foreground">
+									{account.loginProvider
+										? t("remote.signedInWith", {
+												provider: account.loginProvider,
+											})
+										: null}
+									{account.loginProvider ? " · " : null}
 									{t(
 										account.persistence === "systemStore"
 											? "remote.secureSignIn"
