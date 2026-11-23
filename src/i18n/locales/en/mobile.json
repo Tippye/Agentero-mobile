@@ -239,6 +239,8 @@
 		"noHosts": "No authorized Hosts. Sign in to the same account on your computer.",
 		"online": "Online",
 		"offline": "Offline",
+		"presenceUnknown": "Status unknown",
+		"trusted": "Trusted",
 		"workspaces": "Workspaces",
 		"tasks": "Tasks and sessions",
 		"noSessions": "No sessions in this workspace.",

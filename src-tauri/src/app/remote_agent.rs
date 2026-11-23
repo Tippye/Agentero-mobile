@@ -233,6 +233,22 @@ fn sign_in_gate(can_sign_in: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Human-readable device name shown in every client's device list. The OS
+/// hostname identifies the computer; mobile falls back to a platform label.
+fn device_registration_name() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| {
+            !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
+        });
+    match host {
+        Some(name) => format!("Agentero ({name})"),
+        None => format!("Agentero {}", std::env::consts::OS),
+    }
+}
+
 /// List the third-party sign-in providers (GitHub, Google, Zhihu, …) the
 /// Remote server currently offers for browser sign-in.
 #[tauri::command]
@@ -390,7 +406,7 @@ pub async fn remote_agent_oauth_poll(
                 let credentials = api
                     .register(
                         &identity,
-                        "Agentero",
+                        &device_registration_name(),
                         std::env::consts::OS,
                         env!("CARGO_PKG_VERSION"),
                         &token,
@@ -859,6 +875,14 @@ mod tests {
         assert!(sign_in_gate(true).is_ok());
         let error = sign_in_gate(false).unwrap_err();
         assert_eq!(error.code(), "remote_agent_account_active");
+    }
+    #[test]
+    fn device_registration_name_is_visible_text_within_server_limits() {
+        let name = device_registration_name();
+        assert!(name.starts_with("Agentero"));
+        assert!(name.len() <= 128);
+        assert!(!name.trim().is_empty());
+        assert!(!name.chars().any(char::is_control));
     }
     #[tokio::test]
     async fn oauth_attempts_are_bounded_and_completing_sessions_cannot_be_cancelled() {

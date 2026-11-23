@@ -3865,7 +3865,13 @@ export type HostId = string;
 export type HostInfo = {
 	host: HostRef,
 	name: string,
-	online: boolean,
+	/**
+	 *  `None` when the Server did not report presence and the descriptor lookup
+	 *  failed; absence is not an offline verdict.
+	 */
+	online: boolean | null,
+	/**  This device has already approved and pinned the Host's current identity. */
+	pinned?: boolean,
 };
 
 export type HostRef = {

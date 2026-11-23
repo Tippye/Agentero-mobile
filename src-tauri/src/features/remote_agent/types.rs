@@ -136,7 +136,12 @@ pub struct ConnectionInfo {
 pub struct HostInfo {
     pub host: HostRef,
     pub name: String,
-    pub online: bool,
+    /// `None` when the Server did not report presence and the descriptor lookup
+    /// failed; absence is not an offline verdict.
+    pub online: Option<bool>,
+    /// This device has already approved and pinned the Host's current identity.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]

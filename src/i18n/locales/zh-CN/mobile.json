@@ -239,6 +239,8 @@
 		"noHosts": "暂无已授权主机，请在电脑上登录同一账号。",
 		"online": "在线",
 		"offline": "离线",
+		"presenceUnknown": "状态未知",
+		"trusted": "已信任",
 		"workspaces": "工作区",
 		"tasks": "任务与会话",
 		"noSessions": "此工作区暂无会话。",

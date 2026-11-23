@@ -5,6 +5,7 @@ import {
 	Plus,
 	RefreshCw,
 	Send,
+	ShieldCheck,
 	Square,
 } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
@@ -703,7 +704,7 @@ export function MobileRemoteAgentPage({
 											key={host.host.hostId}
 											variant="outline"
 											className="min-h-12 w-full justify-between"
-											disabled={busy || !host.online}
+											disabled={busy || host.online === false}
 											onClick={() =>
 												void run(async () => {
 													setConfirmation("");
@@ -712,8 +713,20 @@ export function MobileRemoteAgentPage({
 											}
 										>
 											<span className="truncate">{host.name}</span>
-											<span className="text-muted-foreground">
-												{t(host.online ? "remote.online" : "remote.offline")}
+											<span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
+												{host.pinned ? (
+													<ShieldCheck
+														className="size-3.5 text-emerald-600"
+														aria-label={t("remote.trusted")}
+													/>
+												) : null}
+												{t(
+													host.online === true
+														? "remote.online"
+														: host.online === false
+															? "remote.offline"
+															: "remote.presenceUnknown",
+												)}
 											</span>
 										</Button>
 									))}

@@ -451,7 +451,10 @@ impl RemoteAgentProvider for DshRemoteProvider {
                 let mut candidates = hosts
                     .into_iter()
                     .filter(|host| {
-                        host.online && state.config.pinned_hosts.contains_key(&host.device_id)
+                        // Absent presence is not an offline verdict; the pinned
+                        // descriptor check in connect_host still fails closed.
+                        host.online != Some(false)
+                            && state.config.pinned_hosts.contains_key(&host.device_id)
                     })
                     .collect::<Vec<_>>();
                 candidates.sort_by(|left, right| left.device_id.cmp(&right.device_id));
@@ -511,29 +514,45 @@ impl RemoteAgentProvider for DshRemoteProvider {
         reference: &ConnectionRef,
     ) -> std::result::Result<Vec<HostInfo>, AppError> {
         let state = self.connection(reference).await.map_err(app_error)?;
-        let state = state.lock().await;
-        if !state.connected {
-            return Err(app_error(RemoteError::new(
-                "AUTH_REQUIRED",
-                "Remote account is disconnected",
-            )));
-        }
-        Ok(state
-            .config
-            .api
-            .list_hosts(&state.config.access_token)
-            .await
-            .map_err(app_error)?
-            .into_iter()
-            .map(|host| HostInfo {
+        let (api, token, pins) = {
+            let state = state.lock().await;
+            if !state.connected {
+                return Err(app_error(RemoteError::new(
+                    "AUTH_REQUIRED",
+                    "Remote account is disconnected",
+                )));
+            }
+            (
+                state.config.api.clone(),
+                state.config.access_token.clone(),
+                state.config.pinned_hosts.clone(),
+            )
+        };
+        let hosts = api.list_hosts(&token).await.map_err(app_error)?;
+        // The device list omits presence on newer Servers. Resolve each Host's
+        // descriptor + presence like the official clients; a lookup failure is
+        // surfaced as unknown, never silently downgraded to offline.
+        let mut rows = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let (online, pinned) = match api.host(&token, &host.device_id).await {
+                Ok(peer) => (
+                    peer.device.online.or(host.online),
+                    pins.get(&host.device_id)
+                        .is_some_and(|pin| pin == &peer.identity_key),
+                ),
+                Err(_) => (host.online, pins.contains_key(&host.device_id)),
+            };
+            rows.push(HostInfo {
                 host: HostRef {
                     connection: reference.clone(),
                     host_id: HostId(host.device_id),
                 },
                 name: host.name,
-                online: host.online,
-            })
-            .collect())
+                online,
+                pinned,
+            });
+        }
+        Ok(rows)
     }
     async fn list_workspaces(
         &self,
