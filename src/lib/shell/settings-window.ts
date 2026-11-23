@@ -11,7 +11,8 @@ import { setSettingsOpenState, uiStore } from "./ui-store";
 
 /** Map desktop settings sections onto the mobile settings page. */
 function mobileSettingsSection(section?: string) {
-	return section === "translate" ||
+	return section === "agent" ||
+		section === "translate" ||
 		section === "layout" ||
 		section === "sync" ||
 		section === "about"

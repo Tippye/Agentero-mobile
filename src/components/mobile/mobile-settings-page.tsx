@@ -2,6 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import {
 	ArrowLeft,
 	BatteryCharging,
+	Bot,
 	CloudUpload,
 	Info,
 	Languages,
@@ -13,6 +14,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import agenteroAppIcon from "@/assets/agentero-app-icon.svg";
+import { MobileAgentPane } from "@/components/mobile/mobile-agent-pane";
 import { MobileBackgroundSettingsPanel } from "@/components/mobile/mobile-background-settings";
 import { MobileDownloadSettings } from "@/components/mobile/mobile-download-settings";
 import { AppearancePane } from "@/components/settings/panes/appearance-pane";
@@ -43,6 +45,7 @@ const GITHUB_REPO_URL = "https://github.com/poco-ai/Agentero";
 
 type MobileSettingsLabel =
 	| "settings:nav.appearance"
+	| "settings:nav.agent"
 	| "settings:nav.translate"
 	| "settings:nav.layout"
 	| "settings:nav.sync"
@@ -55,6 +58,7 @@ const NAV: {
 	label: MobileSettingsLabel;
 }[] = [
 	{ id: "appearance", icon: Paintbrush, label: "settings:nav.appearance" },
+	{ id: "agent", icon: Bot, label: "settings:nav.agent" },
 	{ id: "translate", icon: Languages, label: "settings:nav.translate" },
 	{ id: "layout", icon: LayoutTemplate, label: "settings:nav.layout" },
 	{ id: "sync", icon: CloudUpload, label: "settings:nav.sync" },
@@ -172,6 +176,8 @@ export function MobileSettingsPage({
 								vimMode={settings.vimMode}
 								patch={patch}
 							/>
+						) : section === "agent" ? (
+							<MobileAgentPane settings={settings} patch={patch} />
 						) : section === "translate" ? (
 							<TranslatePane
 								settings={settings}
