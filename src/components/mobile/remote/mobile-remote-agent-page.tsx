@@ -10,11 +10,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-	Message,
-	MessageContent,
-	MessageResponse,
-} from "@/components/agent/message";
+import { MobileRemoteTranscript } from "@/components/mobile/remote/mobile-remote-transcript";
 import { RemoteRegionContextPreview } from "@/components/mobile/remote/remote-region-context-preview";
 import { DshRemoteSignIn } from "@/components/remote-agent/dsh-remote-sign-in";
 import { Button } from "@/components/ui/button";
@@ -818,98 +814,91 @@ export function MobileRemoteAgentPage({
 								{loading && (
 									<p className="text-muted-foreground">{t("remote.loading")}</p>
 								)}
-								{snapshot?.events.map((event) => (
-									<div
-										key={JSON.stringify([event.sourceStreamId, event.sourceId])}
-									>
-										{event.payload.type === "message" && (
-											<Message
-												from={
-													event.payload.role === "user" ? "user" : "assistant"
-												}
-												className="max-w-full"
-											>
-												<MessageContent className="text-base leading-6">
-													<MessageResponse>
-														{event.payload.text}
-													</MessageResponse>
-												</MessageContent>
-											</Message>
+								{snapshot && (
+									<MobileRemoteTranscript
+										events={snapshot.events}
+										sessionRunning={snapshot.info.status === "running"}
+										renderInteraction={(event) => (
+											<>
+												{event.payload.type === "permissionRequest" && (
+													<div className="space-y-3 rounded-lg border p-3">
+														<p className="font-medium">
+															{t("remote.permission")}
+														</p>
+														<p className="whitespace-pre-wrap break-words text-sm">
+															{event.payload.description}
+														</p>
+														<div className="flex flex-wrap gap-2">
+															{event.payload.options.map((option) => (
+																<Button
+																	className="min-h-12"
+																	variant="outline"
+																	key={option}
+																	disabled={
+																		busy ||
+																		blocked ||
+																		!supports(capabilities, "respondPermission")
+																	}
+																	onClick={() =>
+																		void run(async () => {
+																			if (
+																				event.payload.type !==
+																				"permissionRequest"
+																			)
+																				return;
+																			await mutate(
+																				{
+																					type: "respondPermission",
+																					session,
+																					requestId: event.payload.requestId,
+																					optionId: option,
+																				},
+																				sessionKey(session),
+																			);
+																			await refresh();
+																		})
+																	}
+																>
+																	{option === "allowed-once"
+																		? t("remote.allowOnce")
+																		: option === "rejected"
+																			? t("remote.reject")
+																			: option}
+																</Button>
+															))}
+														</div>
+													</div>
+												)}
+												{event.payload.type === "questionRequest" && (
+													<QuestionForm
+														questions={event.payload.questions}
+														disabled={
+															busy ||
+															blocked ||
+															!supports(capabilities, "respondQuestion")
+														}
+														onSubmit={(answers) =>
+															void run(async () => {
+																if (event.payload.type !== "questionRequest")
+																	return;
+																await mutate(
+																	{
+																		type: "respondQuestion",
+																		session,
+																		requestId: event.payload.requestId,
+																		answers,
+																	},
+																	sessionKey(session),
+																);
+																await refresh();
+															})
+														}
+													/>
+												)}
+											</>
 										)}
-										{event.payload.type === "permissionRequest" && (
-											<div className="space-y-3 rounded-lg border p-3">
-												<p className="font-medium">{t("remote.permission")}</p>
-												<p className="whitespace-pre-wrap break-words text-sm">
-													{event.payload.description}
-												</p>
-												<div className="flex flex-wrap gap-2">
-													{event.payload.options.map((option) => (
-														<Button
-															className="min-h-12"
-															variant="outline"
-															key={option}
-															disabled={
-																busy ||
-																blocked ||
-																!supports(capabilities, "respondPermission")
-															}
-															onClick={() =>
-																void run(async () => {
-																	if (
-																		event.payload.type !== "permissionRequest"
-																	)
-																		return;
-																	await mutate(
-																		{
-																			type: "respondPermission",
-																			session,
-																			requestId: event.payload.requestId,
-																			optionId: option,
-																		},
-																		sessionKey(session),
-																	);
-																	await refresh();
-																})
-															}
-														>
-															{option === "allowed-once"
-																? t("remote.allowOnce")
-																: option === "rejected"
-																	? t("remote.reject")
-																	: option}
-														</Button>
-													))}
-												</div>
-											</div>
-										)}
-										{event.payload.type === "questionRequest" && (
-											<QuestionForm
-												questions={event.payload.questions}
-												disabled={
-													busy ||
-													blocked ||
-													!supports(capabilities, "respondQuestion")
-												}
-												onSubmit={(answers) =>
-													void run(async () => {
-														if (event.payload.type !== "questionRequest")
-															return;
-														await mutate(
-															{
-																type: "respondQuestion",
-																session,
-																requestId: event.payload.requestId,
-																answers,
-															},
-															sessionKey(session),
-														);
-														await refresh();
-													})
-												}
-											/>
-										)}
-									</div>
-								))}
+									/>
+								)}
 							</div>
 						)}
 					</>
