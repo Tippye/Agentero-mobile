@@ -89,6 +89,7 @@
 	},
 	"agentMenu": {
 		"title": "ACP backend",
+		"remote": "Remote Agent",
 		"empty": "No ready ACP agents. Configure one in Settings.",
 		"openSettings": "Open Agent settings"
 	},
@@ -273,6 +274,7 @@
 		"regionNotFound": "Region not found: {{source}}"
 	},
 	"models": {
+		"emptyCatalog": "No models available",
 		"currentSelection": "Current selection",
 		"locateCurrent": "Locate current model",
 		"defaultGroup": "Models",

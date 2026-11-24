@@ -7,7 +7,6 @@ import type {
 	Question,
 	QuestionAnswer,
 	ReceiptLookup,
-	RemoteAgentHostIdentity,
 	SessionRef,
 	WorkspaceRef,
 } from "@/lib/core/bindings";
@@ -42,15 +41,6 @@ export function belongsToConnection(
 ): boolean {
 	return target.startsWith(
 		`${JSON.stringify([connection.providerId, connection.connectionId]).slice(0, -1)},`,
-	);
-}
-export function validTrustConfirmation(
-	identity: RemoteAgentHostIdentity,
-	entered: string,
-): boolean {
-	return (
-		/^SHA256:[a-f0-9]{64}$/.test(identity.fingerprint) &&
-		entered.trim() === identity.fingerprint
 	);
 }
 export function validAnswers(

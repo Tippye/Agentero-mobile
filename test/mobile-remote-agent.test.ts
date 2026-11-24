@@ -45,7 +45,6 @@ import {
 	sessionKey,
 	supports,
 	validAnswers,
-	validTrustConfirmation,
 } from "@/lib/remote-agent/model";
 
 import { remoteAgent } from "@/lib/remote-agent/service";
@@ -282,29 +281,6 @@ describe("mobile Remote Agent capabilities and identity", () => {
 				},
 			}),
 		).not.toBe(key);
-	});
-	it("requires the complete displayed fingerprint even for a previously pinned Host", () => {
-		const identity = {
-			host: session.workspace.host,
-			name: "Host",
-			fingerprint: `SHA256:${"ab".repeat(32)}`,
-			pinned: true,
-		};
-		expect(validTrustConfirmation(identity, "")).toBe(false);
-		expect(validTrustConfirmation(identity, "yes")).toBe(false);
-		expect(
-			validTrustConfirmation(identity, identity.fingerprint.slice(0, 20)),
-		).toBe(false);
-		expect(validTrustConfirmation(identity, `SHA256:${"cd".repeat(32)}`)).toBe(
-			false,
-		);
-		expect(validTrustConfirmation(identity, identity.fingerprint)).toBe(true);
-		expect(
-			validTrustConfirmation(
-				{ ...identity, fingerprint: "server said okay" },
-				"server said okay",
-			),
-		).toBe(false);
 	});
 	it("validates structured answers against exactly the advertised options", () => {
 		const questions: Question[] = [

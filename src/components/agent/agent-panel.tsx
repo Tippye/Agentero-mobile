@@ -17,6 +17,7 @@ import { ChatTranscript } from "@/components/agent/chat-transcript";
 import { PiProjectTrustNotice } from "@/components/agent/pi-project-trust-notice";
 import type { AgentPanelProps } from "@/components/agent/types";
 import { useAgentPanel } from "@/components/agent/use-agent-panel";
+import { MobileRemoteAgentPage } from "@/components/mobile/remote/mobile-remote-agent-page";
 import { PaneHeader } from "@/components/shell/pane-header";
 import { cn } from "@/lib/core/utils";
 
@@ -81,6 +82,8 @@ export const AgentPanel = memo(function AgentPanel({
 		onOpenHistoryHandled,
 		suppressHistoryImport,
 	});
+	const [remoteSelected, setRemoteSelected] = useState(false);
+	const [remoteOpened, setRemoteOpened] = useState(false);
 	const bodyRef = useRef<HTMLDivElement>(null);
 	const [composerHeightPx, setComposerHeightPx] = useState(
 		initialComposerHeightPx,
@@ -357,6 +360,25 @@ export const AgentPanel = memo(function AgentPanel({
 		[setFastEnabled],
 	);
 
+	const backendSwitcher = (
+		<AgentSwitcher
+			options={options}
+			selected={selected}
+			selectedAgentId={selectedAgentId}
+			remoteSelected={remoteSelected}
+			disabled={hasRunningSessions || switching || submitting}
+			onSelect={(opt) => {
+				setRemoteSelected(false);
+				if (!remoteSelected || opt.key !== selected?.key) void selectAgent(opt);
+			}}
+			onSelectRemote={() => {
+				setRemoteOpened(true);
+				setRemoteSelected(true);
+				setHistoryOpen(false);
+			}}
+			onOpenAgentSettings={onOpenAgentSettings}
+		/>
+	);
 	return (
 		<section
 			data-agent-panel
@@ -366,7 +388,22 @@ export const AgentPanel = memo(function AgentPanel({
 			)}
 			aria-label={title}
 		>
-			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+			{remoteOpened && (
+				<div className={cn("min-h-0 flex-1", !remoteSelected && "hidden")}>
+					<MobileRemoteAgentPage
+						active={remoteSelected}
+						mobile={false}
+						backendControl={backendSwitcher}
+						headerActions={headerActions}
+					/>
+				</div>
+			)}
+			<div
+				className={cn(
+					"flex min-h-0 min-w-0 flex-1 flex-col",
+					remoteSelected && "hidden",
+				)}
+			>
 				<PaneHeader
 					trailing={
 						<SidebarHistoryTrailing
@@ -381,14 +418,7 @@ export const AgentPanel = memo(function AgentPanel({
 						/>
 					}
 				>
-					<AgentSwitcher
-						options={options}
-						selected={selected}
-						selectedAgentId={selectedAgentId}
-						disabled={hasRunningSessions || switching || submitting}
-						onSelect={(opt) => void selectAgent(opt)}
-						onOpenAgentSettings={onOpenAgentSettings}
-					/>
+					{backendSwitcher}
 				</PaneHeader>
 
 				<AgentConfigBarMemo

@@ -5,6 +5,7 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
+	DropdownMenuLabel,
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -18,6 +19,8 @@ export function AgentSwitcher({
 	disabled,
 	onSelect,
 	onOpenAgentSettings,
+	remoteSelected = false,
+	onSelectRemote,
 }: {
 	options: AgentOption[];
 	selected: AgentOption | null | undefined;
@@ -25,6 +28,8 @@ export function AgentSwitcher({
 	disabled: boolean;
 	onSelect: (opt: AgentOption) => void;
 	onOpenAgentSettings?: () => void;
+	remoteSelected?: boolean;
+	onSelectRemote?: () => void;
 }) {
 	const { t } = useTranslation("agent");
 
@@ -39,9 +44,13 @@ export function AgentSwitcher({
 					aria-label={t("switchAgent")}
 					title={t("switchAgent")}
 				>
-					{selected ? <AgentLogo template={selected.template} /> : null}
+					{selected && !remoteSelected ? (
+						<AgentLogo template={selected.template} />
+					) : null}
 					<span className="min-w-0 truncate">
-						{selected?.name ?? t("defaultName")}
+						{remoteSelected
+							? "dsh-remote"
+							: (selected?.name ?? t("defaultName"))}
 					</span>
 					<ChevronDown className="size-3 shrink-0 opacity-70" />
 				</Button>
@@ -72,8 +81,9 @@ export function AgentSwitcher({
 				) : (
 					options.map((opt) => {
 						const isActive =
-							selected?.key === opt.key ||
-							(opt.id !== null && opt.id === selectedAgentId);
+							!remoteSelected &&
+							(selected?.key === opt.key ||
+								(opt.id !== null && opt.id === selectedAgentId));
 						return (
 							<DropdownMenuItem
 								key={opt.key}
@@ -90,6 +100,21 @@ export function AgentSwitcher({
 							</DropdownMenuItem>
 						);
 					})
+				)}
+				{onSelectRemote && (
+					<>
+						<DropdownMenuSeparator />
+						<DropdownMenuLabel>{t("agentMenu.remote")}</DropdownMenuLabel>
+						<DropdownMenuItem
+							className="justify-between gap-2"
+							onSelect={onSelectRemote}
+						>
+							<span>dsh-remote</span>
+							{remoteSelected && (
+								<Check className="size-3.5 shrink-0 opacity-80" />
+							)}
+						</DropdownMenuItem>
+					</>
 				)}
 			</DropdownMenuContent>
 		</DropdownMenu>
