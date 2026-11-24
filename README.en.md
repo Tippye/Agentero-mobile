@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/assets/hero.png" alt="Agentero" width="100%" />
+  <img src="docs/assets/screenshots/tablet-reader.png" alt="Agentero for tablets: reading and annotation" width="100%" />
 </p>
 
-<h3 align="center">A research workbench for finding papers, taking notes, and reading with agents</h3>
+<h3 align="center">Read papers on a tablet, mark them up, and work through the literature with an agent</h3>
 
 <p align="center">
-  Papers, notes, and conversations are stored locally. While reading a PDF, you can send selected passages, figures, or notes to an agent for discussion.
+  Papers, notes, annotations, and handwriting stay on the device. While reading a PDF you can hand the selected passage, a figure, or a note to a remote agent.
 </p>
 
 <p align="center">
@@ -13,222 +13,139 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/poco-ai/agentero/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/poco-ai/agentero?style=for-the-badge&logo=github&color=E3B341&labelColor=20242D"></a>
-  <a href="https://github.com/poco-ai/agentero/releases"><img alt="release" src="https://img.shields.io/github/v/release/poco-ai/agentero?include_prereleases&style=for-the-badge&logo=github&color=1B54E8&labelColor=20242D"></a>
-  <a href="https://github.com/poco-ai/agentero/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/poco-ai/agentero?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=34D399&labelColor=20242D"></a>
-  <a href="https://agentero.app/"><img alt="website" src="https://img.shields.io/badge/website-agentero.app-5319E7?style=for-the-badge&labelColor=20242D"></a>
-  <a href="https://agentero-docs.poco-ai.com"><img alt="docs" src="https://img.shields.io/badge/docs-online-5319E7?style=for-the-badge&logo=mkdocs&logoColor=white&labelColor=20242D"></a>
-</p>
-
-<p align="center">
-  <a href="https://trendshift.io/repositories/119836?utm_source=repository-badge&utm_medium=badge&utm_campaign=badge-repository-119836" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/119836" alt="poco-ai%2FAgentero | Trendshift" width="250" height="55"/></a>
-  <a href="https://trendshift.io/repositories/119836?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-119836" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/119836/daily?language=TypeScript" alt="poco-ai%2FAgentero | Trendshift" width="250" height="55"/></a>
-</p>
-
-If this project helps you, please **give it a star** on GitHub!
-
-<p align="center">
-  <a href="https://github.com/poco-ai/agentero/stargazers"><img src="https://github.com/user-attachments/assets/1d49b049-89ae-4992-a92d-d2411c8053b6" alt="Give me a star" width="480" /></a>
+  <a href="https://github.com/Tippye/Agentero-mobile/releases"><img alt="release" src="https://img.shields.io/github/v/release/Tippye/Agentero-mobile?style=for-the-badge&logo=github&color=1B54E8&labelColor=20242D"></a>
+  <a href="https://github.com/Tippye/Agentero-mobile/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/Tippye/Agentero-mobile?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=34D399&labelColor=20242D"></a>
+  <a href="https://github.com/poco-ai/Agentero"><img alt="desktop" src="https://img.shields.io/badge/desktop-poco--ai%2FAgentero-5319E7?style=for-the-badge&labelColor=20242D"></a>
 </p>
 
 ---
 
-## Background & Motivation
+## What this is
 
-Zotero is an excellent piece of software for academic reference management. It is mature, stable, and has helped many researchers build their first literature archives.
+The mobile branch of Agentero, built for Android tablets and foldables (iPad support is still being adapted). It keeps the same reading workflow as the desktop app, but the reader, handwriting layer, and agent panel are rebuilt for touch, a stylus, and offline use.
 
-However, when it comes to daily research and deep use of large language models (LLMs) and agents, the traditional tool chain exposes a few breakpoints:
+This is not a cut-down desktop build. The library is still a plain folder: PDFs, Markdown notes, and annotations are ordinary files in the vault, so another device can pick up where you left off after a sync. What differs is the read / compare / discuss presets, the ink layer, and the remote agent.
 
-* **Severely fragmented context**: papers live in Zotero, notes in Obsidian, and the reasoning and analysis done with models remain scattered across web chat windows. The three are isolated from each other; when you want an agent to reason deeply over a specific paper together with your past notes, you have to copy and paste back and forth by hand.
-* **Paper formats are unfriendly to models**: humans are used to reading well-typeset PDFs, but for models, parsing two-column layouts, multi-page tables, complex math, and cross-references is extremely costly and prone to recognition errors and hallucinations. Structured Markdown and LaTeX are far easier for models to understand accurately.
-* **High maintenance cost**: high-frequency needs such as AI-assisted reading, full-text translation, and note syncing usually require installing and tuning multiple community plugins — a high configuration barrier, with compatibility issues whenever versions change.
-* **Limited batch automation**: the large number of papers discovered via Deep Research or automated search tools still need to be saved manually, one by one in the browser, making them hard to fit into a smooth batch research workflow.
-
-**Agentero is not meant to replace Zotero. It explores a new way for humans and agents to handle research context together**:
-* **Humans** pose research questions, make scholarly judgments, read in depth, and derive core conclusions;
-* **Agents** handle batch retrieval and filtering, metadata fetching, figure/formula extraction, citation graph mapping, and basic summarization.
+> Desktop (macOS / Windows / Linux) development and releases live in [poco-ai/Agentero](https://github.com/poco-ai/Agentero); this repository maintains the mobile app only.
 
 ---
 
-## Core Features
+## Core features
 
-### 1. Structured Reading & Notes
-* **PDF reading and annotation**: outline navigation, fit-page and fit-width modes, smooth text selection, highlights and annotations, and full-text search.
-* **Figure & formula extraction**: converts formulas, algorithm pseudocode, and tables into Markdown and LaTeX that agents can read.
-* **Bi-directional linked notes**: a built-in WYSIWYG Markdown editor with `[[wikilinks]]`, `/` slash commands, and live LaTeX rendering, natively linking notes to papers.
-* **Multi-mode translation**: selection-based, side-by-side page-level, and full-text translation, with built-in available channels and support for custom API keys (BYOK).
+### 1. A reader and annotation layer built for tablets
+
+- **Three reading presets**: original, compare (source and translation side by side), and discuss (paper plus notes). Narrow layouts tuck the side panel into a drawer; wide layouts keep a draggable column and remember each side's width separately.
+- **Handwriting**: pen, highlighter, stroke eraser, lasso move/copy/delete, undo, and redo. Holding the pen still for 500 ms snaps the stroke into a line, arrow, rectangle, triangle, or ellipse, and lifting commits it.
+- **Two ways to ask**: long-press for one second to select a word or sentence and annotate it from the toolbar, or switch to region select and circle an area of the PDF with no ink to send it to the agent together with a screenshot.
 
 <p align="center">
-  <img src="docs/assets/agent.png" alt="PDF reading with agent assistance" width="90%" />
+  <img src="docs/assets/screenshots/tablet-ink.png" alt="Handwriting on a PDF" width="90%" />
   <br/>
-  <sub>Read and annotate the paper on the left. Ask an agent about the selected material on the right.</sub>
+  <sub>Ink sits on the same page as the source and is saved and synced with the paper.</sub>
 </p>
+
+### 2. Translation and layout analysis
+
+- **Translation and compare at any time**: translate a page or the whole paper; show the translation over the source or side by side. Translation and layout analysis run as background tasks that keep going when you leave the paper.
+- **Look at the finished PDF first**: when the layout is not ready but a translated PDF matches the current language and service, it opens read-only right away while analysis and gap filling continue in the background.
+- **Translation cache switch** (Settings → Translate): on by default, the translation sidecar and finished PDFs sync with the vault; turn it off to keep them on this device. Layout analysis always syncs because figures, citations, and on-demand downloads rely on it.
+- **Typesetting works offline**: the fallback font ships in the installer, so translated PDFs still build without network or a mirror.
 
 <p align="center">
-  <img src="docs/assets/translate.png" alt="Selection translation linked to notes" width="90%" />
+  <img src="docs/assets/screenshots/tablet-translate.png" alt="Source and translation side by side" width="90%" />
   <br/>
-  <sub>Selection translation with live capture: points extracted while reading flow straight into local Markdown notes</sub>
+  <sub>Hover a source sentence in compare mode to mark the matching translation.</sub>
 </p>
 
----
+### 3. A local-first library that syncs
 
-### 2. Open Agent Protocols & Automation Interfaces
-* **Local agents via ACP**: connect to Claude Code, OpenCode, Codex, or agents that support local models. When you send a message, the selected agent receives your question and the material you included. How the data is processed depends on the agent's configuration.
-* **Built-in MCP (Model Context Protocol)**: enable the server to let clients such as ChatGPT Web and Claude Desktop query your library. The connection setup depends on the client.
-* **CLI for hackers**: a built-in headless CLI for scripted workflows such as batch paper import, metadata extraction, and note writing.
+- **Files are the data**: papers, Markdown notes, and annotations live under the app-private `Vault`; structured metadata lives in `.agentero/catalog.sqlite`.
+- **Three sync backends**: S3-compatible storage, WebDAV, and Git. WebDAV servers without strong ETags can opt into degraded sync, and up to three read-only mirrors can be published; changes made on a mirror never travel back.
+- **Conflicts are reviewed, not merged**: when two devices edit the same file, the pass pauses and you choose per file to keep local, keep remote, or keep both.
 
 <p align="center">
-  <img src="docs/assets/image.png" alt="Built-in MCP" width="90%" />
+  <img src="docs/assets/screenshots/tablet-library.png" alt="Paper library" width="90%" />
   <br/>
-  <sub>Built-in MCP server connects your local library seamlessly to external AI clients</sub>
+  <sub>Card view with first-page previews, folder management, and swipe actions to pin or delete.</sub>
 </p>
 
----
+### 4. A remote agent reading alongside you
 
-### 3. Academic Radar & Paper Discovery
-* **Multi-source ingestion**: built-in integration with [Cool Papers](https://papers.cool/) and the ModelScope community — browse and archive papers in one click inside the app; academic RSS subscriptions supported.
-* **Personalized recommendations**: daily arXiv recommendations based on the content of your local library.
-* **Automatic citation mapping**: parses reference lists automatically with one-click batch import; fetches publisher metadata and tracks citations forward.
-
-<p align="center">
-  <img src="docs/assets/coolpaper.png" alt="Cool Papers integration" width="90%" />
-  <br/>
-  <sub>Browse trending Cool Papers inside the app and import them into your local knowledge base in one click</sub>
-</p>
+- **Browser sign-in**: dsh-remote connections authorize through the browser instead of storing a password in the app.
+- **The desktop agent panel, on mobile**: conversation history, model selection, reasoning and tool activity, structured questions, and approvals all work on mobile; host presence is resolved from the server and an offline host is reported clearly.
+- **Ask with evidence**: tapping a citation in the translation jumps back to the matching paper location, and sending a question uploads the current PDF page to the remote session.
 
 ---
 
-### 4. Zotero Compatibility & Transparent Local Storage
-* **Zotero migration**: choose which items and attachments to import, with their tags and notes. You can also save papers from the web with the Zotero browser extension or export a bibliography to BibTeX / BibLaTeX.
-* **Local files**: papers and notes are saved as PDF and Markdown files you can open with other tools. The catalog stores structured metadata in `.agentero/catalog.sqlite`.
-* **Multi-device sync & remote access**: sync with any S3-compatible cloud storage; access a library deployed on a remote server over an SSH tunnel.
-
----
-
-## UI & Feature Preview
+## Screenshots
 
 <details>
-<summary><b>Click to expand: more screenshots (RSS subscriptions, Skill extensions, agent settings, S3 sync, themes)</b></summary>
+<summary><b>Expand for more tablet screenshots (library, translation, ink, sync settings)</b></summary>
 <br/>
 
-#### 1. Academic RSS subscriptions
-Track academic blogs, lab homepages, and frontier updates:
+#### Library
+
 <p align="center">
-  <img src="docs/assets/rss.png" alt="RSS subscriptions" width="85%" />
+  <img src="docs/assets/screenshots/tablet-library.png" alt="Library" width="85%" />
 </p>
 
-#### 2. Agent Skill extensions
-Browse and install community research skills to extend close-reading and writing analysis:
+#### Handwriting
+
 <p align="center">
-  <img src="docs/assets/skill-import.png" alt="Skill extensions" width="85%" />
+  <img src="docs/assets/screenshots/tablet-ink.png" alt="Handwriting" width="85%" />
 </p>
 
-#### 3. Agent & connection settings
-Manage, upgrade, and switch local agents via ACP:
-<p align="center">
-  <img src="docs/assets/agent-setting.png" alt="Agent settings" width="85%" />
-</p>
+#### Sync settings
 
-#### 4. S3-compatible cloud sync
-Configure private or commercial S3 storage to sync your knowledge base across devices:
 <p align="center">
-  <img src="docs/assets/s3-sync.png" alt="S3 sync settings" width="85%" />
-</p>
-
-#### 5. Multiple themes
-Light/dark and multiple color schemes, following your system appearance:
-<p align="center">
-  <img src="docs/assets/theme.png" alt="Theme settings" width="85%" />
+  <img src="docs/assets/screenshots/tablet-sync.png" alt="Sync settings" width="85%" />
 </p>
 
 </details>
 
 ---
 
-## Quick Start
+## Download and install
 
-### Desktop app (macOS / Windows / Linux)
+### Android (recommended)
 
-Download prebuilt installers for each platform from the **[official website](https://agentero.app/)** or **[GitHub Releases](https://github.com/poco-ai/agentero/releases)**.
+Download `Agentero-<version>-arm64.apk` from [Releases](https://github.com/Tippye/Agentero-mobile/releases):
 
-#### macOS (Homebrew)
-```bash
-brew tap poco-ai/agentero
-brew install --cask agentero
+- ARM64 tablets, foldables, and phones; Android 13 (API 33) or newer.
+- The APK uses the unified release signature, so it upgrades earlier versions in place.
+- The first launch creates the vault in app-private storage and needs no storage permission.
 
-```
+### iOS
 
-> **Note for Linux users**: Ubuntu 22.04+ is required (`webkit2gtk 4.1`). See the [installation docs](docs/usage/getting-started.md) for details.
-
-#### Linux: blank window or sluggish UI
-
-If the window stays blank, or scrolling and typing feel laggy, WebKitGTK may be running without hardware acceleration. Check whether these variables are set:
-
-```bash
-grep -rn "WEBKIT_\|GDK_BACKEND" ~/.zshrc ~/.bashrc ~/.profile /etc/environment 2>/dev/null
-grep -rn "WEBKIT_" ~/.local/share/applications/ 2>/dev/null
-```
-
-If so, replace `WEBKIT_DISABLE_DMABUF_RENDERER=1` with the following, which keeps hardware compositing and only bypasses the failing buffer path:
-
-```bash
-export WEBKIT_DMABUF_RENDERER_FORCE_SHM=1
-```
-
-When launching from a desktop icon, `.zshrc` has no effect; update the launcher as well:
-
-```ini
-Exec=env WEBKIT_DMABUF_RENDERER_FORCE_SHM=1 /usr/bin/agentero %U
-```
-
-> On WebKitGTK 2.52+ these variables disable hardware compositing and threaded scrolling together, forcing full-window CPU repaints and sustained high CPU usage.
+The iOS project ships in `src-tauri/ios-project.yml`. TestFlight publishing is still frozen, so build and sign it yourself with Xcode.
 
 ---
 
-### Command-line tool (CLI)
+## Build from source
 
-To manage your library from the terminal or scripted workflows:
+You need Node.js 22+, pnpm, Rust (with the `aarch64-linux-android` target), JDK 17+, and the Android SDK / NDK.
 
 ```bash
-brew tap poco-ai/agentero
-brew install agentero
+pnpm install
 
-# List commands and options
-agentero --help
+# frontend + desktop shell
+pnpm tauri dev
 
+# Android: signing lives in src-tauri/gen/android/app/release-signing.properties
+pnpm tauri android build --apk --target aarch64
 ```
 
----
+Artifacts land in `src-tauri/gen/android/app/build/outputs/apk/`. The committed release keystore is shared by CI and local builds, so every release must keep `versionCode` increasing.
 
-### Use Agentero in more places
-
-- **DeepSeek Harness (dsh) plugin**: use the Agentero library, notes, and PDF reader directly inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Install with `dsh plugin --profile web add @poco-ai/agentero-dsh`; see [agentero-dsh-plugin](https://github.com/poco-ai/agentero-dsh-plugin).
+The release procedure, bilingual notes, and validation scripts are documented in the [release skill](.agents/skills/release/SKILL.md) and the [bump skill](.agents/skills/bump/SKILL.md).
 
 ---
 
-## Acknowledgements & Community
+## Credits and license
 
-* Thanks to the [LinuxDo](https://linux.do/) and [ModelScope](https://modelscope.cn/) communities for their suggestions and feedback during early testing.
-* Thanks to [AtomGit](https://gitcode.com/poco-ai/Agentero) for hosting the domestic mirror.
+- The mobile app builds on the shared layer of [poco-ai/Agentero](https://github.com/poco-ai/Agentero); the desktop library, translation, and agent protocol come from upstream.
+- Thanks to members of [LinuxDo](https://linux.do/) and [ModelScope](https://modelscope.cn/) for their feedback during early testing.
 
-### Community chat
-
-<p align="center">
-  <img src="docs/assets/community-qr.png" alt="Agentero WeChat group QR code" width="240" />
-  <br/>
-  <sub>Scan to join the WeChat user group (Chinese-speaking) for tips, feedback, and release news. The QR code is valid for 7 days; if it has expired, leave a note in the <a href="https://github.com/poco-ai/Agentero/issues">Issues</a>.</sub>
-</p>
-
-If Agentero helps your daily research, please consider giving the project a **⭐ Star** on GitHub.
-
-Thanks to all contributors!
+Released under the [MIT License](LICENSE). Third-party components and licenses are listed in [.github/THIRD_PARTY_NOTICES.md](.github/THIRD_PARTY_NOTICES.md).
 
 ![contributors img Made with contrib.rocks](https://contrib.rocks/image?repo=poco-ai/Agentero)
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/chart?repos=poco-ai/agentero&type=date&legend=top-left&sealed_token=dKsoXrNYkG3u-nEL3OLp0_aTrlN-GjDpvVEVJvC3xjH13q3viEwwkkB5m6LYT3iKu6LZXtZpQAXalvBwaFQdYgVTjTA1Dzp6NGe_BUQXA1cMt57wNdrYvA)](https://www.star-history.com/?type=date&repos=poco-ai%2Fagentero)
-
-## License
-
-This project is licensed under the [MIT License](LICENSE). Third-party components and their licenses are listed in [.github/THIRD_PARTY_NOTICES.md](.github/THIRD_PARTY_NOTICES.md).
