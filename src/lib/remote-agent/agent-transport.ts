@@ -50,6 +50,7 @@ const UNASSIGNED_WORKSPACE_ID = "agentero:unassigned";
 const SESSION_PREFIX = "dsh-remote-session:";
 const POLL_INTERVAL = 1200;
 const OBSERVATION_TIMEOUT = 120_000;
+const MAX_CACHED_PAPER_ATTACHMENTS = 32;
 
 type RemoteContextUsage = { used: number; size: number };
 
@@ -76,6 +77,8 @@ type RemoteRunInput = {
 	modelId?: string;
 	images?: PromptImage[];
 	files?: File[];
+	/** The reader's primary PDF. Reusable within the same native session. */
+	paperFile?: File;
 	title?: string;
 };
 
@@ -236,6 +239,7 @@ function questionAnswers(
 export class RemoteAgentTransport {
 	readonly agentId: string;
 	private workspaceRequest?: Promise<WorkspaceRef>;
+	private readonly paperAttachments = new Map<string, RemoteAttachment>();
 
 	constructor(
 		private readonly host: HostInfo,
@@ -566,6 +570,30 @@ export class RemoteAgentTransport {
 		}
 	}
 
+	private async uploadPaper(session: SessionRef, file: File) {
+		const bytes = await file.arrayBuffer();
+		const digest = await crypto.subtle?.digest("SHA-256", bytes);
+		const key = digest
+			? JSON.stringify([sessionKey(session), [...new Uint8Array(digest)]])
+			: null;
+		const existing = key ? this.paperAttachments.get(key) : undefined;
+		if (existing) return existing;
+
+		const uploaded = await this.uploadAttachment(
+			session,
+			file.name,
+			new Uint8Array(bytes),
+		);
+		if (key) {
+			this.paperAttachments.set(key, uploaded);
+			if (this.paperAttachments.size > MAX_CACHED_PAPER_ATTACHMENTS) {
+				const oldest = this.paperAttachments.keys().next();
+				if (!oldest.done) this.paperAttachments.delete(oldest.value);
+			}
+		}
+		return uploaded;
+	}
+
 	async run(
 		input: RemoteRunInput,
 		runtimeSessionId: string,
@@ -577,16 +605,18 @@ export class RemoteAgentTransport {
 		)
 			throw new Error("The Remote Agent host cannot run chat turns");
 		const files = input.files ?? [];
-		if ((input.images?.length || files.length) && !this.canUpload)
+		const paperFile = input.paperFile;
+		const attachedFiles = paperFile ? [...files, paperFile] : files;
+		if ((input.images?.length || attachedFiles.length) && !this.canUpload)
 			throw new Error("The Remote Agent host cannot accept attachments");
 		const maxBytes = this.attachmentLimit;
 		const images =
 			input.images?.map((image) => imageData(image, maxBytes)) ?? [];
-		if (files.some((file) => !file.size || file.size > maxBytes))
+		if (attachedFiles.some((file) => !file.size || file.size > maxBytes))
 			throw new Error(
 				"An attachment is empty or exceeds the Remote Agent attachment size limit",
 			);
-		if (!input.prompt.trim() && !images.length && !files.length)
+		if (!input.prompt.trim() && !images.length && !attachedFiles.length)
 			throw new Error("A Remote Agent turn needs a prompt or an attachment");
 		if (input.modelId) modelSelection(input.modelId);
 		const runtimeKey = this.runtimeKey(runtimeSessionId);
@@ -628,6 +658,10 @@ export class RemoteAgentTransport {
 					await this.selectModel(runtimeSessionId, input.modelId);
 			}
 			const attachments: RemoteAttachment[] = [];
+			const paper = paperFile
+				? await this.uploadPaper(session, paperFile)
+				: null;
+			if (paper) attachments.push(paper);
 			for (const image of images)
 				attachments.push(
 					await this.uploadAttachment(session, image.name, image.data),
@@ -640,8 +674,11 @@ export class RemoteAgentTransport {
 						new Uint8Array(await file.arrayBuffer()),
 					),
 				);
+			const text = paper
+				? `${input.prompt}\n\nCurrent paper PDF: ${JSON.stringify(paper.path)} is the uploaded copy in this session's workspace. Read this copy for the paper's full text. The original file path is unavailable on this host.`.trim()
+				: input.prompt;
 			await this.mutate(
-				{ type: "sendMessage", session, text: input.prompt, attachments },
+				{ type: "sendMessage", session, text, attachments },
 				key,
 			);
 			const observedSession = session;

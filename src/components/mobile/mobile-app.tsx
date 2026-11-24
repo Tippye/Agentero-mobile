@@ -83,7 +83,10 @@ import {
 	openMobilePlazaUrl,
 } from "@/lib/mobile/navigation";
 import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
-import { mobilePaperPaths } from "@/lib/mobile/paper-files";
+import {
+	loadMobilePaperPdfAttachment,
+	mobilePaperPaths,
+} from "@/lib/mobile/paper-files";
 import { useMobilePdfProcessingRuntime } from "@/lib/mobile/pdf-processing";
 import type { MobileWindowRoute } from "@/lib/mobile/route";
 import {
@@ -631,6 +634,18 @@ export default function MobileApp() {
 	);
 
 	const inReader = tab === "library" && selectedPaper !== null;
+	const fetchMissingPaper = paperSync.fetchMissing;
+	const remotePaperSource = useMemo(() => {
+		if (!vaultPath || !selectedPaper) return null;
+		return {
+			key: JSON.stringify([vaultPath, selectedPaper.id, selectedPaper.path]),
+			paper: selectedPaper,
+			loadPdf: (maxBytes: number) =>
+				loadMobilePaperPdfAttachment(vaultPath, selectedPaper, maxBytes, () =>
+					fetchMissingPaper(selectedPaper),
+				),
+		};
+	}, [vaultPath, selectedPaper, fetchMissingPaper]);
 
 	return (
 		<div
@@ -1007,6 +1022,7 @@ export default function MobileApp() {
 											<AgentPanel
 												remoteOnly
 												vaultPath={vaultPath}
+												remotePaperSource={remotePaperSource}
 												backendControl={
 													<MobileAgentToolbar
 														agents={agents}

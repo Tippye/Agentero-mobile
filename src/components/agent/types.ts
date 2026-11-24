@@ -6,6 +6,17 @@ import type { PdfVisualDraft } from "@/lib/agent/visual-context-store";
 import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
 import type { PaperMetadata, PaperTreeLabelMode } from "@/lib/paper";
 
+export type RemotePaperSource = {
+	key: string;
+	paper: PaperMetadata;
+	loadPdf: (maxBytes: number) => Promise<File>;
+};
+
+export type RemotePaperContext = {
+	source: RemotePaperSource;
+	includePdf: boolean;
+};
+
 /** Follow-up prompts waiting until the active run finishes. */
 export type QueuedPrompt = {
 	id: string;
@@ -23,6 +34,9 @@ export type QueuedPrompt = {
 	images?: PromptImage[];
 	files?: File[];
 	contextNote?: string;
+	/** Current paper and PDF choice at the time the user queued this turn. */
+	remotePaper?: RemotePaperContext | null;
+	paperFile?: File;
 };
 
 export type AgentPanelProps = {
@@ -30,6 +44,7 @@ export type AgentPanelProps = {
 	remoteOnly?: boolean;
 	active?: boolean;
 	backendControl?: ReactNode;
+	remotePaperSource?: RemotePaperSource | null;
 	regionContext?: MobilePaperRegionContext | null;
 	onRegionContextHandled?: (id: string) => void;
 	selectedPath?: string | null;
