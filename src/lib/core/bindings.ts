@@ -38,11 +38,12 @@ export const commands = {
 	remoteAgentWorkspaces: (host: HostRef) => typedError<ApiResult<WorkspaceInfo[]>, string>(__TAURI_INVOKE("remote_agent_workspaces", { host })),
 	remoteAgentSessions: (workspace: WorkspaceRef) => typedError<ApiResult<SessionInfo[]>, string>(__TAURI_INVOKE("remote_agent_sessions", { workspace })),
 	remoteAgentReadSession: (session: SessionRef) => typedError<ApiResult<SessionSnapshot_Serialize>, string>(__TAURI_INVOKE("remote_agent_read_session", { session })),
-	remoteAgentExecute: (request: OperationRequest) => typedError<ApiResult<OperationOutcome>, string>(__TAURI_INVOKE("remote_agent_execute", { request })),
-	remoteAgentReceipt: (connection: ConnectionRef, operationId: OperationId) => typedError<ApiResult<ReceiptLookup>, string>(__TAURI_INVOKE("remote_agent_receipt", { connection, operationId })),
+	remoteAgentSessionModels: (session: SessionRef) => typedError<ApiResult<RemoteSessionModels_Serialize | null>, string>(__TAURI_INVOKE("remote_agent_session_models", { session })),
+	remoteAgentExecute: (request: OperationRequest_Deserialize) => typedError<ApiResult<OperationOutcome_Serialize>, string>(__TAURI_INVOKE("remote_agent_execute", { request })),
+	remoteAgentReceipt: (connection: ConnectionRef, operationId: OperationId) => typedError<ApiResult<ReceiptLookup_Serialize>, string>(__TAURI_INVOKE("remote_agent_receipt", { connection, operationId })),
 	/**  Read this device's journal without refreshing credentials or contacting a Host. */
-	remoteAgentLocalOperations: (connection: ConnectionRef) => typedError<ApiResult<JournalEntry[]>, string>(__TAURI_INVOKE("remote_agent_local_operations", { connection })),
-	remoteAgentUpload: (session: SessionRef, path: string, operationId: OperationId) => typedError<ApiResult<OperationOutcome>, string>(__TAURI_INVOKE("remote_agent_upload", { session, path, operationId })),
+	remoteAgentLocalOperations: (connection: ConnectionRef) => typedError<ApiResult<JournalEntry_Serialize[]>, string>(__TAURI_INVOKE("remote_agent_local_operations", { connection })),
+	remoteAgentUpload: (session: SessionRef, path: string, operationId: OperationId) => typedError<ApiResult<OperationOutcome_Serialize>, string>(__TAURI_INVOKE("remote_agent_upload", { session, path, operationId })),
 	/**  Read OS background capabilities and observations without requesting permission. */
 	mobileBackgroundGetState: () => typedError<ApiResult<BackgroundState>, string>(__TAURI_INVOKE("mobile_background_get_state")),
 	/**  Change the user's Android background preference; unsupported platforms refuse enabling. */
@@ -2573,7 +2574,7 @@ export type Capabilities = {
 	attachments: AttachmentLimits | null,
 };
 
-export type Capability = "listHosts" | "listWorkspaces" | "listSessions" | "createSession" | "readSession" | "sendMessage" | "cancel" | "subscribe" | "respondPermission" | "respondQuestion" | "uploadAttachment" | "operationReceipts" | "resume";
+export type Capability = "listHosts" | "listWorkspaces" | "listSessions" | "createSession" | "readSession" | "selectModel" | "sendMessage" | "cancel" | "subscribe" | "respondPermission" | "respondQuestion" | "uploadAttachment" | "operationReceipts" | "resume";
 
 /**  Status for a common agent row in Settings. */
 export type CatalogAcpStatus =
@@ -4407,7 +4408,13 @@ export type JobVaultScopeEnqueueArgs = {
  *  A private journal record and the safe local restore DTO. No prompt, title,
  *  selected answer, attachment content, local file path or provider error text.
  */
-export type JournalEntry = {
+export type JournalEntry = JournalEntry_Serialize | JournalEntry_Deserialize;
+
+/**
+ *  A private journal record and the safe local restore DTO. No prompt, title,
+ *  selected answer, attachment content, local file path or provider error text.
+ */
+export type JournalEntry_Deserialize = {
 	version: number,
 	connection: ConnectionRef,
 	operationId: OperationId,
@@ -4417,7 +4424,24 @@ export type JournalEntry = {
 	 */
 	requestDigest: string | null,
 	context: OperationContext | null,
-	outcome: OperationOutcome,
+	outcome: OperationOutcome_Deserialize,
+};
+
+/**
+ *  A private journal record and the safe local restore DTO. No prompt, title,
+ *  selected answer, attachment content, local file path or provider error text.
+ */
+export type JournalEntry_Serialize = {
+	version: number,
+	connection: ConnectionRef,
+	operationId: OperationId,
+	/**
+	 *  None means a retained ID imported without its original request. It can
+	 *  be inspected, but can never authorize dispatch or confirm changed args.
+	 */
+	requestDigest: string | null,
+	context: OperationContext | null,
+	outcome: OperationOutcome_Serialize,
 };
 
 /**  TypeScript-side representation of arbitrary JSON values. */
@@ -4945,7 +4969,11 @@ export type MobileWindowRoute = {
 	pdf: MobilePdfPosition | null,
 };
 
-export type Mutation = { type: "createSession"; workspace: WorkspaceRef; title: string | null } | { type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] } | { type: "cancel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string; optionId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] } | { type: "uploadAttachment"; upload: AttachmentUpload };
+export type Mutation = Mutation_Serialize | Mutation_Deserialize;
+
+export type Mutation_Deserialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; optionId?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Deserialize }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; optionId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
+
+export type Mutation_Serialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; optionId?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Serialize }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; optionId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
 
 export type NetworkDoctorReport = NetworkDoctorReport_Serialize | NetworkDoctorReport_Deserialize;
 
@@ -5041,22 +5069,41 @@ export type OpenWithApp = {
 /**  Menu grouping/fallback-glyph hint for one entry. */
 export type OpenWithKind = "fileManager" | "editor" | "terminal";
 
-export type OperationContext = { type: "createSession"; workspace: WorkspaceRef } | { type: "sendMessage"; session: SessionRef } | { type: "cancel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string } | { type: "uploadAttachment"; session: SessionRef };
+export type OperationContext = { type: "createSession"; workspace: WorkspaceRef } | { type: "sendMessage"; session: SessionRef } | { type: "cancel"; session: SessionRef } | { type: "selectModel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string } | { type: "uploadAttachment"; session: SessionRef };
 
 export type OperationId = string;
 
-export type OperationOutcome =
-/**  Queued/accepted does not establish completion of the remote task. */
-{ status: "accepted" } | { status: "succeeded"; result: OperationResult } | { status: "rejected"; code: string; message: string } |
-/**  May already have executed. Inspect the receipt/history; never resend. */
-{ status: "unknown"; reason: string };
+export type OperationOutcome = OperationOutcome_Serialize | OperationOutcome_Deserialize;
 
-export type OperationRequest = {
+export type OperationOutcome_Deserialize =
+/**  Queued/accepted does not establish completion of the remote task. */
+({ status: "accepted" }) & { code?: never; message?: never; reason?: never; result?: never } | ({ status: "succeeded"; result: OperationResult_Deserialize }) & { code?: never; message?: never; reason?: never } | ({ status: "rejected"; code: string; message: string }) & { reason?: never; result?: never } |
+/**  May already have executed. Inspect the receipt/history; never resend. */
+({ status: "unknown"; reason: string }) & { code?: never; message?: never; result?: never };
+
+export type OperationOutcome_Serialize =
+/**  Queued/accepted does not establish completion of the remote task. */
+({ status: "accepted" }) & { code?: never; message?: never; reason?: never; result?: never } | ({ status: "succeeded"; result: OperationResult_Serialize }) & { code?: never; message?: never; reason?: never } | ({ status: "rejected"; code: string; message: string }) & { reason?: never; result?: never } |
+/**  May already have executed. Inspect the receipt/history; never resend. */
+({ status: "unknown"; reason: string }) & { code?: never; message?: never; result?: never };
+
+export type OperationRequest = OperationRequest_Serialize | OperationRequest_Deserialize;
+
+export type OperationRequest_Deserialize = {
 	operationId: OperationId,
-	mutation: Mutation,
+	mutation: Mutation_Deserialize,
 };
 
-export type OperationResult = { type: "sessionCreated"; session: SessionRef } | { type: "attachmentUploaded"; attachment: RemoteAttachment } | { type: "acknowledged" };
+export type OperationRequest_Serialize = {
+	operationId: OperationId,
+	mutation: Mutation_Serialize,
+};
+
+export type OperationResult = OperationResult_Serialize | OperationResult_Deserialize;
+
+export type OperationResult_Deserialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Deserialize }) & { attachment?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never };
+
+export type OperationResult_Serialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Serialize }) & { attachment?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never };
 
 /**
  *  Which side wins a manual overwrite. `RemoteToLocal` mirrors the remote
@@ -5830,9 +5877,15 @@ export type RebuildResult = {
 	nodes: number,
 };
 
-export type ReceiptLookup = { status: "found"; outcome: OperationOutcome } |
+export type ReceiptLookup = ReceiptLookup_Serialize | ReceiptLookup_Deserialize;
+
+export type ReceiptLookup_Deserialize = { status: "found"; outcome: OperationOutcome_Deserialize } |
 /**  Missing/expired receipts do not establish that an operation did not run. */
-{ status: "notFound" };
+({ status: "notFound" }) & { outcome?: never };
+
+export type ReceiptLookup_Serialize = { status: "found"; outcome: OperationOutcome_Serialize } |
+/**  Missing/expired receipts do not establish that an operation did not run. */
+({ status: "notFound" }) & { outcome?: never };
 
 export type RecommendArxivArgs = {
 	vaultPath: string,
@@ -6010,6 +6063,50 @@ export type RemoteEvent_Serialize = {
 	payload: EventPayload_Serialize,
 };
 
+export type RemoteModelOption = {
+	id: string,
+	name: string,
+	description: string | null,
+	reasoning: RemoteModelReasoning | null,
+};
+
+export type RemoteModelProviderFailure = {
+	id: string,
+	name: string,
+	message: string,
+};
+
+export type RemoteModelProviderGroup = {
+	id: string,
+	name: string,
+	models: RemoteModelOption[],
+};
+
+export type RemoteModelReasoning = {
+	efforts: RemoteModelReasoningEffort[],
+	defaultEffort: string | null,
+};
+
+export type RemoteModelReasoningEffort = {
+	id: string,
+	name: string,
+	description: string | null,
+};
+
+export type RemoteModelSelection = RemoteModelSelection_Serialize | RemoteModelSelection_Deserialize;
+
+export type RemoteModelSelection_Deserialize = {
+	provider: string,
+	model: string,
+	reasoningEffort?: string | null,
+};
+
+export type RemoteModelSelection_Serialize = {
+	provider: string,
+	model: string,
+	reasoningEffort?: string | null,
+};
+
 export type RemotePaperGetArgs = {
 	sessionId: string,
 	path?: string | null,
@@ -6057,6 +6154,22 @@ export type RemoteSessionInfo = {
 	caps: FsCaps,
 	/**  Pseudo vault path for frontend: `remote:<sessionId>` */
 	vaultHandle: string,
+};
+
+export type RemoteSessionModels = RemoteSessionModels_Serialize | RemoteSessionModels_Deserialize;
+
+export type RemoteSessionModels_Deserialize = {
+	current: RemoteModelSelection_Deserialize,
+	routable: boolean,
+	groups: RemoteModelProviderGroup[],
+	failures: RemoteModelProviderFailure[],
+};
+
+export type RemoteSessionModels_Serialize = {
+	current: RemoteModelSelection_Serialize,
+	routable: boolean,
+	groups: RemoteModelProviderGroup[],
+	failures: RemoteModelProviderFailure[],
 };
 
 export type RemoteWriteBytesArgs = {

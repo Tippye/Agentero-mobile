@@ -23,6 +23,15 @@ pub(super) fn identifier(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub(super) fn validate_model_selection(selection: &RemoteModelSelection) -> Result<(), AppError> {
+    identifier(&selection.provider)?;
+    identifier(&selection.model)?;
+    if let Some(effort) = &selection.reasoning_effort {
+        identifier(effort)?;
+    }
+    Ok(())
+}
+
 pub(super) fn connection_ref(connection: &ConnectionRef) -> Result<(), AppError> {
     identifier(&connection.provider_id.0)?;
     identifier(&connection.connection_id.0)
@@ -404,6 +413,26 @@ impl RemoteAgentService {
         Ok(result)
     }
 
+    pub async fn session_models(
+        &self,
+        session: &SessionRef,
+    ) -> Result<Option<RemoteSessionModels>, AppError> {
+        session_ref(session)?;
+        let provider = self.provider(&session.workspace.host.connection)?;
+        let state = self.state(&session.workspace.host.connection).await;
+        let state = state.lock().await;
+        let info = state.connected()?;
+        backend(info, &session.workspace)?;
+        if !info.capabilities.supports(Capability::SelectModel) {
+            return Ok(None);
+        }
+        let result = provider.adapter.session_models(session).await?;
+        if let Some(models) = &result {
+            validate_model_selection(&models.current)?;
+        }
+        Ok(result)
+    }
+
     /// Explicit reconnect recovery: return a complete official baseline and a
     /// subscriber seeded with its source IDs. Each window gets its own baseline
     /// and de-duplication set. No mutations are dispatched during recovery.
@@ -652,6 +681,10 @@ fn validate_mutation(mutation: &Mutation, info: &ConnectionInfo) -> Result<(), A
                 }
             }
         }
+        Mutation::SelectModel { session, selection } => {
+            session_ref(session)?;
+            validate_model_selection(selection)?;
+        }
         Mutation::Cancel { session }
         | Mutation::RespondPermission { session, .. }
         | Mutation::RespondQuestion { session, .. } => session_ref(session)?,
@@ -715,10 +748,27 @@ fn validate_outcome(
                     }
                 }
             }
+            OperationResult::ModelSelected { session, selected } => {
+                session_ref(session)?;
+                validate_model_selection(selected)?;
+                if &session.workspace.host.connection != connection {
+                    return Err(boundary());
+                }
+                if let Some(mutation) = mutation {
+                    if !matches!(mutation, Mutation::SelectModel { session: target, .. } if target == session)
+                    {
+                        return Err(boundary());
+                    }
+                }
+            }
             OperationResult::Acknowledged => {
                 if matches!(
                     mutation,
-                    Some(Mutation::CreateSession { .. } | Mutation::UploadAttachment { .. })
+                    Some(
+                        Mutation::CreateSession { .. }
+                            | Mutation::UploadAttachment { .. }
+                            | Mutation::SelectModel { .. }
+                    )
                 ) {
                     return Err(invalid("Completed operation is missing its result"));
                 }

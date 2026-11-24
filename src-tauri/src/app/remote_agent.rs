@@ -653,6 +653,19 @@ pub async fn remote_agent_read_session(
 }
 #[tauri::command]
 #[specta::specta]
+pub async fn remote_agent_session_models(
+    session: SessionRef,
+    service: State<'_, RemoteAgentService>,
+    provider: State<'_, Arc<DshRemoteProvider>>,
+    accounts: State<'_, RemoteAgentAccounts>,
+) -> Result<ApiResult<Option<RemoteSessionModels>>, String> {
+    if let Err(error) = preflight(&session.workspace.host.connection, &accounts, &provider).await {
+        return Ok(map_err(error));
+    }
+    envelope(service.session_models(&session).await)
+}
+#[tauri::command]
+#[specta::specta]
 pub async fn remote_agent_execute(
     request: OperationRequest,
     service: State<'_, RemoteAgentService>,

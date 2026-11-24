@@ -34,6 +34,7 @@ pub(crate) fn export_typescript_bindings() {
             crate::app::remote_agent::remote_agent_workspaces,
             crate::app::remote_agent::remote_agent_sessions,
             crate::app::remote_agent::remote_agent_read_session,
+            crate::app::remote_agent::remote_agent_session_models,
             crate::app::remote_agent::remote_agent_execute,
             crate::app::remote_agent::remote_agent_receipt,
             crate::app::remote_agent::remote_agent_local_operations,

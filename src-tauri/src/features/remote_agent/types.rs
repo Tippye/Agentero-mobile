@@ -64,6 +64,7 @@ pub enum Capability {
     ListSessions,
     CreateSession,
     ReadSession,
+    SelectModel,
     SendMessage,
     Cancel,
     Subscribe,
@@ -171,6 +172,64 @@ pub struct SessionInfo {
     pub title: String,
     /// Idle and Completed are distinct; an idle transport is not task success.
     pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelSelection {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelReasoningEffort {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelReasoning {
+    pub efforts: Vec<RemoteModelReasoningEffort>,
+    pub default_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub reasoning: Option<RemoteModelReasoning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelProviderGroup {
+    pub id: String,
+    pub name: String,
+    pub models: Vec<RemoteModelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelProviderFailure {
+    pub id: String,
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSessionModels {
+    pub current: RemoteModelSelection,
+    pub routable: bool,
+    pub groups: Vec<RemoteModelProviderGroup>,
+    pub failures: Vec<RemoteModelProviderFailure>,
 }
 
 /// Adapter-owned opaque token. It is never parsed or incremented by the service.
@@ -311,6 +370,10 @@ pub enum Mutation {
     Cancel {
         session: SessionRef,
     },
+    SelectModel {
+        session: SessionRef,
+        selection: RemoteModelSelection,
+    },
     RespondPermission {
         session: SessionRef,
         request_id: String,
@@ -332,6 +395,7 @@ impl Mutation {
             Self::CreateSession { workspace, .. } => workspace,
             Self::SendMessage { session, .. }
             | Self::Cancel { session }
+            | Self::SelectModel { session, .. }
             | Self::RespondPermission { session, .. }
             | Self::RespondQuestion { session, .. } => &session.workspace,
             Self::UploadAttachment { upload } => &upload.session.workspace,
@@ -343,6 +407,7 @@ impl Mutation {
             Self::CreateSession { .. } => Capability::CreateSession,
             Self::SendMessage { .. } => Capability::SendMessage,
             Self::Cancel { .. } => Capability::Cancel,
+            Self::SelectModel { .. } => Capability::SelectModel,
             Self::RespondPermission { .. } => Capability::RespondPermission,
             Self::RespondQuestion { .. } => Capability::RespondQuestion,
             Self::UploadAttachment { .. } => Capability::UploadAttachment,
@@ -364,8 +429,16 @@ pub struct OperationRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum OperationResult {
-    SessionCreated { session: SessionRef },
-    AttachmentUploaded { attachment: RemoteAttachment },
+    SessionCreated {
+        session: SessionRef,
+    },
+    AttachmentUploaded {
+        attachment: RemoteAttachment,
+    },
+    ModelSelected {
+        session: SessionRef,
+        selected: Box<RemoteModelSelection>,
+    },
     Acknowledged,
 }
 

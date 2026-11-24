@@ -369,6 +369,62 @@ impl NativeHost {
                 )
             })
     }
+    pub async fn session_models(
+        &self,
+        session: &SessionRef,
+    ) -> Result<Option<RemoteSessionModels>> {
+        let row = self.require_session(session).await?;
+        match call(
+            &self.wire,
+            &id(),
+            "session/modelCatalog",
+            json!({}),
+            CallSemantics::ReadOnly,
+        )
+        .await
+        {
+            Ok(value) => model::session_models(&row, value).map(Some),
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "gateway/method-not-found"
+                        | "METHOD_NOT_FOUND"
+                        | "METHOD_NOT_ALLOWED"
+                        | "FEATURE_NOT_SUPPORTED"
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn select_model(
+        &self,
+        operation: &str,
+        session: &SessionRef,
+        selection: &RemoteModelSelection,
+    ) -> Result<RemoteModelSelection> {
+        self.require_session(session).await?;
+        let mut request = json!({
+            "sessionId": session.session_id.0,
+            "provider": selection.provider,
+            "model": selection.model,
+        });
+        if let Some(effort) = &selection.reasoning_effort {
+            request["reasoningEffort"] = json!(effort);
+        }
+        let value = call(
+            &self.wire,
+            operation,
+            "session/selectModel",
+            json!({"request": request}),
+            CallSemantics::Mutation,
+        )
+        .await?;
+        model::selected_model(&value).map_err(RemoteError::unknown)
+    }
+
     async fn baseline(
         &self,
         session: &SessionRef,
