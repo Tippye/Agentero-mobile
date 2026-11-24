@@ -14,9 +14,7 @@ use agentero_core::features::sync::conflicts::{self, ConflictResolution, Pending
 use agentero_core::features::sync::lock::SyncLock;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-#[cfg(mobile)]
-use tauri::Manager;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -521,6 +519,20 @@ async fn perform_sync_task(
     let mut binding = credentials::load(app, vault_key)
         .await?
         .ok_or_else(|| AppError::message("sync is not configured"))?;
+    // The translation-cache switch owns sync eligibility for the translation
+    // sidecar and finished translated PDFs. It lives in the app settings
+    // (default off) rather than the per-vault scope form so the same control
+    // governs desktop and mobile. Layout files stay always-synced paper
+    // metadata for figures, citations and deferred-paper availability.
+    let translation_cache_sync = app
+        .state::<crate::features::system::settings::AppSettingsStore>()
+        .get()
+        .map(|snapshot| snapshot.settings.translate.cache_translation_sync)
+        .unwrap_or(true);
+    binding.primary.scope.translated = translation_cache_sync;
+    for mirror in &mut binding.mirrors {
+        mirror.scope.translated = translation_cache_sync;
+    }
     attach_agentero_session(app, &mut binding.primary).await;
     emit_state(app, vault_key, "syncing", None, None);
     let progress_app = app.clone();

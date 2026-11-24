@@ -6997,6 +6997,13 @@ export type TranslateSettings = {
 	 */
 	cacheReflowFinal?: boolean,
 	/**
+	 *  Sync translation artifacts with the vault: the translation sidecar and the
+	 *  finished translated PDF. On by default so every translation artifact is
+	 *  available on the other devices; turning it off keeps them local (app
+	 *  cache) instead. Layout files always sync as paper metadata.
+	 */
+	cacheTranslationSync?: boolean,
+	/**
 	 *  Full-document translation runs in the background after a paper is
 	 *  imported and its layout lands (default off: it spends provider quota).
 	 */

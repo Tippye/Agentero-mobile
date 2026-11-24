@@ -876,6 +876,9 @@ function normalizeTranslateSettings(
 	if (typeof raw.cacheReflowFinal === "boolean") {
 		base.cacheReflowFinal = raw.cacheReflowFinal;
 	}
+	if (typeof raw.cacheTranslationSync === "boolean") {
+		base.cacheTranslationSync = raw.cacheTranslationSync;
+	}
 	if (typeof raw.autoTranslateImport === "boolean") {
 		base.autoTranslateImport = raw.autoTranslateImport;
 	}

@@ -1194,14 +1194,17 @@ fn scope_ignore_patterns(scope: &SyncScope, paths: &[&str]) -> BTreeSet<String> 
                 escaped.push(ch);
             }
             let mut patterns = Vec::new();
-            if category.is_directory() {
+            let file_anchor =
+                matches!(category, scope::Category::Translated) && anchor.ends_with(".json");
+            if category.is_directory() && !file_anchor {
                 if matches!(category, scope::Category::Source) {
                     // Layout/translation sidecars are shared metadata and stay
                     // synced with the TeX tree off. Git cannot re-include a
                     // file under an excluded directory, so ignore the contents
-                    // and negate the two sidecars explicitly.
+                    // and negate the sidecars explicitly.
                     patterns.push(format!("/{escaped}/*"));
                     patterns.push(format!("!/{escaped}/layout.json"));
+                    patterns.push(format!("!/{escaped}/layout-index.json"));
                     patterns.push(format!("!/{escaped}/layout-translate.json"));
                 } else {
                     patterns.push(format!("/{escaped}/"));

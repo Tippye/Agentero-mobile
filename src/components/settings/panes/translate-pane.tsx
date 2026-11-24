@@ -634,14 +634,13 @@ export function TranslatePane({
 						variant="outline"
 						size="xs"
 						disabled={
-							tr.cacheReflowIr === DEFAULT_TRANSLATE_SETTINGS.cacheReflowIr &&
-							tr.cacheReflowFinal ===
-								DEFAULT_TRANSLATE_SETTINGS.cacheReflowFinal
+							tr.cacheTranslationSync ===
+							DEFAULT_TRANSLATE_SETTINGS.cacheTranslationSync
 						}
 						onClick={() =>
 							patchTranslate({
-								cacheReflowIr: DEFAULT_TRANSLATE_SETTINGS.cacheReflowIr,
-								cacheReflowFinal: DEFAULT_TRANSLATE_SETTINGS.cacheReflowFinal,
+								cacheTranslationSync:
+									DEFAULT_TRANSLATE_SETTINGS.cacheTranslationSync,
 							})
 						}
 					>
@@ -670,23 +669,16 @@ export function TranslatePane({
 						</Button>
 					</SettingsRow>
 					<SettingsRow
-						label={t("translate.cache.ir.label")}
-						htmlFor="translate-cache-ir"
+						label={t("translate.cache.translation.label")}
+						description={t("translate.cache.translation.help")}
+						htmlFor="translate-cache-translation"
 					>
 						<Switch
-							id="translate-cache-ir"
-							checked={tr.cacheReflowIr}
-							onCheckedChange={(v) => patchTranslate({ cacheReflowIr: v })}
-						/>
-					</SettingsRow>
-					<SettingsRow
-						label={t("translate.cache.final.label")}
-						htmlFor="translate-cache-final"
-					>
-						<Switch
-							id="translate-cache-final"
-							checked={tr.cacheReflowFinal}
-							onCheckedChange={(v) => patchTranslate({ cacheReflowFinal: v })}
+							id="translate-cache-translation"
+							checked={tr.cacheTranslationSync}
+							onCheckedChange={(v) =>
+								patchTranslate({ cacheTranslationSync: v })
+							}
 						/>
 					</SettingsRow>
 				</SettingsGroup>

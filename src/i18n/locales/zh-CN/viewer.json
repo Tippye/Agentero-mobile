@@ -29,6 +29,8 @@
 	},
 	"pdf": {
 		"close": "关闭",
+		"cachedTranslationPreview": "正在显示缓存的译文 PDF，版面解析将在后台继续",
+		"cachedTranslationPreviewClose": "关闭译文预览",
 		"apiOnly": {
 			"layoutProviderRequired": "请先配置远程版面解析 API 服务。",
 			"translateProviderRequired": "请先选择 API 翻译服务。"

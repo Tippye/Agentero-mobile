@@ -83,12 +83,15 @@ pub(super) fn classify<'a>(path: &'a str, roots: &PaperRoots) -> Option<(Categor
         let end = root.len() + 1 + component.len();
         match component {
             "source" => {
-                // Reading layout and completed translations are shared
-                // metadata, not re-downloadable TeX assets: they stay synced
-                // even with the TeX tree off (mobile invariant).
+                // Layout is required for figures, citations and deferred-paper availability:
+                // keep raw layout and the sidebar index always synced. The translation sidecar
+                // is cache output and follows the translation-cache switch.
                 let tail = &path[end..];
-                if tail == "/layout.json" || tail == "/layout-translate.json" {
+                if tail == "/layout.json" || tail == "/layout-index.json" {
                     return None;
+                }
+                if tail == "/layout-translate.json" {
+                    return Some((Category::Translated, path));
                 }
                 return Some((Category::Source, &path[..end]));
             }
