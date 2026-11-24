@@ -537,7 +537,7 @@ impl NativeHost {
         stream.close().await?;
         let mut events = records
             .iter()
-            .map(|row| model::event(session, &row["event"]))
+            .map(|row| model::events(session, &row["event"]))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
@@ -583,9 +583,7 @@ impl NativeHost {
                     .as_i64()
                     .is_some_and(|current| current > seq)
             }) {
-                if let Some(event) = model::event(session, &record["event"])? {
-                    queue.push_back(event);
-                }
+                queue.extend(model::events(session, &record["event"])?);
             }
         }
         queue.extend(self.pending_events(session).await?);
@@ -923,7 +921,7 @@ impl RemoteAgentSubscription for NativeSubscription {
                             Some("event" | "chunks") => {
                                 let event = &value["event"]; let seq = integer(event, "seq")? as i64;
                                 if seq <= self.through { continue; } self.through = seq;
-                                if let Some(event) = model::event(&self.session, event)? { self.queue.push_back(event); }
+                                self.queue.extend(model::events(&self.session, event)?);
                             }
                             Some("projection") => {
                                 if value.get("key").and_then(Value::as_str) == Some("userQuestions") {

@@ -37,7 +37,7 @@ export const commands = {
 	remoteAgentTrustHost: (host: HostRef, expectedFingerprint: string) => typedError<ApiResult<ConnectionInfo>, string>(__TAURI_INVOKE("remote_agent_trust_host", { host, expectedFingerprint })),
 	remoteAgentWorkspaces: (host: HostRef) => typedError<ApiResult<WorkspaceInfo[]>, string>(__TAURI_INVOKE("remote_agent_workspaces", { host })),
 	remoteAgentSessions: (workspace: WorkspaceRef) => typedError<ApiResult<SessionInfo[]>, string>(__TAURI_INVOKE("remote_agent_sessions", { workspace })),
-	remoteAgentReadSession: (session: SessionRef) => typedError<ApiResult<SessionSnapshot>, string>(__TAURI_INVOKE("remote_agent_read_session", { session })),
+	remoteAgentReadSession: (session: SessionRef) => typedError<ApiResult<SessionSnapshot_Serialize>, string>(__TAURI_INVOKE("remote_agent_read_session", { session })),
 	remoteAgentExecute: (request: OperationRequest) => typedError<ApiResult<OperationOutcome>, string>(__TAURI_INVOKE("remote_agent_execute", { request })),
 	remoteAgentReceipt: (connection: ConnectionRef, operationId: OperationId) => typedError<ApiResult<ReceiptLookup>, string>(__TAURI_INVOKE("remote_agent_receipt", { connection, operationId })),
 	/**  Read this device's journal without refreshing credentials or contacting a Host. */
@@ -3669,7 +3669,29 @@ export type EventCursor = {
 	value: string,
 };
 
-export type EventPayload = { type: "message"; role: string; text: string } | { type: "taskStatus"; status: TaskStatus } | { type: "permissionRequest"; requestId: string; description: string; options: string[] } | { type: "questionRequest"; requestId: string; questions: Question[] } | { type: "connectionStatus"; status: ConnectionStatus };
+export type EventPayload = EventPayload_Serialize | EventPayload_Deserialize;
+
+export type EventPayload_Deserialize = ({ type: "message"; role: string; text: string;
+/**  Model reasoning attached to this reply; rendered as a disclosure. */
+reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; requestId?: never; state?: never; status?: never } |
+/**
+ *  One native tool invocation. `call` and `result` share the same source ID
+ *  so clients fold them into a single activity row.
+ */
+({ type: "tool"; callId: string; name: string;
+/**  `running`, `finished` or `failed`. */
+state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; status?: never; text?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never };
+
+export type EventPayload_Serialize = ({ type: "message"; role: string; text: string;
+/**  Model reasoning attached to this reply; rendered as a disclosure. */
+reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; requestId?: never; state?: never; status?: never } |
+/**
+ *  One native tool invocation. `call` and `result` share the same source ID
+ *  so clients fold them into a single activity row.
+ */
+({ type: "tool"; callId: string; name: string;
+/**  `running`, `finished` or `failed`. */
+state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; status?: never; text?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never };
 
 /**
  *  Where a job's business logic executes: in a Rust runner ([`ExecHost::Host`])
@@ -5962,12 +5984,30 @@ export type RemoteCredentialState = "notChecked" | "launchOnly" | "missing" | "r
  *  Source IDs must identify immutable events and survive history/stream replay.
  *  Stream ID separates source epochs where a backend may reuse event IDs.
  */
-export type RemoteEvent = {
+export type RemoteEvent = RemoteEvent_Serialize | RemoteEvent_Deserialize;
+
+/**
+ *  Source IDs must identify immutable events and survive history/stream replay.
+ *  Stream ID separates source epochs where a backend may reuse event IDs.
+ */
+export type RemoteEvent_Deserialize = {
 	session: SessionRef,
 	sourceStreamId: string,
 	sourceId: string,
 	cursor: EventCursor | null,
-	payload: EventPayload,
+	payload: EventPayload_Deserialize,
+};
+
+/**
+ *  Source IDs must identify immutable events and survive history/stream replay.
+ *  Stream ID separates source epochs where a backend may reuse event IDs.
+ */
+export type RemoteEvent_Serialize = {
+	session: SessionRef,
+	sourceStreamId: string,
+	sourceId: string,
+	cursor: EventCursor | null,
+	payload: EventPayload_Serialize,
 };
 
 export type RemotePaperGetArgs = {
@@ -6337,9 +6377,21 @@ export type SessionRef = {
 	sessionId: SessionId,
 };
 
-export type SessionSnapshot = {
+export type SessionSnapshot = SessionSnapshot_Serialize | SessionSnapshot_Deserialize;
+
+export type SessionSnapshot_Deserialize = {
 	info: SessionInfo,
-	events: RemoteEvent[],
+	events: RemoteEvent_Deserialize[],
+	/**
+	 *  A subscription opened with this token must cover changes after this
+	 *  baseline. Adapters implement this using their official history/streams.
+	 */
+	cursor: EventCursor | null,
+};
+
+export type SessionSnapshot_Serialize = {
+	info: SessionInfo,
+	events: RemoteEvent_Serialize[],
 	/**
 	 *  A subscription opened with this token must cover changes after this
 	 *  baseline. Adapters implement this using their official history/streams.

@@ -218,6 +218,21 @@ pub enum EventPayload {
     Message {
         role: String,
         text: String,
+        /// Model reasoning attached to this reply; rendered as a disclosure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
+    /// One native tool invocation. `call` and `result` share the same source ID
+    /// so clients fold them into a single activity row.
+    Tool {
+        call_id: String,
+        name: String,
+        /// `running`, `finished` or `failed`.
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     TaskStatus {
         status: TaskStatus,
