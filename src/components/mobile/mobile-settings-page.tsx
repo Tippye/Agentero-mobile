@@ -309,6 +309,8 @@ export function MobileSettingsPage({
 								pdfScrollStrategy={settings.pdfScrollStrategy}
 								pdfVimKeys={settings.pdfVimKeys}
 								pdfSpreadMode={settings.pdfSpreadMode}
+								pdfSentenceHover={settings.pdfSentenceHover}
+								pdfCommentDisplay={settings.pdfCommentDisplay}
 								pdfTranslateTab={settings.pdfTranslateTab}
 								vimMode={settings.vimMode}
 								patch={patch}

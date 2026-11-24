@@ -185,6 +185,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 	soundEnabled: true,
 	pdfSpreadMode: "none",
 	pdfTranslateTab: "hover",
+	pdfSentenceHover: true,
+	pdfCommentDisplay: "rail",
 	paperNoteMode: "standard",
 	autoOpenPaperNotes: true,
 	autoIngest: true,

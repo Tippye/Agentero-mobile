@@ -14,6 +14,8 @@ pub use agentero_core::features::pdf::marks;
 pub use agentero_core::features::pdf::text;
 
 #[cfg(feature = "desktop")]
+pub mod annotations;
+#[cfg(feature = "desktop")]
 pub mod bookmarks;
 #[cfg(feature = "desktop")]
 pub mod ink;

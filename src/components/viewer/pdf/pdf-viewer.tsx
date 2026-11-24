@@ -2254,6 +2254,7 @@ function PdfViewerInner({
 		openCard,
 		openEditorForAnnotation,
 		beginRailEdit,
+		previewComment: setHoveredCommentId,
 		annotationCap,
 		docId,
 		deleteHighlightAnnotation,
@@ -2729,6 +2730,12 @@ function PdfViewerInner({
 				: undefined,
 			onHoverComment: (comment) => setHoveredCommentId(comment.id),
 			onLeaveComment: () => setHoveredCommentId(null),
+			onLeavePin: (pin) => {
+				// A note pin previews a comment card on top of the shared
+				// hover surface, which every pin releases the same way.
+				if (pin.kind === "annotate") setHoveredCommentId(null);
+				scheduleHoverHide();
+			},
 			onCommitSelectionComment: handleCommitSelectionComment,
 			// The chip only needs to keep its draft alive; drafts now clear on
 			// commit/dismiss alone, so no engagement tracking is required.

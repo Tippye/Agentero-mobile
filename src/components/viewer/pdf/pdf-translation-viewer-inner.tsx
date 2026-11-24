@@ -161,6 +161,7 @@ const EMPTY_HANDLERS: PdfPageHandlers = {
 	onAddCommentToChat: NOOP,
 	onHoverComment: NOOP,
 	onLeaveComment: NOOP,
+	onLeavePin: NOOP,
 	onCommitSelectionComment: NOOP,
 	onSelectionCommentActiveChange: NOOP,
 	onDismissSelectionComment: NOOP,
