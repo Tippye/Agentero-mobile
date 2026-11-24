@@ -32,13 +32,15 @@ export const commands = {
 	 */
 	remoteAgentOauthCancel: (qrId: string) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("remote_agent_oauth_cancel", { qrId })),
 	remoteAgentLogout: () => typedError<ApiResult<null>, string>(__TAURI_INVOKE("remote_agent_logout")),
-	remoteAgentHosts: (connection: ConnectionRef) => typedError<ApiResult<HostInfo[]>, string>(__TAURI_INVOKE("remote_agent_hosts", { connection })),
+	remoteAgentHosts: (connection: ConnectionRef) => typedError<ApiResult<HostInfo_Serialize[]>, string>(__TAURI_INVOKE("remote_agent_hosts", { connection })),
 	remoteAgentHostIdentity: (host: HostRef) => typedError<ApiResult<RemoteAgentHostIdentity>, string>(__TAURI_INVOKE("remote_agent_host_identity", { host })),
 	remoteAgentTrustHost: (host: HostRef, expectedFingerprint: string) => typedError<ApiResult<ConnectionInfo>, string>(__TAURI_INVOKE("remote_agent_trust_host", { host, expectedFingerprint })),
-	remoteAgentWorkspaces: (host: HostRef) => typedError<ApiResult<WorkspaceInfo[]>, string>(__TAURI_INVOKE("remote_agent_workspaces", { host })),
+	remoteAgentWorkspaces: (host: HostRef) => typedError<ApiResult<WorkspaceInfo_Serialize[]>, string>(__TAURI_INVOKE("remote_agent_workspaces", { host })),
 	remoteAgentSessions: (workspace: WorkspaceRef) => typedError<ApiResult<SessionInfo[]>, string>(__TAURI_INVOKE("remote_agent_sessions", { workspace })),
 	remoteAgentReadSession: (session: SessionRef) => typedError<ApiResult<SessionSnapshot_Serialize>, string>(__TAURI_INVOKE("remote_agent_read_session", { session })),
 	remoteAgentSessionModels: (session: SessionRef) => typedError<ApiResult<RemoteSessionModels_Serialize | null>, string>(__TAURI_INVOKE("remote_agent_session_models", { session })),
+	/**  Host-global model catalog for the picker before any session exists. */
+	remoteAgentHostModels: (host: HostRef) => typedError<ApiResult<RemoteSessionModels_Serialize | null>, string>(__TAURI_INVOKE("remote_agent_host_models", { host })),
 	remoteAgentExecute: (request: OperationRequest_Deserialize) => typedError<ApiResult<OperationOutcome_Serialize>, string>(__TAURI_INVOKE("remote_agent_execute", { request })),
 	remoteAgentReceipt: (connection: ConnectionRef, operationId: OperationId) => typedError<ApiResult<ReceiptLookup_Serialize>, string>(__TAURI_INVOKE("remote_agent_receipt", { connection, operationId })),
 	/**  Read this device's journal without refreshing credentials or contacting a Host. */
@@ -3251,6 +3253,15 @@ export type ContextRequest_Serialize = {
 /**  Where the turn started. Quick Chat and the sidebar share one resolver. */
 export type ContextSurface = "quick_chat" | "sidebar";
 
+/**
+ *  Host-reported context pressure for the current session, in tokens.
+ *  Absence means the Host did not project usage; never guess a window size.
+ */
+export type ContextUsage = {
+	used: number,
+	size: number,
+};
+
 export type CoolPapersImportArgs = {
 	vaultPath: string,
 	/**  Vault-relative destination, e.g. `papers` or `papers/nlp`. */
@@ -3683,25 +3694,35 @@ export type EventPayload = EventPayload_Serialize | EventPayload_Deserialize;
 
 export type EventPayload_Deserialize = ({ type: "message"; role: string; text: string;
 /**  Model reasoning attached to this reply; rendered as a disclosure. */
-reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; requestId?: never; state?: never; status?: never } |
+reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoningDelta?: never; requestId?: never; state?: never; status?: never; textDelta?: never } |
 /**
  *  One native tool invocation. `call` and `result` share the same source ID
  *  so clients fold them into a single activity row.
  */
 ({ type: "tool"; callId: string; name: string;
 /**  `running`, `finished` or `failed`. */
-state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; status?: never; text?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never };
+state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; status?: never; text?: never; textDelta?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } |
+/**
+ *  One live assistant streaming row. Deltas concatenate onto the current
+ *  assistant turn; the final durable message replaces the streamed text.
+ */
+({ type: "assistantChunk"; textDelta?: string | null; reasoningDelta?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never };
 
 export type EventPayload_Serialize = ({ type: "message"; role: string; text: string;
 /**  Model reasoning attached to this reply; rendered as a disclosure. */
-reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; requestId?: never; state?: never; status?: never } |
+reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoningDelta?: never; requestId?: never; state?: never; status?: never; textDelta?: never } |
 /**
  *  One native tool invocation. `call` and `result` share the same source ID
  *  so clients fold them into a single activity row.
  */
 ({ type: "tool"; callId: string; name: string;
 /**  `running`, `finished` or `failed`. */
-state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; status?: never; text?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; text?: never };
+state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; status?: never; text?: never; textDelta?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } |
+/**
+ *  One live assistant streaming row. Deltas concatenate onto the current
+ *  assistant turn; the final durable message replaces the streamed text.
+ */
+({ type: "assistantChunk"; textDelta?: string | null; reasoningDelta?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never };
 
 /**
  *  Where a job's business logic executes: in a Rust runner ([`ExecHost::Host`])
@@ -3885,7 +3906,9 @@ export type HostDoctorReport_Serialize = {
 
 export type HostId = string;
 
-export type HostInfo = {
+export type HostInfo = HostInfo_Serialize | HostInfo_Deserialize;
+
+export type HostInfo_Deserialize = {
 	host: HostRef,
 	name: string,
 	/**
@@ -3895,6 +3918,22 @@ export type HostInfo = {
 	online: boolean | null,
 	/**  This device has already approved and pinned the Host's current identity. */
 	pinned?: boolean,
+	/**  Host home directory from the native ready frame, once connected. */
+	home?: string | null,
+};
+
+export type HostInfo_Serialize = {
+	host: HostRef,
+	name: string,
+	/**
+	 *  `None` when the Server did not report presence and the descriptor lookup
+	 *  failed; absence is not an offline verdict.
+	 */
+	online: boolean | null,
+	/**  This device has already approved and pinned the Host's current identity. */
+	pinned: boolean,
+	/**  Host home directory from the native ready frame, once connected. */
+	home?: string | null,
 };
 
 export type HostRef = {
@@ -4973,9 +5012,19 @@ export type MobileWindowRoute = {
 
 export type Mutation = Mutation_Serialize | Mutation_Deserialize;
 
-export type Mutation_Deserialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; optionId?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Deserialize }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; optionId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
+export type Mutation_Deserialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } |
+/**
+ *  Open (or reuse) the Host workspace for an absolute directory before
+ *  creating a session in it. Reuse is read-only; creation is journaled.
+ */
+({ type: "ensureWorkspace"; host: HostRef; path: string }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Deserialize }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; host?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; host?: never; optionId?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
 
-export type Mutation_Serialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; optionId?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Serialize }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; optionId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
+export type Mutation_Serialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } |
+/**
+ *  Open (or reuse) the Host workspace for an absolute directory before
+ *  creating a session in it. Reuse is read-only; creation is journaled.
+ */
+({ type: "ensureWorkspace"; host: HostRef; path: string }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Serialize }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; host?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; host?: never; optionId?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
 
 export type NetworkDoctorReport = NetworkDoctorReport_Serialize | NetworkDoctorReport_Deserialize;
 
@@ -5071,7 +5120,7 @@ export type OpenWithApp = {
 /**  Menu grouping/fallback-glyph hint for one entry. */
 export type OpenWithKind = "fileManager" | "editor" | "terminal";
 
-export type OperationContext = { type: "createSession"; workspace: WorkspaceRef } | { type: "sendMessage"; session: SessionRef } | { type: "cancel"; session: SessionRef } | { type: "selectModel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string } | { type: "uploadAttachment"; session: SessionRef };
+export type OperationContext = { type: "createSession"; workspace: WorkspaceRef } | { type: "ensureWorkspace"; host: HostRef; path: string } | { type: "sendMessage"; session: SessionRef } | { type: "cancel"; session: SessionRef } | { type: "selectModel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string } | { type: "uploadAttachment"; session: SessionRef };
 
 export type OperationId = string;
 
@@ -5103,9 +5152,13 @@ export type OperationRequest_Serialize = {
 
 export type OperationResult = OperationResult_Serialize | OperationResult_Deserialize;
 
-export type OperationResult_Deserialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Deserialize }) & { attachment?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never };
+export type OperationResult_Deserialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never; workspace?: never } |
+/**  The Host workspace for the requested directory exists (reused or created). */
+({ type: "workspaceEnsured"; workspace: WorkspaceRef }) & { attachment?: never; selected?: never; session?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never; workspace?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Deserialize }) & { attachment?: never; workspace?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never; workspace?: never };
 
-export type OperationResult_Serialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Serialize }) & { attachment?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never };
+export type OperationResult_Serialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never; workspace?: never } |
+/**  The Host workspace for the requested directory exists (reused or created). */
+({ type: "workspaceEnsured"; workspace: WorkspaceRef }) & { attachment?: never; selected?: never; session?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never; workspace?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Serialize }) & { attachment?: never; workspace?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never; workspace?: never };
 
 /**
  *  Which side wins a manual overwrite. `RemoteToLocal` mirrors the remote
@@ -6508,6 +6561,8 @@ export type SessionSnapshot_Deserialize = {
 	 *  baseline. Adapters implement this using their official history/streams.
 	 */
 	cursor: EventCursor | null,
+	/**  Latest projected context usage from the official snapshot, if any. */
+	contextUsage?: ContextUsage | null,
 };
 
 export type SessionSnapshot_Serialize = {
@@ -6518,6 +6573,8 @@ export type SessionSnapshot_Serialize = {
 	 *  baseline. Adapters implement this using their official history/streams.
 	 */
 	cursor: EventCursor | null,
+	/**  Latest projected context usage from the official snapshot, if any. */
+	contextUsage?: ContextUsage | null,
 };
 
 export type SettingsChangedEvent = SettingsChangedEvent_Serialize | SettingsChangedEvent_Deserialize;
@@ -8060,9 +8117,20 @@ export type WorkspaceCliRequestEvent = WorkspaceRequest;
 
 export type WorkspaceId = string;
 
-export type WorkspaceInfo = {
+export type WorkspaceInfo = WorkspaceInfo_Serialize | WorkspaceInfo_Deserialize;
+
+export type WorkspaceInfo_Deserialize = {
 	workspace: WorkspaceRef,
 	name: string,
+	/**  Absolute Host-side directory when the official baseline reports one. */
+	path?: string | null,
+};
+
+export type WorkspaceInfo_Serialize = {
+	workspace: WorkspaceRef,
+	name: string,
+	/**  Absolute Host-side directory when the official baseline reports one. */
+	path?: string | null,
 };
 
 /**  Backend is part of identity: Harness, ACP and Codex IDs never alias. */

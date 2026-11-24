@@ -24,7 +24,7 @@ import type {
 import type { AgentSessionRuntime } from "@/components/agent/hooks/use-agent-session-runtime";
 import type { QueuedPrompt } from "@/components/agent/types";
 import type { SessionComposerStateApi } from "@/hooks/use-session-composer-state";
-import { formatLocaleTimestamp } from "@/i18n";
+import i18n, { formatLocaleTimestamp } from "@/i18n";
 import {
 	type AgentListResponse,
 	type AgentModeChoice,
@@ -36,6 +36,7 @@ import {
 	loadReasoningEffortPref,
 	markModelPicked,
 	type PromptImage,
+	type RunOnceAccepted,
 	runOnce,
 	takeModelPickForce,
 } from "@/lib/agent";
@@ -96,6 +97,7 @@ import {
 	takeVisualDrafts,
 	visualDraftsForSession,
 } from "@/lib/agent/visual-context-store";
+import { notifyAction, notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import type { PaperMetadata } from "@/lib/paper";
 import {
@@ -105,6 +107,10 @@ import {
 } from "@/lib/pdf/agent-trace";
 import { bindAskThreadsForTurn } from "@/lib/pdf/ask";
 import { nextLineId } from "@/lib/pdf-visual/ids";
+import {
+	type RemoteAgentTransport,
+	RemoteOperationUnconfirmedError,
+} from "@/lib/remote-agent/agent-transport";
 import { loadSettings } from "@/lib/settings";
 
 export type SendOptions = {
@@ -119,6 +125,8 @@ export type SendOptions = {
 	visualDrafts?: PdfVisualDraft[];
 	/** Composer image attachments (paste / file pick), frozen or live. */
 	images?: PromptImage[];
+	files?: File[];
+	contextNote?: string;
 	/**
 	 * Explicit pin binding for follow-ups (pin modal continue). Preferred
 	 * over reading sessionHistoryRef which may lag store upserts.
@@ -158,6 +166,8 @@ export type AgentTurnConfig = {
 };
 
 export type UseAgentSendOptions = {
+	transport?: RemoteAgentTransport | null;
+	agentListenersReady?: boolean;
 	refs: Pick<
 		AgentPanelRefs,
 		| "activeConversationRef"
@@ -205,6 +215,8 @@ export type AgentSend = {
 		text: string,
 		workflow?: string,
 		images?: PromptImage[],
+		files?: File[],
+		contextNote?: string,
 	) => Promise<boolean>;
 	messageQueue: QueuedPrompt[];
 	removeQueuedMessage: (id: string) => void;
@@ -227,6 +239,8 @@ export type AgentSend = {
 };
 
 export function useAgentSend({
+	transport,
+	agentListenersReady,
 	refs: {
 		activeConversationRef,
 		activeTabRef,
@@ -364,6 +378,7 @@ export function useAgentSend({
 			return null;
 		}
 		// Keep switcher/ref in sync when the turn forces another agent.
+		if (transport && agentId !== transport.agentId) return null;
 		if (agentId !== selectedAgentIdRef.current) {
 			selectedAgentIdRef.current = agentId;
 			setSelectedAgentId(agentId);
@@ -452,6 +467,9 @@ export function useAgentSend({
 	};
 
 	/** Assemble and dispatch the runOnce request for a resolved turn. */
+	const cancelRun = (id: string) =>
+		transport ? transport.cancel(id) : cancelAgentRun(id);
+
 	const startTurn = async (turn: {
 		agentId: string;
 		resumeSessionId: string | undefined;
@@ -465,7 +483,43 @@ export function useAgentSend({
 		skillIds: string[];
 		context: ReturnType<typeof sidebarContextRequest>;
 		resumeTranscript?: string;
-	}) => {
+		historyTitle: string;
+		files?: File[];
+		contextNote?: string;
+	}): Promise<
+		RunOnceAccepted & {
+			providerSessionId?: string;
+			follow?: () => void;
+			abandon?: () => void;
+		}
+	> => {
+		if (transport) {
+			const quotes =
+				turn.context?.anchors.flatMap((anchor) =>
+					anchor.quote ? [anchor.quote] : [],
+				) ?? [];
+			const context = quotes.length
+				? `\n\nSelected text from the paper:\n${quotes.join("\n\n")}`
+				: "";
+			return transport.run(
+				{
+					sessionId: turn.resumeSessionId,
+					prompt: [
+						turn.contextNote,
+						turn.prompt &&
+							'For a compact visual answer, Agentero supports an optional `openui-lang` fenced block, for example `root = Stack([Text("Summary")])`. Prefer Markdown when it is sufficient.',
+						turn.prompt && `User request:\n${turn.prompt}${context}`,
+					]
+						.filter(Boolean)
+						.join("\n\n"),
+					images: turn.images,
+					files: turn.files,
+					modelId: turn.resumeSessionId ? undefined : turn.modelId,
+					title: turn.historyTitle,
+				},
+				crypto.randomUUID(),
+			);
+		}
 		// The explicit pick is a one-shot. Re-arm it when dispatch fails so a
 		// retried turn still forces the set instead of deduping against the
 		// adapter's possibly-wrong current (#1087).
@@ -557,6 +611,7 @@ export function useAgentSend({
 		binding: ReturnType<typeof visualTraceBinding>;
 		sessionStartLines: ChatLine[];
 		submittedComposerState: AgentComposerState;
+		providerSessionId?: string;
 	}) => {
 		const agentLine: ChatLine = {
 			id: nextLineId("agent"),
@@ -591,7 +646,8 @@ export function useAgentSend({
 			lines: historyLines,
 			status: "running",
 			// Carry over pin session provider id until completed event.
-			providerSessionId: turn.activeHistory?.providerSessionId ?? null,
+			providerSessionId:
+				turn.providerSessionId ?? turn.activeHistory?.providerSessionId ?? null,
 			resumeable: true,
 			...(turn.binding.boundVisualTraceId
 				? { visualTraceId: turn.binding.boundVisualTraceId }
@@ -669,6 +725,8 @@ export function useAgentSend({
 			(img) => img.data.trim().length > 0,
 		);
 		const hasAttachedImages = attachedImages.length > 0;
+		const files = options?.files;
+		const contextNote = options?.contextNote;
 		const fromQueue = options?.fromQueue === true;
 		const snap = snapshotComposerState();
 		const hasInlineContext =
@@ -676,7 +734,12 @@ export function useAgentSend({
 			snap.selectedSkillIds.length > 0 ||
 			(snap.includeSelectedFile && Boolean(selectedVaultPath));
 		if (
-			(!text && !hasVisualDrafts && !hasAttachedImages && !hasInlineContext) ||
+			(!text &&
+				!hasVisualDrafts &&
+				!hasAttachedImages &&
+				!files?.length &&
+				!contextNote &&
+				!hasInlineContext) ||
 			activeTabIsRunning ||
 			switchingRef.current ||
 			submittingRef.current
@@ -723,6 +786,8 @@ export function useAgentSend({
 				return false;
 			}
 
+			if (transport !== undefined && (!transport || !agentListenersReady))
+				return false;
 			const forceNewSession = options?.forceNewSession === true;
 			const agent = await resolveTurnAgentAndModel(options, forceNewSession);
 			if (!agent) return false;
@@ -744,9 +809,9 @@ export function useAgentSend({
 			// files; injecting the read-instruction block would leak local paths to
 			// a third-party service, so drop the auto-added context entirely and
 			// send only public paper metadata instead.
-			const chatOnly = isChatOnlyAgentTemplate(
-				agentTemplateById(registry, agent.agentId),
-			);
+			const chatOnly =
+				Boolean(transport) ||
+				isChatOnlyAgentTemplate(agentTemplateById(registry, agent.agentId));
 			const turnContextPaths = chatOnly ? [] : resolvedContextPaths;
 			// Chat-only agents get the focused paper's public metadata (never a
 			// local path) so they can answer about "this paper".
@@ -755,20 +820,26 @@ export function useAgentSend({
 				turnContextPaths,
 				isAcpCommand,
 			);
-			const { prompt, images, visualAnnotations, historyTitle } =
-				assembleTurnPrompt({
-					// ACP command chips already collapsed into `turnText`; keep the raw
-					// draft for mention / visual markers on normal turns.
-					text: isAcpCommand ? turnText : textRaw,
-					contextPaths: turnContextPaths,
-					paper: turnPaper,
-					visualDrafts: resolvedVisualDrafts,
-					attachedImages,
-					isAcpCommand,
-					plazaScratchByPath,
-					t,
-				});
+			const {
+				prompt,
+				images,
+				visualAnnotations,
+				historyTitle: promptTitle,
+			} = assembleTurnPrompt({
+				// ACP command chips already collapsed into `turnText`; keep the raw
+				// draft for mention / visual markers on normal turns.
+				text: isAcpCommand ? turnText : textRaw,
+				contextPaths: turnContextPaths,
+				paper: turnPaper,
+				visualDrafts: resolvedVisualDrafts,
+				attachedImages,
+				isAcpCommand,
+				plazaScratchByPath,
+				t,
+			});
+			const historyTitle = promptTitle || files?.[0]?.name || "";
 			const attachTranscript =
+				(!transport || !target.resumeAllowed) &&
 				!isAcpCommand &&
 				shouldAttachLocalTranscript({
 					resumeAllowed: target.resumeAllowed,
@@ -789,7 +860,9 @@ export function useAgentSend({
 			const userLine: ChatLine = {
 				id: nextLineId("user"),
 				kind: "user",
-				text: turnText,
+				text: [turnText, files?.map((file) => file.name).join(", ")]
+					.filter(Boolean)
+					.join("\n\n"),
 				...(markup ? { markup } : {}),
 				...(visualAnnotations?.length ? { visualAnnotations } : {}),
 				...(resolvedSelections.length
@@ -802,7 +875,7 @@ export function useAgentSend({
 				...(attachedImages.length ? { images: attachedImages } : {}),
 			};
 			const sessionStartLines = [...target.priorLines, userLine];
-			setLines(sessionStartLines);
+			if (!transport) setLines(sessionStartLines);
 			// Terminal/stream events are correlated by the fresh Agentero runtime
 			// id, not the provider id used to resume ACP. Keep this empty until the
 			// host accepts the request, then bind it to accepted.sessionId below.
@@ -834,6 +907,9 @@ export function useAgentSend({
 							),
 						}),
 				resumeTranscript,
+				historyTitle,
+				files,
+				contextNote,
 			});
 			if (
 				sessionContextGeneration !== sessionContextGenRef.current ||
@@ -841,7 +917,8 @@ export function useAgentSend({
 			) {
 				pendingTerminalEventsRef.current.delete(accepted.sessionId);
 				pendingSessionEventsRef.current.delete(accepted.sessionId);
-				void cancelAgentRun(accepted.sessionId).catch(() => undefined);
+				accepted.abandon?.();
+				void cancelRun(accepted.sessionId).catch(() => undefined);
 				return false;
 			}
 			knownSessionIdsRef.current.add(accepted.sessionId);
@@ -883,7 +960,9 @@ export function useAgentSend({
 				binding,
 				sessionStartLines,
 				submittedComposerState,
+				providerSessionId: accepted.providerSessionId,
 			});
+			accepted.follow?.();
 			return replayDeferredEvents(
 				accepted.sessionId,
 				pendingSessionEvents,
@@ -894,7 +973,32 @@ export function useAgentSend({
 				sessionContextGeneration === sessionContextGenRef.current &&
 				requestVaultPath === vaultPathRef.current
 			) {
-				setLines((p) => [...p, errorChatLine(errorText(e))]);
+				if (transport && e instanceof RemoteOperationUnconfirmedError) {
+					notifyError(i18n.t("mobile:remote.unknownOutcome"), {
+						action: {
+							label: i18n.t("mobile:remote.inspectReceipt"),
+							onClick: () => {
+								void transport
+									.reviewUnknownOperations(e.target)
+									.then((review) => {
+										if (!review.unknownCount) {
+											notifyAction(i18n.t("mobile:remote.receiptFound"), {
+												actionLabel: i18n.t("agent:history.label"),
+												onAction: () => setHistoryOpen(true),
+											});
+											return;
+										}
+										notifyAction(i18n.t("mobile:remote.unknownOutcome"), {
+											actionLabel: i18n.t("mobile:remote.continueNewTask"),
+											onAction: review.allowNewActions,
+										});
+									})
+									.catch((error) => notifyError(errorText(error)));
+							},
+						},
+					});
+				} else if (transport) notifyError(errorText(e));
+				else setLines((p) => [...p, errorChatLine(errorText(e))]);
 			}
 			return false;
 		} finally {
@@ -906,7 +1010,13 @@ export function useAgentSend({
 	};
 
 	const enqueueMessage = useCallback(
-		(textRaw: string, workflow?: string, images?: PromptImage[]): boolean => {
+		(
+			textRaw: string,
+			workflow?: string,
+			images?: PromptImage[],
+			files?: File[],
+			contextNote?: string,
+		): boolean => {
 			const text = stripInlineTokens(textRaw).trim();
 			const draftSessionKey = activeVisualDraftSessionKey();
 			const referencedVisualDrafts = visualDraftsInAnnotationOrder(
@@ -923,6 +1033,8 @@ export function useAgentSend({
 				(!text &&
 					!referencedVisualDrafts.length &&
 					!attached.length &&
+					!files?.length &&
+					!contextNote &&
 					!hasInlineContext) ||
 				switchingRef.current
 			) {
@@ -951,6 +1063,8 @@ export function useAgentSend({
 					inlineSelections.length > 0 ? inlineSelections : consumeSelections(),
 				visualDrafts: frozenVisualDrafts,
 				...(attached.length ? { images: attached } : {}),
+				files,
+				contextNote,
 			};
 			setMessageQueue((prev) => [...prev, item]);
 			// Mirror post-submit composer cleanup for the queued turn.
@@ -984,13 +1098,15 @@ export function useAgentSend({
 		textRaw: string,
 		workflow?: string,
 		images?: PromptImage[],
+		files?: File[],
+		contextNote?: string,
 	): Promise<boolean> => {
 		if (switchingRef.current || submittingRef.current) return false;
 		resetPromptHistoryBrowse();
 		if (activeTabIsRunning) {
-			return enqueueMessage(textRaw, workflow, images);
+			return enqueueMessage(textRaw, workflow, images, files, contextNote);
 		}
-		return send(textRaw, { workflow, images });
+		return send(textRaw, { workflow, images, files, contextNote });
 	};
 
 	/**
@@ -1033,7 +1149,7 @@ export function useAgentSend({
 		const sessionId = activeTabId;
 		if (!sessionId || !isTauri()) return true;
 		try {
-			await cancelAgentRun(sessionId);
+			await cancelRun(sessionId);
 		} catch (error) {
 			// Leave the queued answer; user can still stop the run manually.
 			setLines((prev) => [...prev, errorChatLine(errorText(error))]);
@@ -1285,6 +1401,8 @@ export function useAgentSend({
 					selections: head.selections,
 					visualDrafts: head.visualDrafts,
 					images: head.images,
+					files: head.files,
+					contextNote: head.contextNote,
 					fromQueue: true,
 				});
 			} finally {
@@ -1297,7 +1415,7 @@ export function useAgentSend({
 		const sessionId = activeTabIsRunning ? activeTabId : null;
 		if (!sessionId || !isTauri()) return;
 		try {
-			await cancelAgentRun(sessionId);
+			await cancelRun(sessionId);
 			// Drop promoted tool-ask form for this turn.
 			setToolAskUserRequest((prev) =>
 				prev?.sessionId === sessionId ? null : prev,

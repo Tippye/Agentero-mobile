@@ -21,6 +21,10 @@ pub enum OperationContext {
     CreateSession {
         workspace: WorkspaceRef,
     },
+    EnsureWorkspace {
+        host: HostRef,
+        path: String,
+    },
     SendMessage {
         session: SessionRef,
     },
@@ -43,21 +47,32 @@ pub enum OperationContext {
     },
 }
 impl OperationContext {
-    pub fn workspace(&self) -> &WorkspaceRef {
+    pub fn workspace(&self) -> Option<&WorkspaceRef> {
         match self {
-            Self::CreateSession { workspace } => workspace,
+            Self::CreateSession { workspace } => Some(workspace),
+            Self::EnsureWorkspace { .. } => None,
             Self::SendMessage { session }
             | Self::Cancel { session }
             | Self::SelectModel { session }
             | Self::RespondPermission { session, .. }
             | Self::RespondQuestion { session, .. }
-            | Self::UploadAttachment { session } => &session.workspace,
+            | Self::UploadAttachment { session } => Some(&session.workspace),
+        }
+    }
+    pub fn host(&self) -> &HostRef {
+        match self {
+            Self::EnsureWorkspace { host, .. } => host,
+            other => &other.workspace().expect("workspace-scoped context").host,
         }
     }
     pub fn from_mutation(mutation: &Mutation) -> Self {
         match mutation {
             Mutation::CreateSession { workspace, .. } => Self::CreateSession {
                 workspace: workspace.clone(),
+            },
+            Mutation::EnsureWorkspace { host, path } => Self::EnsureWorkspace {
+                host: host.clone(),
+                path: path.clone(),
             },
             Mutation::SendMessage { session, .. } => Self::SendMessage {
                 session: session.clone(),
@@ -187,7 +202,7 @@ impl JournalEntry {
         let request_digest = hex::encode(Sha256::digest(raw));
         let entry = Self {
             version: JOURNAL_VERSION,
-            connection: request.mutation.workspace().host.connection.clone(),
+            connection: request.mutation.host().connection.clone(),
             operation_id: request.operation_id.clone(),
             request_digest: Some(request_digest),
             context: Some(OperationContext::from_mutation(&request.mutation)),
@@ -223,12 +238,18 @@ impl JournalEntry {
             }
         }
         if let Some(context) = &self.context {
-            super::service::workspace_ref(context.workspace())?;
-            if context.workspace().host.connection != self.connection {
+            super::service::host_ref(context.host())?;
+            if context.host().connection != self.connection {
                 return Err(invalid_record());
+            }
+            if let Some(workspace) = context.workspace() {
+                super::service::workspace_ref(workspace)?;
             }
             match context {
                 OperationContext::CreateSession { .. } => {}
+                OperationContext::EnsureWorkspace { path, .. } => {
+                    super::service::workspace_path(path)?;
+                }
                 OperationContext::RespondPermission {
                     session,
                     request_id,
@@ -291,6 +312,9 @@ impl JournalEntry {
                     workspace: session.workspace.clone(),
                 }),
                 OperationOutcome::Succeeded {
+                    result: OperationResult::WorkspaceEnsured { .. },
+                } => None, // Host-level ensure needs its original path; never guess it.
+                OperationOutcome::Succeeded {
                     result: OperationResult::AttachmentUploaded { attachment },
                 } => Some(OperationContext::UploadAttachment {
                     session: attachment.session.clone(),
@@ -329,6 +353,18 @@ pub(super) fn validate_context_outcome(
                 }
             }
         }
+        OperationResult::WorkspaceEnsured { workspace } => {
+            super::service::workspace_ref(workspace)?;
+            if &workspace.host.connection != connection {
+                return Err(super::service::boundary());
+            }
+            if let Some(context) = context {
+                if !matches!(context, OperationContext::EnsureWorkspace { host, .. } if host == &workspace.host)
+                {
+                    return Err(super::service::boundary());
+                }
+            }
+        }
         OperationResult::AttachmentUploaded { attachment } => {
             super::service::session_ref(&attachment.session)?;
             super::service::identifier(&attachment.path)?;
@@ -360,6 +396,7 @@ pub(super) fn validate_context_outcome(
                 context,
                 Some(
                     OperationContext::CreateSession { .. }
+                        | OperationContext::EnsureWorkspace { .. }
                         | OperationContext::UploadAttachment { .. }
                         | OperationContext::SelectModel { .. }
                 )

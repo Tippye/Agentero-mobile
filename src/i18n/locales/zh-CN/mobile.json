@@ -241,7 +241,7 @@
 		"message": "向远程 Agent 发送任务",
 		"send": "发送",
 		"cancel": "取消远程执行",
-		"uploadPrivate": "上传已导入应用私有存储的文件",
+		"uploadPrivate": "添加附件",
 		"permission": "需要审批",
 		"allowOnce": "仅允许本次",
 		"reject": "拒绝",
@@ -249,6 +249,7 @@
 		"answer": "提交回答",
 		"skipQuestion": "跳过此问题",
 		"inspectReceipt": "查询回执",
+		"receiptFound": "已查询回执。请先检查会话历史，再继续操作。",
 		"unknownOutcome": "此操作可能已经执行。请先核对回执与历史再开始其他任务，原操作不会自动重发。",
 		"continueNewTask": "已核对历史，继续新任务",
 		"status": {

@@ -3,6 +3,7 @@ import type { PromptImage } from "@/lib/agent/api";
 import type { ChatSessionHistoryItem } from "@/lib/agent/chat-state";
 import type { SelectionContext } from "@/lib/agent/selection-store";
 import type { PdfVisualDraft } from "@/lib/agent/visual-context-store";
+import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
 import type { PaperMetadata, PaperTreeLabelMode } from "@/lib/paper";
 
 /** Follow-up prompts waiting until the active run finishes. */
@@ -20,10 +21,17 @@ export type QueuedPrompt = {
 	visualDrafts: PdfVisualDraft[];
 	/** Composer image attachments frozen when the user queued the message. */
 	images?: PromptImage[];
+	files?: File[];
+	contextNote?: string;
 };
 
 export type AgentPanelProps = {
 	vaultPath: string | null;
+	remoteOnly?: boolean;
+	active?: boolean;
+	backendControl?: ReactNode;
+	regionContext?: MobilePaperRegionContext | null;
+	onRegionContextHandled?: (id: string) => void;
 	selectedPath?: string | null;
 	/**
 	 * Catalog title for the focused paper (chip label prefers this over folder name).

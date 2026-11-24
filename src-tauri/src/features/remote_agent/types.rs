@@ -143,6 +143,9 @@ pub struct HostInfo {
     /// This device has already approved and pinned the Host's current identity.
     #[serde(default)]
     pub pinned: bool,
+    /// Host home directory from the native ready frame, once connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -150,6 +153,9 @@ pub struct HostInfo {
 pub struct WorkspaceInfo {
     pub workspace: WorkspaceRef,
     pub name: String,
+    /// Absolute Host-side directory when the official baseline reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -305,6 +311,14 @@ pub enum EventPayload {
         request_id: String,
         questions: Vec<Question>,
     },
+    /// One live assistant streaming row. Deltas concatenate onto the current
+    /// assistant turn; the final durable message replaces the streamed text.
+    AssistantChunk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_delta: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_delta: Option<String>,
+    },
     ConnectionStatus {
         status: ConnectionStatus,
     },
@@ -322,6 +336,15 @@ pub struct RemoteEvent {
     pub payload: EventPayload,
 }
 
+/// Host-reported context pressure for the current session, in tokens.
+/// Absence means the Host did not project usage; never guess a window size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub used: u64,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
@@ -330,6 +353,9 @@ pub struct SessionSnapshot {
     /// A subscription opened with this token must cover changes after this
     /// baseline. Adapters implement this using their official history/streams.
     pub cursor: Option<EventCursor>,
+    /// Latest projected context usage from the official snapshot, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -362,6 +388,12 @@ pub enum Mutation {
         workspace: WorkspaceRef,
         title: Option<String>,
     },
+    /// Open (or reuse) the Host workspace for an absolute directory before
+    /// creating a session in it. Reuse is read-only; creation is journaled.
+    EnsureWorkspace {
+        host: HostRef,
+        path: String,
+    },
     SendMessage {
         session: SessionRef,
         text: String,
@@ -390,21 +422,32 @@ pub enum Mutation {
 }
 
 impl Mutation {
-    pub fn workspace(&self) -> &WorkspaceRef {
+    /// Workspace scope for workspace/session mutations; `None` for host-level
+    /// mutations such as EnsureWorkspace.
+    pub fn workspace(&self) -> Option<&WorkspaceRef> {
         match self {
-            Self::CreateSession { workspace, .. } => workspace,
+            Self::CreateSession { workspace, .. } => Some(workspace),
+            Self::EnsureWorkspace { .. } => None,
             Self::SendMessage { session, .. }
             | Self::Cancel { session }
             | Self::SelectModel { session, .. }
             | Self::RespondPermission { session, .. }
-            | Self::RespondQuestion { session, .. } => &session.workspace,
-            Self::UploadAttachment { upload } => &upload.session.workspace,
+            | Self::RespondQuestion { session, .. } => Some(&session.workspace),
+            Self::UploadAttachment { upload } => Some(&upload.session.workspace),
+        }
+    }
+
+    /// Host scope shared by every mutation, including host-level ones.
+    pub fn host(&self) -> &HostRef {
+        match self {
+            Self::EnsureWorkspace { host, .. } => host,
+            other => &other.workspace().expect("workspace-scoped mutation").host,
         }
     }
 
     pub fn capability(&self) -> Capability {
         match self {
-            Self::CreateSession { .. } => Capability::CreateSession,
+            Self::CreateSession { .. } | Self::EnsureWorkspace { .. } => Capability::CreateSession,
             Self::SendMessage { .. } => Capability::SendMessage,
             Self::Cancel { .. } => Capability::Cancel,
             Self::SelectModel { .. } => Capability::SelectModel,
@@ -431,6 +474,10 @@ pub struct OperationRequest {
 pub enum OperationResult {
     SessionCreated {
         session: SessionRef,
+    },
+    /// The Host workspace for the requested directory exists (reused or created).
+    WorkspaceEnsured {
+        workspace: WorkspaceRef,
     },
     AttachmentUploaded {
         attachment: RemoteAttachment,

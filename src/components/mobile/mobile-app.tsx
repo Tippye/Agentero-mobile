@@ -21,6 +21,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import agenteroLogo from "@/assets/agentero-logo.svg";
+import { AgentPanel } from "@/components/agent/agent-panel";
 import { useBridgeStatus } from "@/components/mobile/hooks/use-bridge-status";
 import { useMobileAgents } from "@/components/mobile/hooks/use-mobile-agents";
 import { useMobileBackLayer } from "@/components/mobile/hooks/use-mobile-back-layer";
@@ -56,7 +57,6 @@ import { MobileReaderPage } from "@/components/mobile/mobile-reader-page";
 import { MobileSettingsPage } from "@/components/mobile/mobile-settings-page";
 import { MobileSidebar } from "@/components/mobile/mobile-sidebar";
 import { MobileTaskIndicator } from "@/components/mobile/mobile-task-indicator";
-import { MobileRemoteAgentPage } from "@/components/mobile/remote/mobile-remote-agent-page";
 import type { MobileReaderMode } from "@/components/mobile/types";
 import { SyncConflictDialog } from "@/components/settings/panes/sync-conflict-dialog";
 import { useSyncConflictReview } from "@/components/settings/panes/use-sync-conflict-review";
@@ -70,7 +70,6 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { SessionRef } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
@@ -144,7 +143,6 @@ export default function MobileApp() {
 	const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
 	const [historyOpen, setHistoryOpen] = useState(false);
 	const [agentProvider, setAgentProvider] = useState("ds-harness-remote");
-	const [remoteSession, setRemoteSession] = useState<SessionRef | null>(null);
 	const [regionContext, setRegionContext] =
 		useState<MobilePaperRegionContext | null>(null);
 	const regionContextRef = useRef<MobilePaperRegionContext | null>(null);
@@ -1006,7 +1004,9 @@ export default function MobileApp() {
 											}}
 											className="min-h-0 flex-1"
 										>
-											<MobileRemoteAgentPage
+											<AgentPanel
+												remoteOnly
+												vaultPath={vaultPath}
 												backendControl={
 													<MobileAgentToolbar
 														agents={agents}
@@ -1035,8 +1035,6 @@ export default function MobileApp() {
 													!paperImportOpen &&
 													!paperInfoOpen
 												}
-												selection={remoteSession}
-												onSelectionChange={setRemoteSession}
 												regionContext={regionContext}
 												onRegionContextHandled={handleRegionContext}
 											/>

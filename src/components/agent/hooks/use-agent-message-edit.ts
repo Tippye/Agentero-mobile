@@ -14,6 +14,7 @@ import {
 } from "@/lib/agent/composer-inline-tokens";
 
 export type UseAgentMessageEditOptions = {
+	forceNewOnResend?: boolean;
 	refs: Pick<
 		AgentPanelRefs,
 		| "activeTabRef"
@@ -42,6 +43,7 @@ export type AgentMessageEdit = {
 };
 
 export function useAgentMessageEdit({
+	forceNewOnResend = false,
 	refs: {
 		activeTabRef,
 		promptHistoryAppliedRef,
@@ -158,6 +160,7 @@ export function useAgentMessageEdit({
 				? retainTranscriptChips(text, original.markup)
 				: text;
 		await send(payload, {
+			forceNewSession: forceNewOnResend,
 			baseLines,
 			visualDrafts,
 			selections: original?.kind === "user" ? (original.selections ?? []) : [],

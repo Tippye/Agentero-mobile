@@ -12,7 +12,9 @@ dsh-remote（ds-harness-remote）默认只提供 GitHub、Google、知乎等第�
 
 新版 Server 的设备列表（`GET /api/v1/devices`）不再内联 `online`，在线状态改由 `GET /api/v1/devices/{id}/presence` 提供。客户端与官方 dsh-Go / app-core 一致：列出主机后逐台读取授权描述符（含 identityKey），描述符缺少 `online` 时再查 presence；查询失败只记为「状态未知」，绝不降级成离线。`HostInfo.online` 因此是可空布尔，UI 仅在明确 `false` 时禁用选择。已固定（pin）且密钥与 Server 一致的主机带 `pinned` 标记，列表显示盾牌图标；选中新主机后点击「信任并连接」即可确认。Rust 重新获取描述符，核对确认时捕获的指纹并固定该密钥。连接前 Relay 会再次核对描述符，明确离线的主机返回 `HOST_OFFLINE`。设备注册名使用 `Agentero (主机名)`，便于在其他客户端的设备列表中辨认。
 
-桌面和移动端可以从 Agent 面板的 ACP 后端菜单选择「远程 Agent → dsh-remote」。主机下拉菜单位于后端旁边。新会话使用主机列表中的第一个工作区，历史菜单可打开各工作区的会话。打开或新建会话后，模型菜单读取主机的模型列表，在主机确认后更新选择。操作回执在后台保留，会话仅提示需要处理的异常。
+桌面和移动端可以从 Agent 面板的 ACP 后端菜单选择「远程 Agent → dsh-remote」。主机下拉菜单位于后端旁边。远程和本地对话共用 Agent 面板的输入区、历史、消息、思考与工具卡片、审批、问答和 OpenUI 渲染。连接主机后，空白对话即可选择模型。主机支持 `workspace.upload.v1` 时，输入区可以添加文件，按下发送才上传。远程附件在提示词中以主机工作区相对路径传递。用户选中的论文区域也可作为图片随消息发送。
+
+论文会话在主机用户目录下的 `Agentero/Papers` 运行。v3 主机创建的会话没有所属项目。v1 主机使用独立的 `Papers` 工作区。历史菜单也可打开此前存放在 `Papers` 工作区的会话。主机提供上下文用量和容量时，输入区显示相同的上下文占用面板。操作回执在后台保留，会话仅提示需要处理的异常。
 
 移动端设置页另有「Agent」分区（[MobileAgentPane](../../../src/components/mobile/mobile-agent-pane.tsx)）：应用级 Agent 偏好 + 远程 Agent 连接模块；本地 CLI 安装、Node.js 工具与模型席位仍是桌面专属。
 

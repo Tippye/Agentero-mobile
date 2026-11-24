@@ -236,8 +236,8 @@ vi.mock("@/components/mobile/mobile-notes-editor", () => ({
 		});
 	},
 }));
-vi.mock("@/components/mobile/remote/mobile-remote-agent-page", () => ({
-	MobileRemoteAgentPage: (props: {
+vi.mock("@/components/agent/agent-panel", () => ({
+	AgentPanel: (props: {
 		backendControl?: ReactNode;
 		regionContext?: MobilePaperRegionContext | null;
 		onRegionContextHandled?: (id: string) => void;

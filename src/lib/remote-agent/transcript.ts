@@ -1,3 +1,4 @@
+import type { AcpHistoryLine, AcpHistoryPart } from "@/lib/agent/api";
 import type { RemoteEvent } from "@/lib/core/bindings";
 
 /** One renderable piece of a remote turn, mirroring desktop transcript parts. */
@@ -34,6 +35,179 @@ export function parseToolArguments(raw: string | null | undefined): unknown {
 }
 
 const PLACEHOLDER_TOOL_NAMES = new Set(["", "Tool"]);
+
+export function remoteToolStatus(state: string): string {
+	switch (state) {
+		case "finished":
+			return "completed";
+		case "failed":
+			return "failed";
+		default:
+			return "in_progress";
+	}
+}
+
+/** A durable chunk row and an active stream can expose the same model step. */
+export class RemoteAssistantText {
+	private rendered = "";
+	private chunks = "";
+	private stream = "";
+	private attempt = "";
+	private finalizedAttempt = "";
+	private settled = "";
+
+	chunk(sourceId: string, text: string): string {
+		if (sourceId.startsWith("stream:")) {
+			const attempt = sourceId.slice(0, sourceId.lastIndexOf(":"));
+			if (attempt === this.finalizedAttempt) return "";
+			if (attempt !== this.attempt) {
+				this.attempt = attempt;
+				this.stream = "";
+			}
+			this.stream += text;
+			return this.append(this.stream);
+		}
+		this.chunks += text;
+		return this.append(this.chunks);
+	}
+
+	message(text: string): string {
+		const suffix = this.append(text);
+		this.settled += text;
+		this.finalizedAttempt = this.attempt;
+		this.rendered = this.chunks = this.stream = "";
+		return suffix;
+	}
+
+	get content(): string {
+		return (
+			this.settled +
+			(this.chunks.startsWith(this.stream) ? this.chunks : this.stream)
+		);
+	}
+
+	private append(candidate: string): string {
+		if (!candidate.startsWith(this.rendered)) return "";
+		const suffix = candidate.slice(this.rendered.length);
+		this.rendered = candidate;
+		return suffix;
+	}
+}
+
+/** Fold durable messages and the final in-flight suffix into shared history. */
+export function remoteHistoryLines(events: RemoteEvent[]): AcpHistoryLine[] {
+	const lines: AcpHistoryLine[] = [];
+	let current: AcpHistoryLine | undefined;
+	let pending: AcpHistoryPart[] = [];
+	let thought = new RemoteAssistantText();
+	let answer = new RemoteAssistantText();
+	const tools = new Map<string, Extract<AcpHistoryPart, { type: "tool" }>>();
+	for (const { sourceStreamId, sourceId, payload } of events) {
+		const id = JSON.stringify([sourceStreamId, sourceId]);
+		if (payload.type === "message" && payload.role === "user") {
+			current = undefined;
+			lines.push({ id, kind: "user", text: payload.text });
+			continue;
+		}
+		if (payload.type === "taskStatus") {
+			if (["idle", "completed", "failed", "cancelled"].includes(payload.status))
+				current = undefined;
+			continue;
+		}
+		if (
+			payload.type !== "tool" &&
+			payload.type !== "assistantChunk" &&
+			!(payload.type === "message" && payload.role === "assistant")
+		)
+			continue;
+		if (payload.type === "tool") {
+			const key = JSON.stringify([sourceStreamId, payload.callId]);
+			const existing = tools.get(key);
+			if (existing) {
+				if (!PLACEHOLDER_TOOL_NAMES.has(payload.name))
+					existing.tool.title = payload.name;
+				if (payload.arguments != null)
+					existing.tool.input = parseToolArguments(payload.arguments);
+				if (payload.output != null) existing.tool.output = payload.output;
+				existing.tool.status = remoteToolStatus(payload.state);
+				continue;
+			}
+		}
+		if (!current) {
+			current = { id, kind: "agent", text: "", parts: [] };
+			pending = [];
+			thought = new RemoteAssistantText();
+			answer = new RemoteAssistantText();
+			lines.push(current);
+		}
+		if (payload.type === "tool") {
+			const part: Extract<AcpHistoryPart, { type: "tool" }> = {
+				type: "tool",
+				tool: {
+					id: payload.callId,
+					title: payload.name || "Tool",
+					kind: "other",
+					status: remoteToolStatus(payload.state),
+					input: parseToolArguments(payload.arguments),
+					output: payload.output ?? undefined,
+				},
+			};
+			tools.set(JSON.stringify([sourceStreamId, payload.callId]), part);
+			current.parts?.push(part);
+		} else {
+			const finalize = payload.type === "message";
+			const reasoning = finalize
+				? (payload.reasoning ?? "")
+				: (payload.reasoningDelta ?? "");
+			const text = finalize ? payload.text : (payload.textDelta ?? "");
+			if (finalize) {
+				// A durable assistant message supersedes its archived or streamed chunks.
+				current.parts = current.parts?.filter(
+					(part) => !pending.includes(part),
+				);
+				pending = [];
+				thought.message(reasoning);
+				answer.message(text);
+				if (reasoning)
+					current.parts?.push({ type: "reasoning", text: reasoning });
+				if (text) current.parts?.push({ type: "text", text });
+			} else {
+				appendHistoryChunk(
+					current.parts,
+					pending,
+					"reasoning",
+					thought.chunk(sourceId, reasoning),
+				);
+				appendHistoryChunk(
+					current.parts,
+					pending,
+					"text",
+					answer.chunk(sourceId, text),
+				);
+			}
+			current.reasoning = thought.content || undefined;
+			current.text = answer.content;
+		}
+	}
+	return lines;
+}
+
+function appendHistoryChunk(
+	parts: AcpHistoryPart[] | undefined,
+	pending: AcpHistoryPart[],
+	type: "text" | "reasoning",
+	text: string,
+): void {
+	if (!text) return;
+	const last = parts?.at(-1);
+	if (last?.type === type && pending.at(-1) === last) {
+		last.text += text;
+	} else {
+		const part = { type, text };
+		parts?.push(part);
+		pending.push(part);
+	}
+}
 
 /**
  * Fold a polled snapshot into desktop-shaped transcript rows. Tool call and
@@ -77,18 +251,29 @@ export function buildRemoteTranscript(
 					break;
 				}
 				const turn = openTurn(id);
+				// A streamed turn is finalized by its durable message: replace
+				// accumulated deltas instead of appending a second copy.
+				const streamed = turn.id !== id && (turn.text || turn.parts.length);
 				if (payload.reasoning) {
+					if (streamed) {
+						turn.parts = turn.parts.filter((part) => part.kind !== "reasoning");
+					}
 					turn.parts.push({
 						kind: "reasoning",
 						id: `${id}:reasoning`,
 						text: payload.reasoning,
 					});
+				} else if (streamed) {
+					turn.parts = turn.parts.filter((part) => part.kind !== "reasoning");
 				}
 				if (payload.text) {
-					turn.text = turn.text
-						? `${turn.text}\n\n${payload.text}`
-						: payload.text;
+					turn.text = streamed
+						? payload.text
+						: turn.text
+							? `${turn.text}\n\n${payload.text}`
+							: payload.text;
 				}
+				if (streamed) turn.id = id;
 				break;
 			}
 			case "tool": {
@@ -136,6 +321,25 @@ export function buildRemoteTranscript(
 					toolRows.set(payload.callId, { row, turn });
 					turn.parts.push(row);
 				}
+				break;
+			}
+			case "assistantChunk": {
+				// Live deltas accumulate into one open turn per stream; the
+				// durable assistant/message later replaces them with final text.
+				const turn = openTurn(`${event.sourceStreamId}:stream`);
+				if (payload.reasoningDelta) {
+					const last = turn.parts[turn.parts.length - 1];
+					if (last?.kind === "reasoning") {
+						last.text += payload.reasoningDelta;
+					} else {
+						turn.parts.push({
+							kind: "reasoning",
+							id: `${event.sourceStreamId}:stream:reasoning`,
+							text: payload.reasoningDelta,
+						});
+					}
+				}
+				if (payload.textDelta) turn.text += payload.textDelta;
 				break;
 			}
 			case "permissionRequest":

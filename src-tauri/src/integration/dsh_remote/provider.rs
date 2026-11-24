@@ -246,7 +246,15 @@ impl DshRemoteProvider {
         Ok(info(&host.connection, &state))
     }
     async fn mutate(&self, request: &OperationRequest) -> Result<OperationOutcome> {
-        let workspace = request.mutation.workspace();
+        let host_ref = request.mutation.host();
+        if let Mutation::EnsureWorkspace { .. } = &request.mutation {
+            let host = self.native_host(host_ref).await?;
+            return Self::mutate_on_host(&host, request).await;
+        }
+        let workspace = request
+            .mutation
+            .workspace()
+            .ok_or_else(|| RemoteError::invalid("Mutation has no workspace scope"))?;
         model::ensure_backend(workspace)?;
         let host = self.native_host(&workspace.host).await?;
         Self::mutate_on_host(&host, request).await
@@ -257,26 +265,46 @@ impl DshRemoteProvider {
     ) -> Result<OperationOutcome> {
         let operation = &request.operation_id.0;
         match &request.mutation {
+            Mutation::EnsureWorkspace { host: target, path } => {
+                let workspace = host.ensure_workspace(operation, target, path).await?;
+                Ok(OperationOutcome::Succeeded {
+                    result: OperationResult::WorkspaceEnsured { workspace },
+                })
+            }
             Mutation::CreateSession { workspace, title } => {
                 if title.is_some() {
                     return Err(RemoteError::new("FEATURE_NOT_SUPPORTED", "Native session/create has no title argument; creation with a requested title is unsupported"));
                 }
-                if !host
-                    .workspace_rows()
-                    .await?
-                    .iter()
-                    .any(|row| row.workspace_id == workspace.workspace_id.0)
-                {
-                    return Err(RemoteError::new(
-                        "WORKSPACE_NOT_FOUND",
-                        "Workspace is absent from the official native catalog",
-                    ));
-                }
+                let request = if workspace.workspace_id.0 == model::UNASSIGNED_WORKSPACE_ID {
+                    // True unassigned session: no workspaceId, only the exact
+                    // trusted Papers cwd (v3 Host with a known home). Upload
+                    // authority resolves the root from session/list cwd.
+                    let papers = host.papers_cwd().ok_or_else(|| {
+                        RemoteError::new(
+                            "FEATURE_NOT_SUPPORTED",
+                            "Unassigned sessions require a v3 Host with a known home",
+                        )
+                    })?;
+                    json!({"cwd":papers})
+                } else {
+                    if !host
+                        .workspace_rows()
+                        .await?
+                        .iter()
+                        .any(|row| row.workspace_id == workspace.workspace_id.0)
+                    {
+                        return Err(RemoteError::new(
+                            "WORKSPACE_NOT_FOUND",
+                            "Workspace is absent from the official native catalog",
+                        ));
+                    }
+                    json!({"workspaceId":workspace.workspace_id.0})
+                };
                 let value = call(
                     &host.wire,
                     operation,
                     "session/create",
-                    json!({"request":{"workspaceId":workspace.workspace_id.0}}),
+                    json!({"request":request}),
                     CallSemantics::Mutation,
                 )
                 .await?;
@@ -549,6 +577,16 @@ impl RemoteAgentProvider for DshRemoteProvider {
                 ),
                 Err(_) => (host.online, pins.contains_key(&host.device_id)),
             };
+            // Home comes from the connected native ready frame; an unconnected
+            // Host leaves it None rather than guessing from workspace paths.
+            let home = {
+                let state = state.lock().await;
+                state
+                    .hosts
+                    .get(&host.device_id)
+                    .filter(|runtime| !runtime.rpc.is_closed())
+                    .and_then(|runtime| runtime.native.home.clone())
+            };
             rows.push(HostInfo {
                 host: HostRef {
                     connection: reference.clone(),
@@ -557,6 +595,7 @@ impl RemoteAgentProvider for DshRemoteProvider {
                 name: host.name,
                 online,
                 pinned,
+                home,
             });
         }
         Ok(rows)
@@ -566,7 +605,7 @@ impl RemoteAgentProvider for DshRemoteProvider {
         reference: &HostRef,
     ) -> std::result::Result<Vec<WorkspaceInfo>, AppError> {
         let host = self.native_host(reference).await.map_err(app_error)?;
-        Ok(host
+        let mut rows: Vec<WorkspaceInfo> = host
             .workspace_rows()
             .await
             .map_err(app_error)?
@@ -578,8 +617,23 @@ impl RemoteAgentProvider for DshRemoteProvider {
                     workspace_id: WorkspaceId(row.workspace_id),
                 },
                 name: row.title,
+                path: row.path,
             })
-            .collect())
+            .collect();
+        // Virtual unassigned scope (v3 + known home only). It is a listing
+        // convenience, never part of the official baseline or ownership union.
+        if let Some(papers) = host.papers_cwd() {
+            rows.push(WorkspaceInfo {
+                workspace: WorkspaceRef {
+                    host: reference.clone(),
+                    backend_id: model::BACKEND.into(),
+                    workspace_id: WorkspaceId(model::UNASSIGNED_WORKSPACE_ID.into()),
+                },
+                name: "Papers".into(),
+                path: Some(papers),
+            });
+        }
+        Ok(rows)
     }
     async fn list_sessions(
         &self,
@@ -630,6 +684,17 @@ impl RemoteAgentProvider for DshRemoteProvider {
             .await
             .map_err(app_error)
     }
+    async fn host_models(
+        &self,
+        reference: &HostRef,
+    ) -> std::result::Result<Option<RemoteSessionModels>, AppError> {
+        self.native_host(reference)
+            .await
+            .map_err(app_error)?
+            .session_model_catalog()
+            .await
+            .map_err(app_error)
+    }
     async fn subscribe(
         &self,
         reference: &SessionRef,
@@ -647,7 +712,7 @@ impl RemoteAgentProvider for DshRemoteProvider {
         &self,
         request: &OperationRequest,
     ) -> std::result::Result<OperationOutcome, AppError> {
-        let reference = &request.mutation.workspace().host.connection;
+        let reference = &request.mutation.host().connection;
         let state = self.connection(reference).await.map_err(app_error)?;
         let fingerprint = serde_json::to_string(&request.mutation)
             .map_err(|_| app_error(RemoteError::invalid("Cannot fingerprint native mutation")))?;
