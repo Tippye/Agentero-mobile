@@ -151,6 +151,7 @@ export default function MobileApp() {
 	} | null>(null);
 	const [workspacePreset, setWorkspacePreset] =
 		useState<MobileWorkspacePreset>("read");
+	const [showCitationReader, setShowCitationReader] = useState(false);
 	const figureLightboxOpen = useStore(figureLightboxStore, (state) =>
 		Boolean(state.request),
 	);
@@ -172,7 +173,13 @@ export default function MobileApp() {
 		preset: workspacePreset,
 		tab,
 		hasPaper: selectedPaper !== null,
+		showCitationReader,
 	});
+	const stackCitationPanes =
+		widthClass === "narrow" &&
+		showCitationReader &&
+		layout.reader &&
+		layout.agent;
 	const {
 		vaultPath,
 		loading: vaultLoading,
@@ -378,19 +385,21 @@ export default function MobileApp() {
 		cancelCitation();
 		markInteraction();
 		setSelectedPaper(null);
+		setShowCitationReader(false);
 		setReadingSnapshot(null);
 		setInkMode(false);
 		setReaderMode("pdf");
 	}, [canLeaveReader, cancelCitation, markInteraction]);
 	const selectPaper = useCallback(
-		(paper: PaperMetadata, mode?: MobileReaderMode) => {
+		(paper: PaperMetadata, mode?: MobileReaderMode, keepAgentOpen = false) => {
 			const samePaper =
 				selectedPaper?.path === paper.path && selectedPaper.id === paper.id;
 			if ((!samePaper || (mode && mode !== readerMode)) && !canLeaveReader())
 				return false;
 			cancelCitation();
 			markInteraction();
-			setWorkspacePreset("read");
+			setWorkspacePreset(keepAgentOpen ? "discuss" : "read");
+			setShowCitationReader(keepAgentOpen);
 			setTab("library");
 			if (mode || !samePaper) setReaderMode(mode ?? "pdf");
 			if (!samePaper) {
@@ -429,7 +438,7 @@ export default function MobileApp() {
 				reportFailure();
 				return;
 			}
-			if (!selectPaper(target.paper, target.kind)) return;
+			if (!selectPaper(target.paper, target.kind, true)) return;
 			if (!target.fragment) return;
 			const paths = mobilePaperPaths(vaultPath, target.paper);
 			const intent = beginPdfNavigation(paths.paperAbsPath);
@@ -492,6 +501,7 @@ export default function MobileApp() {
 				return;
 			}
 			markInteraction();
+			setShowCitationReader(false);
 			setWorkspacePreset(preset);
 			setReaderMode(preset === "compare" ? "notes" : "pdf");
 		},
@@ -504,6 +514,7 @@ export default function MobileApp() {
 				return;
 			}
 			markInteraction();
+			setShowCitationReader(false);
 			if (next === "library") setWorkspacePreset("read");
 			setTab(next);
 		},
@@ -934,7 +945,8 @@ export default function MobileApp() {
 				<div className="min-h-0 flex-1 overflow-hidden">
 					<MobilePaneGroup
 						id="mobile-workspace"
-						layoutKey={`${widthClass}:${workspacePreset}:${tab}:${Boolean(selectedPaper)}:${paperListCollapsed}`}
+						orientation={stackCitationPanes ? "vertical" : "horizontal"}
+						layoutKey={`${widthClass}:${workspacePreset}:${tab}:${Boolean(selectedPaper)}:${paperListCollapsed}:${stackCitationPanes}`}
 						panes={[
 							{
 								id: "plaza",

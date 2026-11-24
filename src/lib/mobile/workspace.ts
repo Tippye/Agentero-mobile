@@ -17,16 +17,21 @@ export function mobileWorkspaceLayout({
 	preset,
 	tab,
 	hasPaper,
+	showCitationReader = false,
 }: {
 	width: MobileWorkspaceWidth;
 	preset: MobileWorkspacePreset;
 	tab: "library" | "agent" | "plaza";
 	hasPaper: boolean;
+	showCitationReader?: boolean;
 }): MobileWorkspaceLayout {
 	const library = tab === "library";
 	return {
 		library: library && (!hasPaper || width === "wide"),
-		reader: library && hasPaper && (width !== "narrow" || preset !== "discuss"),
+		reader:
+			library &&
+			hasPaper &&
+			(width !== "narrow" || preset !== "discuss" || showCitationReader),
 		agent: tab === "agent" || (library && hasPaper && preset === "discuss"),
 		compare: library && hasPaper && width !== "narrow" && preset === "compare",
 	};
