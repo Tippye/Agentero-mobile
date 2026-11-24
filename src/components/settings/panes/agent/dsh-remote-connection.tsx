@@ -1,5 +1,5 @@
 import { LoaderCircle, LogOut, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SiDeepseek } from "react-icons/si";
 import { DshRemoteSignIn } from "@/components/remote-agent/dsh-remote-sign-in";
@@ -10,7 +10,10 @@ import {
 	settingsRowClassName,
 } from "@/components/settings/settings-layout";
 import { Button } from "@/components/ui/button";
-import type { RemoteAgentCatalog } from "@/lib/core/bindings";
+import type {
+	RemoteAgentAccount,
+	RemoteAgentCatalog,
+} from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
@@ -27,17 +30,36 @@ export function DshRemoteConnectionSection() {
 	const { t } = useTranslation(["settings", "common"]);
 	const [catalog, setCatalog] = useState<RemoteAgentCatalog | null>(null);
 	const [busy, setBusy] = useState(false);
+	const catalogRead = useRef(0);
 
 	const refresh = useCallback(async () => {
 		if (!isTauri()) return;
+		const read = ++catalogRead.current;
 		setBusy(true);
 		try {
-			setCatalog(await remoteAgent.catalog());
+			const value = await remoteAgent.catalog();
+			if (read === catalogRead.current) setCatalog(value);
 		} catch (error) {
-			notifyError(errorText(error));
+			if (read === catalogRead.current) notifyError(errorText(error));
 		} finally {
-			setBusy(false);
+			if (read === catalogRead.current) setBusy(false);
 		}
+	}, []);
+
+	const signedIn = useCallback((account: RemoteAgentAccount) => {
+		// A read started before activation can still return the signed-out view.
+		catalogRead.current += 1;
+		setBusy(false);
+		setCatalog((current) => {
+			if (!current || current.account) return current;
+			return {
+				...current,
+				account,
+				persistence: account.persistence,
+				credentialState: "ready",
+				canClearSavedSignIn: account.persistence === "systemStore",
+			};
+		});
 	}, []);
 
 	useEffect(() => {
@@ -131,10 +153,7 @@ export function DshRemoteConnectionSection() {
 					) : null}
 				</div>
 				{!account ? (
-					<DshRemoteSignIn
-						onCatalog={setCatalog}
-						onSignedIn={() => void refresh()}
-					/>
+					<DshRemoteSignIn onCatalog={setCatalog} onSignedIn={signedIn} />
 				) : null}
 			</SettingsGroup>
 			<p className="mt-2 mb-3 px-0.5 text-muted-foreground text-xs leading-relaxed">
