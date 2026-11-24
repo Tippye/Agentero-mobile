@@ -38,24 +38,12 @@ This is not a cut-down desktop build. The library is still a plain folder: PDFs,
 - **Handwriting**: pen, highlighter, stroke eraser, lasso move/copy/delete, undo, and redo. Holding the pen still for 500 ms snaps the stroke into a line, arrow, rectangle, triangle, or ellipse, and lifting commits it.
 - **Two ways to ask**: long-press for one second to select a word or sentence and annotate it from the toolbar, or switch to region select and circle an area of the PDF with no ink to send it to the agent together with a screenshot.
 
-<p align="center">
-  <img src="docs/assets/screenshots/tablet-ink.png" alt="Handwriting on a PDF" width="90%" />
-  <br/>
-  <sub>Ink sits on the same page as the source and is saved and synced with the paper.</sub>
-</p>
-
 ### 2. Translation and layout analysis
 
 - **Translation and compare at any time**: translate a page or the whole paper; show the translation over the source or side by side. Translation and layout analysis run as background tasks that keep going when you leave the paper.
 - **Look at the finished PDF first**: when the layout is not ready but a translated PDF matches the current language and service, it opens read-only right away while analysis and gap filling continue in the background.
 - **Translation cache switch** (Settings → Translate): on by default, the translation sidecar and finished PDFs sync with the vault; turn it off to keep them on this device. Layout analysis always syncs because figures, citations, and on-demand downloads rely on it.
 - **Typesetting works offline**: the fallback font ships in the installer, so translated PDFs still build without network or a mirror.
-
-<p align="center">
-  <img src="docs/assets/screenshots/tablet-translate.png" alt="Source and translation side by side" width="90%" />
-  <br/>
-  <sub>Hover a source sentence in compare mode to mark the matching translation.</sub>
-</p>
 
 ### 3. A local-first library that syncs
 
@@ -80,7 +68,7 @@ This is not a cut-down desktop build. The library is still a plain folder: PDFs,
 ## Screenshots
 
 <details>
-<summary><b>Expand for more tablet screenshots (library, translation, ink, sync settings)</b></summary>
+<summary><b>Expand for tablet screenshots (library, reader)</b></summary>
 <br/>
 
 #### Library
@@ -89,16 +77,12 @@ This is not a cut-down desktop build. The library is still a plain folder: PDFs,
   <img src="docs/assets/screenshots/tablet-library.png" alt="Library" width="85%" />
 </p>
 
-#### Handwriting
+#### Reader
 
 <p align="center">
-  <img src="docs/assets/screenshots/tablet-ink.png" alt="Handwriting" width="85%" />
-</p>
-
-#### Sync settings
-
-<p align="center">
-  <img src="docs/assets/screenshots/tablet-sync.png" alt="Sync settings" width="85%" />
+  <img src="docs/assets/screenshots/tablet-reader.png" alt="Reader" width="85%" />
+  <br/>
+  <sub>The top bar switches original, translation, and compare; the floating bar holds the pen, undo, lasso, export, and zoom.</sub>
 </p>
 
 </details>
