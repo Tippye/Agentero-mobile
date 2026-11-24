@@ -1,6 +1,5 @@
 import {
 	BookOpen,
-	Check,
 	ChevronDown,
 	Columns2,
 	FileText,
@@ -13,7 +12,10 @@ import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
-	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuRadioGroup,
+	DropdownMenuRadioItem,
+	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { AgentDescriptor } from "@/lib/agent/api";
@@ -118,62 +120,96 @@ export function MobileAgentToolbar({
 	agents,
 	loading,
 	selectedAgentId,
+	remoteSelected,
 	onSelectAgent,
+	onSelectBridge,
+	onSelectRemote,
 	onOpenHistory,
 }: {
 	agents: AgentDescriptor[];
 	loading: boolean;
 	selectedAgentId: string | null;
+	remoteSelected: boolean;
 	onSelectAgent: (agentId: string) => void;
+	onSelectBridge: () => void;
+	onSelectRemote: () => void;
 	onOpenHistory: () => void;
 }) {
-	const { t } = useTranslation("mobile");
+	const { t } = useTranslation(["mobile", "agent"]);
 	const selectedAgent = agents.find((agent) => agent.id === selectedAgentId);
+	const backendLabel = remoteSelected
+		? "dsh-remote"
+		: (selectedAgent?.name ?? t("agent.defaultBackend"));
 	return (
 		<div className="flex min-w-0 items-center gap-1">
 			<DropdownMenu>
-				<DropdownMenuTrigger asChild disabled={loading || agents.length === 0}>
+				<DropdownMenuTrigger asChild>
 					<Button
 						type="button"
 						variant="outline"
 						size="sm"
-						className="h-9 min-w-0 max-w-[min(48vw,12rem)] justify-between gap-1.5 rounded-lg px-2.5"
-						aria-label={t("agent.switchBackend")}
+						className="h-11 min-w-0 max-w-[min(48vw,12rem)] justify-between gap-1.5 rounded-lg px-2.5"
 						title={t("agent.switchBackend")}
 					>
-						<span className="truncate">
-							{selectedAgent?.name ?? t("agent.defaultBackend")}
-						</span>
+						<span className="truncate">{backendLabel}</span>
 						<ChevronDown className="size-4 shrink-0 text-muted-foreground" />
 					</Button>
 				</DropdownMenuTrigger>
-				<DropdownMenuContent align="end" className="w-56">
-					{agents.map((agent) => (
-						<DropdownMenuItem
-							key={agent.id}
-							disabled={!agent.available}
+				<DropdownMenuContent align="start" className="w-56">
+					<DropdownMenuRadioGroup
+						value={remoteSelected ? "remote" : `acp:${selectedAgentId ?? ""}`}
+					>
+						<DropdownMenuLabel>{t("agent:agentMenu.title")}</DropdownMenuLabel>
+						{remoteSelected && !agents.some((agent) => agent.available) ? (
+							<DropdownMenuRadioItem
+								value="bridge"
+								onSelect={onSelectBridge}
+								className="min-h-11"
+							>
+								{t("remote.bridgeProvider")}
+							</DropdownMenuRadioItem>
+						) : null}
+						{agents.map((agent) => (
+							<DropdownMenuRadioItem
+								key={agent.id}
+								value={`acp:${agent.id}`}
+								disabled={loading || !agent.available}
+								onSelect={() => {
+									if (remoteSelected || agent.id !== selectedAgentId) {
+										onSelectAgent(agent.id);
+									}
+								}}
+								className="min-h-11"
+							>
+								<span className="min-w-0 truncate">{agent.name}</span>
+							</DropdownMenuRadioItem>
+						))}
+						<DropdownMenuSeparator />
+						<DropdownMenuLabel>{t("agent:agentMenu.remote")}</DropdownMenuLabel>
+						<DropdownMenuRadioItem
+							value="remote"
 							onSelect={() => {
-								if (agent.id !== selectedAgentId) onSelectAgent(agent.id);
+								if (!remoteSelected) onSelectRemote();
 							}}
-							className="gap-2"
+							className="min-h-11"
 						>
-							<span className="min-w-0 flex-1 truncate">{agent.name}</span>
-							{agent.id === selectedAgentId ? (
-								<Check className="size-4 shrink-0" />
-							) : null}
-						</DropdownMenuItem>
-					))}
+							dsh-remote
+						</DropdownMenuRadioItem>
+					</DropdownMenuRadioGroup>
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<Button
-				type="button"
-				variant="ghost"
-				size="icon-sm"
-				aria-label={t("agent.history")}
-				onClick={onOpenHistory}
-			>
-				<History className="size-4" />
-			</Button>
+			{!remoteSelected ? (
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-sm"
+					className="size-11"
+					aria-label={t("agent.history")}
+					onClick={onOpenHistory}
+				>
+					<History className="size-4" />
+				</Button>
+			) : null}
 		</div>
 	);
 }
