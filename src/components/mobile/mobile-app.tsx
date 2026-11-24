@@ -68,6 +68,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { resolvePdfCitation } from "@/lib/agent/api";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
@@ -80,6 +81,7 @@ import {
 	filterMobilePapers,
 	openMobilePlazaUrl,
 } from "@/lib/mobile/navigation";
+import { resolveMobilePaperCitation } from "@/lib/mobile/paper-citation";
 import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
 import {
 	loadMobilePaperPdfAttachment,
@@ -98,12 +100,19 @@ import {
 } from "@/lib/mobile/workspace";
 import { trashPaths } from "@/lib/paper/api";
 import type { PaperMetadata } from "@/lib/paper/types";
+import { layoutKindFromCitationFragment } from "@/lib/pdf/layout/store";
+import {
+	beginPdfNavigation,
+	cancelPdfNavigation,
+	completePdfNavigation,
+	type PdfNavigationIntent,
+} from "@/lib/pdf/pending-pdf-page";
 import type { PdfReadingSnapshot } from "@/lib/pdf/reading-position";
 import { PLAZA_SOURCES } from "@/lib/plaza/sources";
 
 export default function MobileApp() {
 	useMobilePdfProcessingRuntime();
-	const { t } = useTranslation(["mobile", "sidebar", "shortcuts"]);
+	const { t } = useTranslation(["mobile", "sidebar", "shortcuts", "agent"]);
 	const [tab, setTab] = useState<MobileTab>("library");
 	const [libraryQuery, setLibraryQuery] = useState("");
 	const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -124,6 +133,12 @@ export default function MobileApp() {
 		null,
 	);
 	const [readerMode, setReaderMode] = useState<MobileReaderMode>("pdf");
+	const citationIntentRef = useRef<PdfNavigationIntent | null>(null);
+	const cancelCitation = useCallback(() => {
+		const intent = citationIntentRef.current;
+		citationIntentRef.current = null;
+		if (intent) cancelPdfNavigation(intent);
+	}, []);
 	const [readingSnapshot, setReadingSnapshot] = useState<{
 		paperId: string;
 		value: PdfReadingSnapshot;
@@ -154,6 +169,9 @@ export default function MobileApp() {
 		loading: vaultLoading,
 		retry: retryVault,
 	} = useMobileVault();
+	useLayoutEffect(() => {
+		if (vaultPath) return cancelCitation;
+	}, [vaultPath, cancelCitation]);
 
 	const latestRegionTarget = useRef({
 		vaultPath,
@@ -346,33 +364,38 @@ export default function MobileApp() {
 	}, [notesDirty, inkDirty, t]);
 	const closeReader = useCallback(() => {
 		if (!canLeaveReader()) return;
+		cancelCitation();
 		markInteraction();
 		setSelectedPaper(null);
 		setReadingSnapshot(null);
 		setInkMode(false);
 		setReaderMode("pdf");
-	}, [canLeaveReader, markInteraction]);
+	}, [canLeaveReader, cancelCitation, markInteraction]);
 	const selectPaper = useCallback(
-		(paper: PaperMetadata) => {
-			if (
-				selectedPaper?.path === paper.path &&
-				selectedPaper?.id === paper.id
-			) {
-				markInteraction();
-				setWorkspacePreset("read");
-				setTab("library");
-				return;
-			}
-			if (!canLeaveReader()) return;
+		(paper: PaperMetadata, mode?: MobileReaderMode) => {
+			const samePaper =
+				selectedPaper?.path === paper.path && selectedPaper.id === paper.id;
+			if ((!samePaper || (mode && mode !== readerMode)) && !canLeaveReader())
+				return false;
+			cancelCitation();
 			markInteraction();
-			setInkMode(false);
-			setReadingSnapshot(null);
 			setWorkspacePreset("read");
-			setReaderMode("pdf");
 			setTab("library");
-			setSelectedPaper(paper);
+			if (mode || !samePaper) setReaderMode(mode ?? "pdf");
+			if (!samePaper) {
+				setInkMode(false);
+				setReadingSnapshot(null);
+				setSelectedPaper(paper);
+			}
+			return true;
 		},
-		[selectedPaper, canLeaveReader, markInteraction],
+		[
+			selectedPaper,
+			readerMode,
+			canLeaveReader,
+			cancelCitation,
+			markInteraction,
+		],
 	);
 	const openPlazaUrl = useCallback(
 		(url: string) => {
@@ -381,6 +404,56 @@ export default function MobileApp() {
 			);
 		},
 		[t],
+	);
+	const openAgentSource = useCallback(
+		async (source: string, originalHref = source) => {
+			if (/^https?:\/\//i.test(source)) {
+				openPlazaUrl(source);
+				return;
+			}
+			const target = resolveMobilePaperCitation(originalHref, papers);
+			const reportFailure = () =>
+				notifyError(t("agent:citation.resolveFailed", { source }));
+			if (!target || !vaultPath) {
+				reportFailure();
+				return;
+			}
+			if (!selectPaper(target.paper, target.kind)) return;
+			if (!target.fragment) return;
+			const paths = mobilePaperPaths(vaultPath, target.paper);
+			const intent = beginPdfNavigation(paths.paperAbsPath);
+			citationIntentRef.current = intent;
+			if (target.fragment.kind === "page") {
+				completePdfNavigation(intent, { page: target.fragment.page });
+				return;
+			}
+			try {
+				const found = await resolvePdfCitation(
+					vaultPath,
+					target.fragment.source,
+				);
+				if (citationIntentRef.current !== intent) return;
+				if (found.paperPath !== paths.paperRelPath) {
+					cancelCitation();
+					reportFailure();
+					return;
+				}
+				completePdfNavigation(intent, {
+					page: found.pageIndex + 1,
+					region: {
+						id: found.regionId,
+						pageIndex: found.pageIndex,
+						bbox: found.bbox,
+						kind: layoutKindFromCitationFragment(found.fragment),
+					},
+				});
+			} catch {
+				if (citationIntentRef.current !== intent) return;
+				cancelCitation();
+				reportFailure();
+			}
+		},
+		[cancelCitation, openPlazaUrl, papers, selectPaper, t, vaultPath],
 	);
 	/** Trash the paper folder, then refresh; never delete while a draft is unsaved. */
 	const deletePaper = useCallback(
@@ -1003,6 +1076,7 @@ export default function MobileApp() {
 												remoteOnly
 												vaultPath={vaultPath}
 												remotePaperSource={remotePaperSource}
+												onOpenSource={openAgentSource}
 												backendControl={
 													<MobileAgentToolbar
 														agents={agents}

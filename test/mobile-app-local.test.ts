@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BridgeClientStatus } from "@/lib/bridge/client";
 import type { PaperMetadata } from "@/lib/paper/types";
+import { registerPdfNavigationOwner } from "@/lib/pdf/pending-pdf-page";
 
 const state = vi.hoisted(() => ({
 	t: (key: string) => key,
@@ -15,8 +16,16 @@ const state = vi.hoisted(() => ({
 		authors: [],
 		tags: [],
 	} as PaperMetadata,
+	secondPaper: {
+		id: "second#paper",
+		path: "papers/second",
+		title: "Second paper",
+		authors: [],
+		tags: [],
+	} as PaperMetadata,
 	mounts: 0,
 	remoteMounts: 0,
+	navigate: vi.fn(() => true),
 	dirty: null as ((dirty: boolean) => void) | null,
 	error: vi.fn(),
 	refresh: vi.fn(async (_rescan?: boolean) => {}),
@@ -93,7 +102,7 @@ vi.mock("@/components/mobile/hooks/use-mobile-vault", () => ({
 }));
 vi.mock("@/components/mobile/hooks/use-mobile-papers", () => ({
 	useMobilePapers: () => ({
-		papers: [state.paper],
+		papers: [state.paper, state.secondPaper],
 		loading: false,
 		refresh: state.refresh,
 	}),
@@ -140,10 +149,12 @@ vi.mock("@/components/agent/agent-panel", () => ({
 		active,
 		backendControl,
 		remoteOnly,
+		onOpenSource,
 	}: {
 		active: boolean;
 		backendControl: ReactNode;
 		remoteOnly: boolean;
+		onOpenSource: (source: string, originalHref?: string) => void;
 	}) => {
 		const [draft, setDraft] = useState("");
 		useEffect(() => {
@@ -159,6 +170,26 @@ vi.mock("@/components/agent/agent-panel", () => ({
 				"button",
 				{ type: "button", onClick: () => setDraft("unsent-dsh-draft") },
 				"edit-remote-draft",
+			),
+			createElement(
+				"button",
+				{
+					type: "button",
+					onClick: () =>
+						onOpenSource(
+							"agentero-paper/second#paper.pdf#page=4",
+							"./agentero-paper/second%23paper.pdf#page=4",
+						),
+				},
+				"open-cited-page",
+			),
+			createElement(
+				"button",
+				{
+					type: "button",
+					onClick: () => onOpenSource("papers/second/NOTES.md"),
+				},
+				"open-cited-notes",
 			),
 		);
 	},
@@ -301,14 +332,32 @@ vi.mock("@/components/mobile/mobile-pairing", () => ({
 vi.mock("@/components/mobile/mobile-reader-page", () => ({
 	MobileReaderPage: ({
 		onNotesDirtyChange,
+		paper,
+		mode,
+		vaultPath,
 	}: {
 		onNotesDirtyChange: (dirty: boolean) => void;
+		paper: PaperMetadata;
+		mode: string;
+		vaultPath: string;
 	}) => {
 		state.dirty = onNotesDirtyChange;
 		useEffect(() => {
 			state.mounts += 1;
 		}, []);
-		return createElement("div", { "data-reader": true }, "local-reader");
+		useEffect(() => {
+			const owner = registerPdfNavigationOwner(`${vaultPath}/${paper.path}`, {
+				navigate: state.navigate,
+				restore: () => true,
+			});
+			owner.layoutReady(10);
+			return owner.dispose;
+		}, [paper.path, vaultPath]);
+		return createElement(
+			"div",
+			{ "data-reader": true, "data-paper": paper.id, "data-mode": mode },
+			"local-reader",
+		);
 	},
 }));
 vi.mock("@/components/ui/dialog", async (importOriginal) => ({
@@ -341,6 +390,7 @@ beforeEach(async () => {
 	state.dirty = null;
 	state.settings = null;
 	state.error.mockClear();
+	state.navigate.mockClear();
 	state.refresh.mockClear();
 	state.trash.mockClear();
 	host = document.createElement("div");
@@ -380,6 +430,33 @@ describe("mobile local-first shell", () => {
 		await click("library-tab");
 		expect(state.mounts).toBe(1);
 		expect(host.textContent).toContain("Offline paper");
+	});
+
+	it("opens a cited paper from the remote conversation and jumps after layout", async () => {
+		await click("open-local-paper");
+		await click("agent-tab");
+		await click("open-cited-page");
+		expect(
+			host.querySelector("[data-reader]")?.getAttribute("data-paper"),
+		).toBe(state.secondPaper.id);
+		expect(state.navigate).toHaveBeenCalledExactlyOnceWith({ page: 4 });
+		await click("agent-tab");
+		await click("open-cited-notes");
+		expect(host.querySelector("[data-reader]")?.getAttribute("data-mode")).toBe(
+			"notes",
+		);
+	});
+
+	it("keeps unsaved reading work when a citation points to another paper", async () => {
+		await click("open-local-paper");
+		await act(() => state.dirty?.(true));
+		await click("agent-tab");
+		await click("open-cited-page");
+		expect(state.error).toHaveBeenCalledWith("reader.unsavedChanges");
+		expect(
+			host.querySelector("[data-reader]")?.getAttribute("data-paper"),
+		).toBe(state.paper.id);
+		expect(state.navigate).not.toHaveBeenCalled();
 	});
 
 	it("opens settings for the local Vault and rescans completed sync without losing the mounted reader", async () => {

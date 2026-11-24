@@ -22,7 +22,7 @@ type AgentCitationLinkProps = ComponentPropsWithoutRef<"a"> & {
 		properties?: Record<string, unknown>;
 	};
 	children?: ReactNode;
-	onOpenSource?: (source: string) => void;
+	onOpenSource?: (source: string, originalHref?: string) => void;
 };
 
 function isHttpUrl(href: string): boolean {
@@ -82,9 +82,9 @@ export function AgentCitationLink({
 					});
 				return;
 			}
-			onOpenSource?.(resolvedHref);
+			onOpenSource?.(resolvedHref, rawHref);
 		},
-		[resolvedHref, incomplete, onOpenSource],
+		[resolvedHref, rawHref, incomplete, onOpenSource],
 	);
 
 	const rawLabel = labelFromChildren(children);

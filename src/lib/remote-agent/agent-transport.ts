@@ -79,6 +79,8 @@ type RemoteRunInput = {
 	files?: File[];
 	/** The reader's primary PDF. Reusable within the same native session. */
 	paperFile?: File;
+	/** The local catalog ID for this PDF, used in assistant citation links. */
+	paperId?: string;
 	title?: string;
 };
 
@@ -170,6 +172,20 @@ function imageData(image: PromptImage, maxBytes: number) {
 	if (!data.length || data.length > maxBytes)
 		throw new Error("Image exceeds the Remote Agent attachment size limit");
 	return { name: `image.${extension}`, data };
+}
+
+function uploadedPaperPrompt(path: string, paperId?: string): string {
+	const source = `Current paper PDF: ${JSON.stringify(path)} is the uploaded copy in this session's workspace. Read this copy for the paper's full text. The original file path is unavailable on this host.`;
+	if (!paperId) return source;
+
+	const href = `./agentero-paper/${encodeURIComponent(paperId)}.pdf#page=N`;
+	return [
+		source,
+		"Read the PDF by passing the exact receipt path above as a literal path argument. Use the citation destination below only as a local navigation link in the answer.",
+		"Verify each factual claim about the paper against the uploaded PDF before including it. Cite the supporting page inline immediately after each claim, including individual claims in lists and tables.",
+		`Use Markdown page links in the form [p. N](<${href}>). Replace N in the label and destination with the verified 1-based physical PDF page number, counting from the first PDF page regardless of printed page labels. Use separate links for multiple supporting pages.`,
+		"If you cannot read the PDF or verify a claim or page, say so and omit that claim or clearly identify it as an inference without an invented citation. Never invent page numbers, citations, or references. Use ordinary HTTP(S) links for verified web sources.",
+	].join("\n");
 }
 
 function questionFieldId(index: number): string {
@@ -675,7 +691,7 @@ export class RemoteAgentTransport {
 					),
 				);
 			const text = paper
-				? `${input.prompt}\n\nCurrent paper PDF: ${JSON.stringify(paper.path)} is the uploaded copy in this session's workspace. Read this copy for the paper's full text. The original file path is unavailable on this host.`.trim()
+				? `${input.prompt}\n\n${uploadedPaperPrompt(paper.path, input.paperId)}`.trim()
 				: input.prompt;
 			await this.mutate(
 				{ type: "sendMessage", session, text, attachments },

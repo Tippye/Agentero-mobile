@@ -174,14 +174,18 @@ describe("shared Remote Agent region attachment transport", () => {
 				status: "succeeded",
 				result: { type: "sessionCreated", session: unassignedSession },
 			});
-		const accepted = await transport.run({ prompt }, "unassigned-runtime");
+		const webPrompt = `${prompt}. See https://example.org/article.pdf#page=2`;
+		const accepted = await transport.run(
+			{ prompt: webPrompt, paperId: "no-upload" },
+			"unassigned-runtime",
+		);
 		accepted.abandon();
 		expect(
 			io.execute.mock.calls.map(([request]) => request.mutation),
 		).toMatchObject([
 			{ type: "ensureWorkspace", path: "/home/researcher/Agentero/Papers" },
 			{ type: "createSession", workspace: unassigned },
-			{ type: "sendMessage", session: unassignedSession, text: prompt },
+			{ type: "sendMessage", session: unassignedSession, text: webPrompt },
 		]);
 	});
 
@@ -240,6 +244,11 @@ describe("shared Remote Agent region attachment transport", () => {
 			type: "application/pdf",
 		});
 		const manual = new File(["abc"], "Notes.txt", { type: "text/plain" });
+		const paperId = "shelf/paper (α)#%";
+		const webUrl = "https://example.org/article.pdf#page=2";
+		const citation =
+			"[p. N](<./agentero-paper/shelf%2Fpaper%20(%CE%B1)%23%25.pdf#page=N>)";
+		const receiptPath = "./Fixture article (1)'s copy.pdf";
 		io.upload.mockImplementation(async (target: SessionRef, path: string) => {
 			const data = io.write.mock.calls.find(
 				([filePath]) => filePath === path,
@@ -250,7 +259,9 @@ describe("shared Remote Agent region attachment transport", () => {
 					type: "attachmentUploaded",
 					attachment: {
 						session: target,
-						path: `./${path.split("/").at(-1)}`,
+						path: path.endsWith("/Fixture article.pdf")
+							? receiptPath
+							: `./${path.split("/").at(-1)}`,
 						sizeBytes: data.byteLength,
 					},
 				},
@@ -258,7 +269,14 @@ describe("shared Remote Agent region attachment transport", () => {
 		});
 
 		const first = await transport.run(
-			{ sessionId: id, prompt, paperFile, images: [image], files: [manual] },
+			{
+				sessionId: id,
+				prompt: `${prompt}. Compare it with ${webUrl}`,
+				paperFile,
+				paperId,
+				images: [image],
+				files: [manual],
+			},
 			"paper-first",
 		);
 		first.abandon();
@@ -266,26 +284,54 @@ describe("shared Remote Agent region attachment transport", () => {
 		const firstRequest: OperationRequest = io.execute.mock.calls[0][0];
 		expect(firstRequest.mutation).toMatchObject({
 			type: "sendMessage",
-			text: expect.stringContaining(
-				'"./Fixture article.pdf" is the uploaded copy',
-			),
 			attachments: [
-				{ session, path: "./Fixture article.pdf", sizeBytes: bytes.byteLength },
+				{ session, path: receiptPath, sizeBytes: bytes.byteLength },
 				{ session, sizeBytes: 3 },
 				{ session, path: "./Notes.txt", sizeBytes: 3 },
 			],
 		});
-		expect(firstRequest.mutation.text).not.toContain("/private/cache");
+		if (firstRequest.mutation.type !== "sendMessage")
+			throw new Error("Expected sendMessage");
+		const { text } = firstRequest.mutation;
+		expect(text).toContain(webUrl);
+		expect(text).toContain(
+			`${JSON.stringify(receiptPath)} is the uploaded copy`,
+		);
+		expect(text).toContain(citation);
+		expect(text).toContain(
+			"Cite the supporting page inline immediately after each claim",
+		);
+		expect(text).toContain("1-based physical PDF page number");
+		expect(text).toContain(
+			"Never invent page numbers, citations, or references",
+		);
+		expect(text).toContain("ordinary HTTP(S) links for verified web sources");
+		expect(text).not.toContain("/private/cache");
 
 		const second = await transport.run(
-			{ sessionId: id, prompt: "What about Figure 1?", paperFile },
+			{ sessionId: id, prompt: "What about Figure 1?", paperFile, paperId },
 			"paper-followup",
 		);
 		second.abandon();
 		expect(io.upload).toHaveBeenCalledTimes(3);
-		expect(io.execute.mock.calls[1][0].mutation.attachments).toEqual([
-			{ session, path: "./Fixture article.pdf", sizeBytes: bytes.byteLength },
-		]);
+		expect(io.execute.mock.calls[1][0].mutation).toMatchObject({
+			text: expect.stringContaining(citation),
+			attachments: [
+				{ session, path: receiptPath, sizeBytes: bytes.byteLength },
+			],
+		});
+
+		const duplicate = await transport.run(
+			{ sessionId: id, prompt, paperFile, paperId: "duplicate-paper" },
+			"paper-duplicate",
+		);
+		duplicate.abandon();
+		expect(io.upload).toHaveBeenCalledTimes(3);
+		const duplicateText = io.execute.mock.calls[2][0].mutation.text;
+		expect(duplicateText).toContain(
+			"./agentero-paper/duplicate-paper.pdf#page=N",
+		);
+		expect(duplicateText).not.toContain(citation);
 
 		const other = await transport.run(
 			{ sessionId: otherId, prompt, paperFile },
@@ -294,6 +340,11 @@ describe("shared Remote Agent region attachment transport", () => {
 		other.abandon();
 		expect(io.upload).toHaveBeenCalledTimes(4);
 		expect(io.upload.mock.calls[3][0]).toEqual(otherSession);
+		const otherText = io.execute.mock.calls[3][0].mutation.text;
+		expect(otherText).toContain(
+			`${JSON.stringify(receiptPath)} is the uploaded copy`,
+		);
+		expect(otherText).not.toContain("agentero-paper/");
 	});
 
 	it("does not send when the upload receipt belongs to another session", async () => {
