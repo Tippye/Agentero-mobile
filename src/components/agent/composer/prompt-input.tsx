@@ -105,6 +105,7 @@ export const usePromptInputAttachments = () => {
 export interface PromptInputMessage {
 	text: string;
 	files: FileUIPart[];
+	rawFiles?: File[];
 }
 
 export type PromptInputProps = Omit<
@@ -126,6 +127,7 @@ export type PromptInputProps = Omit<
 	 * When false, file paste / drop / open dialog are disabled. Default true.
 	 */
 	attachmentsEnabled?: boolean;
+	rawAttachments?: boolean;
 	/** Class applied to the inner InputGroup. */
 	inputGroupClassName?: string;
 	onError?: (err: {
@@ -147,6 +149,7 @@ export const PromptInput = ({
 	maxFiles,
 	maxFileSize,
 	attachmentsEnabled = true,
+	rawAttachments = false,
 	inputGroupClassName,
 	onError,
 	onSubmit,
@@ -160,7 +163,9 @@ export const PromptInput = ({
 	const formRef = useRef<HTMLFormElement | null>(null);
 
 	// ----- Local attachments
-	const [items, setItems] = useState<(FileUIPart & { id: string })[]>([]);
+	const [items, setItems] = useState<
+		(FileUIPart & { id: string; file: File })[]
+	>([]);
 
 	// Keep a ref to files for cleanup on unmount (avoids stale closure)
 	const filesRef = useRef(items);
@@ -215,10 +220,11 @@ export const PromptInput = ({
 						message: t("promptInput.error.maxFiles"),
 					});
 				}
-				const next: (FileUIPart & { id: string })[] = [];
+				const next: typeof prev = [];
 				for (const file of capped) {
 					next.push({
 						filename: file.name,
+						file,
 						id: nanoid(),
 						mediaType: file.type,
 						type: "file",
@@ -359,7 +365,7 @@ export const PromptInput = ({
 			clear: clearAttachments,
 			enabled: attachmentsEnabled,
 			fileInputRef: inputRef,
-			files: items.map((item) => ({ ...item, id: item.id })),
+			files: items,
 			openFileDialog,
 			remove,
 		}),
@@ -380,21 +386,32 @@ export const PromptInput = ({
 
 			try {
 				// Convert blob URLs to data URLs asynchronously
-				const convertedFiles: FileUIPart[] = await Promise.all(
-					items.map(async ({ id: _id, ...item }) => {
-						if (item.url?.startsWith("blob:")) {
-							const dataUrl = await convertBlobUrlToDataUrl(item.url);
-							// If conversion failed, keep the original blob URL
-							return {
-								...item,
-								url: dataUrl ?? item.url,
-							};
-						}
-						return item;
-					}),
-				);
+				const convertedFiles: FileUIPart[] = rawAttachments
+					? []
+					: await Promise.all(
+							items.map(async ({ id: _id, file: _file, ...item }) => {
+								if (item.url?.startsWith("blob:")) {
+									const dataUrl = await convertBlobUrlToDataUrl(item.url);
+									// If conversion failed, keep the original blob URL
+									return {
+										...item,
+										url: dataUrl ?? item.url,
+									};
+								}
+								return item;
+							}),
+						);
 
-				const result = onSubmit({ files: convertedFiles, text }, event);
+				const result = onSubmit(
+					{
+						files: convertedFiles,
+						text,
+						...(rawAttachments
+							? { rawFiles: items.map((item) => item.file) }
+							: {}),
+					},
+					event,
+				);
 
 				// Handle both sync and async onSubmit
 				if (result instanceof Promise) {
@@ -412,7 +429,7 @@ export const PromptInput = ({
 				// Don't clear on error - user may want to retry
 			}
 		},
-		[items, onSubmit, clearAttachments],
+		[items, onSubmit, clearAttachments, rawAttachments],
 	);
 
 	// Provide LocalAttachmentsContext so children get validated add function

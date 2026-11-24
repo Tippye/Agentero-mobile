@@ -45,6 +45,7 @@ import {
 	scanCatalogCached,
 	warmAgent,
 } from "@/lib/agent";
+import { useAgentSessionStore } from "@/lib/agent/agent-session-store";
 import {
 	type ChatLine,
 	dedupeModelsClient,
@@ -58,8 +59,10 @@ import {
 	completeBackgroundTask,
 	startBackgroundTask,
 } from "@/lib/core/background-tasks";
+import { notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import { lifecycle } from "@/lib/lifecycle";
+import type { RemoteAgentTransport } from "@/lib/remote-agent/agent-transport";
 
 /**
  * Debounce before the Chat-open / agent-switch warm spawns its ACP process.
@@ -77,6 +80,8 @@ export type GroupedModel = {
 };
 
 export type UseAgentConfigOptions = {
+	transport?: RemoteAgentTransport | null;
+	includeLocalOptions?: boolean;
 	vaultPath: string | null;
 	selectedAgentId: string | null;
 	setSelectedAgentId: Dispatch<SetStateAction<string | null>>;
@@ -148,6 +153,8 @@ export type AgentConfig = {
 };
 
 export function useAgentConfig({
+	transport,
+	includeLocalOptions = true,
 	vaultPath,
 	selectedAgentId,
 	setSelectedAgentId,
@@ -184,6 +191,12 @@ export function useAgentConfig({
 	const [fastAvailable, setFastAvailable] = useState(false);
 	const [fastEnabled, setFastEnabled] = useState(false);
 	const warmGenRef = useRef(0);
+	const remoteSessionId = useAgentSessionStore((state) =>
+		transport
+			? (state.sessions.find((item) => item.id === state.activeTabId)
+					?.providerSessionId ?? undefined)
+			: undefined,
+	);
 	/**
 	 * Richest model catalog seen for each agent in this panel session. ACP
 	 * agents (opencode 2.x) report a partial catalog first and push the complete
@@ -298,7 +311,7 @@ export function useAgentConfig({
 
 	const refresh = useCallback(
 		async (opts?: { forceCatalog?: boolean }) => {
-			if (!isTauri()) return;
+			if (!isTauri() || !includeLocalOptions) return;
 			try {
 				// Scan first: the catalog scan auto-registers agents that are on PATH
 				// but not yet persisted, so listAgents() returns them without
@@ -307,17 +320,20 @@ export function useAgentConfig({
 				const scan = await scanCatalogCached({ force: opts?.forceCatalog });
 				const [list, discoveredSkills] = await Promise.all([
 					listAgents(),
-					listAgentSkills(vaultPath ?? undefined).catch(() => []),
+					transport === undefined
+						? listAgentSkills(vaultPath ?? undefined).catch(() => [])
+						: [],
 				]);
 				setRegistry(list);
 				setCatalog(scan);
 				setSkills(discoveredSkills);
-				setSelectedAgentId((prev) => prev ?? list.defaultId);
+				if (transport === undefined)
+					setSelectedAgentId((prev) => prev ?? list.defaultId);
 			} catch (e) {
 				setLines((prev) => [...prev, errorChatLine(errorText(e))]);
 			}
 		},
-		[vaultPath, setLines, setSelectedAgentId],
+		[vaultPath, setLines, setSelectedAgentId, transport, includeLocalOptions],
 	);
 
 	useEffect(() => {
@@ -464,7 +480,13 @@ export function useAgentConfig({
 
 	// When Chat opens (or agent/vault changes), warm ACP in the background for models/context.
 	useEffect(() => {
-		if (!isTauri() || !selectedAgentId || !agentListenersReady) return;
+		if (
+			!isTauri() ||
+			!selectedAgentId ||
+			!agentListenersReady ||
+			transport !== undefined
+		)
+			return;
 		// Supersede any in-flight warm immediately (its results are dropped)…
 		const gen = ++warmGenRef.current;
 		let cancelled = false;
@@ -502,10 +524,41 @@ export function useAgentConfig({
 		selectedAgentId,
 		vaultPath,
 		runWarmAgent,
+		transport,
 		agentListenersReady,
 		selectedAgentIdRef,
 		vaultPathRef,
 	]);
+
+	useEffect(() => {
+		if (!transport) return;
+		let current = true;
+		warmGenRef.current += 1;
+		setWarming(true);
+		void transport
+			.models(remoteSessionId)
+			.then((event) => {
+				if (!current || !event) return;
+				setModels(event.models);
+				const preference = remoteSessionId
+					? null
+					: loadModelPref(transport.agentId);
+				setModelId(
+					event.models.some((model) => model.id === preference)
+						? preference
+						: event.currentId || null,
+				);
+			})
+			.catch((error) => {
+				if (current) notifyError(errorText(error));
+			})
+			.finally(() => {
+				if (current) setWarming(false);
+			});
+		return () => {
+			current = false;
+		};
+	}, [remoteSessionId, transport]);
 
 	const selectedModelName = useMemo(() => {
 		if (!modelId) return null;
@@ -566,6 +619,25 @@ export function useAgentConfig({
 	const pickModel = (id: string) => {
 		const next = id.trim();
 		if (!next) return;
+		if (transport) {
+			if (!remoteSessionId) {
+				saveModelPref(transport.agentId, next);
+				setModelId(next);
+				return;
+			}
+			const generation = ++warmGenRef.current;
+			setWarming(true);
+			void transport
+				.selectModel(remoteSessionId, next)
+				.then(() => {
+					if (generation === warmGenRef.current) setModelId(next);
+				})
+				.catch((error) => notifyError(errorText(error)))
+				.finally(() => {
+					if (generation === warmGenRef.current) setWarming(false);
+				});
+			return;
+		}
 		// Re-picking the model shown in the UI is still meaningful: the adapter
 		// may report a current model that differs from the one in effect (Claude
 		// ACP's reported current ignores `settings.env.ANTHROPIC_MODEL`), so the

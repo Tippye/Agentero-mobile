@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BridgeClientStatus } from "@/lib/bridge/client";
 import type { PaperMetadata } from "@/lib/paper/types";
+import { registerPdfNavigationOwner } from "@/lib/pdf/pending-pdf-page";
 
 const state = vi.hoisted(() => ({
 	t: (key: string) => key,
@@ -15,8 +16,16 @@ const state = vi.hoisted(() => ({
 		authors: [],
 		tags: [],
 	} as PaperMetadata,
+	secondPaper: {
+		id: "second#paper",
+		path: "papers/second",
+		title: "Second paper",
+		authors: [],
+		tags: [],
+	} as PaperMetadata,
 	mounts: 0,
 	remoteMounts: 0,
+	navigate: vi.fn(() => true),
 	dirty: null as ((dirty: boolean) => void) | null,
 	sideControls: null as "left" | "right" | null,
 	error: vi.fn(),
@@ -99,7 +108,7 @@ vi.mock("@/components/mobile/hooks/use-mobile-vault", () => ({
 }));
 vi.mock("@/components/mobile/hooks/use-mobile-papers", () => ({
 	useMobilePapers: () => ({
-		papers: [state.paper],
+		papers: [state.paper, state.secondPaper],
 		loading: false,
 		refresh: state.refresh,
 	}),
@@ -141,21 +150,52 @@ vi.mock("@/lib/mobile/import-pdf", () => ({ importMobilePdfs: vi.fn() }));
 vi.mock("@/components/mobile/mobile-agent-page", () => ({
 	MobileAgentPage: () => createElement("div", null, "remote-agent"),
 }));
-vi.mock("@/components/mobile/remote/mobile-remote-agent-page", () => ({
-	MobileRemoteAgentPage: ({ active }: { active: boolean }) => {
+vi.mock("@/components/agent/agent-panel", () => ({
+	AgentPanel: ({
+		active,
+		backendControl,
+		remoteOnly,
+		onOpenSource,
+	}: {
+		active: boolean;
+		backendControl: ReactNode;
+		remoteOnly: boolean;
+		onOpenSource: (source: string, originalHref?: string) => void;
+	}) => {
 		const [draft, setDraft] = useState("");
 		useEffect(() => {
 			state.remoteMounts += 1;
 		}, []);
 		return createElement(
 			"div",
-			{ "data-remote": true, "data-active": String(active) },
+			{ "data-remote": String(remoteOnly), "data-active": String(active) },
+			backendControl,
 			"dsh-agent",
 			draft,
 			createElement(
 				"button",
 				{ type: "button", onClick: () => setDraft("unsent-dsh-draft") },
 				"edit-remote-draft",
+			),
+			createElement(
+				"button",
+				{
+					type: "button",
+					onClick: () =>
+						onOpenSource(
+							"agentero-paper/second#paper.pdf#page=4",
+							"./agentero-paper/second%23paper.pdf#page=4",
+						),
+				},
+				"open-cited-page",
+			),
+			createElement(
+				"button",
+				{
+					type: "button",
+					onClick: () => onOpenSource("papers/second/NOTES.md"),
+				},
+				"open-cited-notes",
 			),
 		);
 	},
@@ -191,7 +231,20 @@ vi.mock("@/components/mobile/mobile-header", () => ({
 }));
 vi.mock("@/components/mobile/mobile-header-actions", () => ({
 	MobileReaderModeToggle: () => null,
-	MobileAgentToolbar: () => null,
+	MobileAgentToolbar: ({
+		remoteSelected,
+		onSelectBridge,
+	}: {
+		remoteSelected: boolean;
+		onSelectBridge: () => void;
+	}) =>
+		remoteSelected
+			? createElement(
+					"button",
+					{ type: "button", onClick: onSelectBridge },
+					"select-bridge-backend",
+				)
+			: null,
 }));
 vi.mock("@/components/mobile/mobile-library-page", () => ({
 	MobileLibraryPage: ({
@@ -285,14 +338,32 @@ vi.mock("@/components/mobile/mobile-pairing", () => ({
 vi.mock("@/components/mobile/mobile-reader-page", () => ({
 	MobileReaderPage: ({
 		onNotesDirtyChange,
+		paper,
+		mode,
+		vaultPath,
 	}: {
 		onNotesDirtyChange: (dirty: boolean) => void;
+		paper: PaperMetadata;
+		mode: string;
+		vaultPath: string;
 	}) => {
 		state.dirty = onNotesDirtyChange;
 		useEffect(() => {
 			state.mounts += 1;
 		}, []);
-		return createElement("div", { "data-reader": true }, "local-reader");
+		useEffect(() => {
+			const owner = registerPdfNavigationOwner(`${vaultPath}/${paper.path}`, {
+				navigate: state.navigate,
+				restore: () => true,
+			});
+			owner.layoutReady(10);
+			return owner.dispose;
+		}, [paper.path, vaultPath]);
+		return createElement(
+			"div",
+			{ "data-reader": true, "data-paper": paper.id, "data-mode": mode },
+			"local-reader",
+		);
 	},
 }));
 vi.mock("@/components/ui/dialog", async (importOriginal) => ({
@@ -326,6 +397,7 @@ beforeEach(async () => {
 	state.sideControls = null;
 	state.settings = null;
 	state.error.mockClear();
+	state.navigate.mockClear();
 	state.refresh.mockClear();
 	state.deleted.mockClear();
 	host = document.createElement("div");
@@ -345,30 +417,18 @@ describe("mobile local-first shell", () => {
 		expect(host.textContent).not.toContain("cancel-pairing");
 		await click("open-local-paper");
 		await click("agent-tab");
-		const provider = host.querySelector<HTMLSelectElement>(
-			'[aria-label="remote.provider"]',
-		);
-		expect(provider?.value).toBe("ds-harness-remote");
 		expect(
-			host.querySelector("[data-remote]")?.getAttribute("data-active"),
+			host.querySelector('[data-remote="true"]')?.getAttribute("data-active"),
 		).toBe("true");
 		await click("edit-remote-draft");
 		await click("library-tab");
 		expect(
-			host.querySelector("[data-remote]")?.getAttribute("data-active"),
+			host.querySelector('[data-remote="true"]')?.getAttribute("data-active"),
 		).toBe("false");
 		await click("agent-tab");
 		expect(host.textContent).toContain("unsent-dsh-draft");
 		expect(state.remoteMounts).toBe(1);
-		await act(() => {
-			const currentProvider = host.querySelector<HTMLSelectElement>(
-				'[aria-label="remote.provider"]',
-			);
-			if (currentProvider) {
-				currentProvider.value = "agentero-bridge";
-				currentProvider.dispatchEvent(new Event("change", { bubbles: true }));
-			}
-		});
+		await click("select-bridge-backend");
 		expect(host.textContent).toContain("agent.connectionRequired");
 		expect(host.querySelector("[data-reader]")).not.toBeNull();
 		await click("connect.title");
@@ -421,6 +481,46 @@ describe("mobile local-first shell", () => {
 				'[data-library-search-row] input[aria-label="library.search"]',
 			),
 		).toBeTruthy();
+	});
+
+	it("opens a cited paper from the remote conversation and jumps after layout", async () => {
+		await click("open-local-paper");
+		await click("agent-tab");
+		await click("edit-remote-draft");
+		await click("open-cited-page");
+		expect(
+			host.querySelector("[data-reader]")?.getAttribute("data-paper"),
+		).toBe(state.secondPaper.id);
+		expect(state.navigate).toHaveBeenCalledExactlyOnceWith({ page: 4 });
+		expect(
+			host.querySelector<HTMLElement>("#mobile-workspace")?.style.flexDirection,
+		).toBe("column");
+		for (const id of ["reader", "agent"]) {
+			const pane = host.querySelector(`[data-workspace-pane="${id}"]`);
+			expect(pane).not.toBeNull();
+			expect(pane?.hasAttribute("hidden")).toBe(false);
+		}
+		expect(
+			host.querySelector('[data-remote="true"]')?.getAttribute("data-active"),
+		).toBe("true");
+		expect(host.textContent).toContain("unsent-dsh-draft");
+		expect(state.remoteMounts).toBe(1);
+		await click("open-cited-notes");
+		expect(host.querySelector("[data-reader]")?.getAttribute("data-mode")).toBe(
+			"notes",
+		);
+	});
+
+	it("keeps unsaved reading work when a citation points to another paper", async () => {
+		await click("open-local-paper");
+		await act(() => state.dirty?.(true));
+		await click("agent-tab");
+		await click("open-cited-page");
+		expect(state.error).toHaveBeenCalledWith("reader.unsavedChanges");
+		expect(
+			host.querySelector("[data-reader]")?.getAttribute("data-paper"),
+		).toBe(state.paper.id);
+		expect(state.navigate).not.toHaveBeenCalled();
 	});
 
 	it("opens settings for the local Vault and rescans completed sync without losing the mounted reader", async () => {

@@ -86,6 +86,7 @@ fn manage_state(app: &tauri::AppHandle) -> Result<(), crate::core::error::AppErr
     app.manage(remote_agent::RemoteAgentAccounts::with_store(
         credentials.clone(),
     ));
+    app.manage(Arc::new(remote_agent::RemoteAgentOAuthAttempts::default()));
     // All native secret consumers share the same backend health and mutation lane.
     app.manage(
         crate::integration::bridge::BridgeClientController::with_credentials(credentials.clone()),

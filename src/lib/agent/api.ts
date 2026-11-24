@@ -10,6 +10,10 @@ import {
 } from "@/lib/core/bindings";
 import { callApi, callApiResult } from "@/lib/core/ipc";
 import { readJsonStorage, writeJsonStorage } from "@/lib/core/storage";
+import {
+	isRemoteInteractionId,
+	remoteInteractions,
+} from "@/lib/remote-agent/interactions";
 import { loadSettings } from "@/lib/settings";
 import type { CatalogAcpStatus, CatalogEntry, ProbeResult } from "./api-types";
 import type { ContextRequest } from "./context-request";
@@ -164,6 +168,7 @@ export type AcpHistoryLine = {
 export type AcpLoadSessionResult = {
 	sessionId: string;
 	title?: string | null;
+	contextUsage?: { used: number; size: number } | null;
 	lines: AcpHistoryLine[];
 };
 
@@ -812,6 +817,10 @@ export async function respondPermission(
 	requestId: string,
 	optionId: string | null,
 ): Promise<void> {
+	const respond = remoteInteractions.get(requestId)?.permission;
+	if (respond) return respond(optionId);
+	if (isRemoteInteractionId(requestId))
+		throw new Error("Remote Agent permission request expired");
 	await callApi(
 		() => commands.agentRespondPermission({ requestId, optionId }),
 		AGENT_CALL_OPTS,
@@ -824,6 +833,10 @@ export async function respondElicitation(request: {
 	action: "accept" | "decline" | "cancel";
 	content?: Record<string, string | string[]>;
 }): Promise<void> {
+	const respond = remoteInteractions.get(request.requestId)?.elicitation;
+	if (respond) return respond(request);
+	if (isRemoteInteractionId(request.requestId))
+		throw new Error("Remote Agent question expired");
 	await callApi(
 		() =>
 			commands.agentRespondElicitation({

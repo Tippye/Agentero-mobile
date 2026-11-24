@@ -10,6 +10,7 @@ use crate::core::error::{map_err, ApiResult};
 #[cfg(not(target_os = "ios"))]
 use crate::features::agent::models::{
     AskUserResponseRequest, ElicitationResponseRequest, PermissionResponseRequest, RunOnceRequest,
+    WarmRequest,
 };
 #[cfg(not(target_os = "ios"))]
 use crate::features::agent::{
@@ -933,6 +934,30 @@ async fn dispatch_agent_rpc(
             )
             .await;
             api_service_data(result)
+        }
+        "agent_warm" => {
+            let request = WarmRequest {
+                agent_id: optional_string(&params, "agentId"),
+                vault_path,
+                model_id: None,
+                force_model: false,
+                collaboration_mode_id: None,
+            };
+            let window = app
+                .get_webview_window("main")
+                .or_else(|| app.webview_windows().into_values().next())
+                .ok_or_else(|| AppError::message("No desktop window is available for Agent"))?;
+            let result = crate::features::agent::commands::agent_warm(
+                window,
+                app.state(),
+                app.state(),
+                app.state(),
+                app.state(),
+                request,
+            )
+            .await
+            .map_err(AppError::message)?;
+            api_result_data(result)
         }
         "agent_run_once" => {
             let mut request: RunOnceRequest = serde_json::from_value(params)?;

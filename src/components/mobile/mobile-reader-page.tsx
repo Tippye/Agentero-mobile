@@ -80,24 +80,17 @@ export function MobileReaderPage({
 	const widthClass = suppliedWidth ?? measurement.widthClass;
 	const compare = widthClass !== "narrow" && preset === "compare";
 	const [translationPaneOpen, setTranslationPaneOpen] = useState(false);
-	// The companion belongs to the Compare preset. Switching back to Read (or
-	// an overlay-mode translation) hides it immediately.
 	const translationVisible = translationPaneOpen && preset === "compare";
 	useEffect(() => {
+		// The shell has already chosen a new preset, such as Discuss for a citation.
 		if (preset !== "compare" && translationPaneOpen) {
 			setTranslationPaneOpen(false);
-			onTranslationPaneChange?.(false);
 		}
-	}, [preset, translationPaneOpen, onTranslationPaneChange]);
-	// Dual-pane translation reuses the reader split: original PDF on the left,
-	// translated companion on the right. Narrow screens show the companion
-	// alone until it is closed, since three panes would be unusable.
-	// On narrow screens the notes pane belongs to the Compare preset; a stale
-	// `notes` mode under the Read preset must not leave an empty half-pane.
-	const notesVisible = translationVisible
-		? false
-		: compare ||
-			(widthClass === "narrow" && mode === "notes" && preset === "compare");
+	}, [preset, translationPaneOpen]);
+	// Narrow screens show the translation alone. Discuss can show cited notes
+	// alongside Agent, while Read always shows the PDF.
+	const notesVisible =
+		!translationVisible && (compare || (mode === "notes" && preset !== "read"));
 	const pdfVisible = translationVisible
 		? widthClass !== "narrow"
 		: compare || !notesVisible;

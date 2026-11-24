@@ -21,6 +21,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import agenteroLogo from "@/assets/agentero-logo.svg";
+import { AgentPanel } from "@/components/agent/agent-panel";
 import { useBridgeStatus } from "@/components/mobile/hooks/use-bridge-status";
 import { useMobileAgents } from "@/components/mobile/hooks/use-mobile-agents";
 import { useMobileBackLayer } from "@/components/mobile/hooks/use-mobile-back-layer";
@@ -57,10 +58,10 @@ import { MobileReaderPage } from "@/components/mobile/mobile-reader-page";
 import { MobileSettingsPage } from "@/components/mobile/mobile-settings-page";
 import { MobileSidebar } from "@/components/mobile/mobile-sidebar";
 import { MobileTaskIndicator } from "@/components/mobile/mobile-task-indicator";
-import { MobileRemoteAgentPage } from "@/components/mobile/remote/mobile-remote-agent-page";
 import type { MobileReaderMode } from "@/components/mobile/types";
 import { SyncConflictDialog } from "@/components/settings/panes/sync-conflict-dialog";
 import { useSyncConflictReview } from "@/components/settings/panes/use-sync-conflict-review";
+import { PaneHeader } from "@/components/shell/pane-header";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -70,7 +71,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { SessionRef } from "@/lib/core/bindings";
+import { resolvePdfCitation } from "@/lib/agent/api";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
@@ -83,8 +84,12 @@ import {
 	filterMobilePapers,
 	openMobilePlazaUrl,
 } from "@/lib/mobile/navigation";
+import { resolveMobilePaperCitation } from "@/lib/mobile/paper-citation";
 import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
-import { mobilePaperPaths } from "@/lib/mobile/paper-files";
+import {
+	loadMobilePaperPdfAttachment,
+	mobilePaperPaths,
+} from "@/lib/mobile/paper-files";
 import { useMobilePdfProcessingRuntime } from "@/lib/mobile/pdf-processing";
 import type { MobileWindowRoute } from "@/lib/mobile/route";
 import {
@@ -102,6 +107,13 @@ import {
 	closeFigureLightbox,
 	figureLightboxStore,
 } from "@/lib/pdf/figure-lightbox-store";
+import { layoutKindFromCitationFragment } from "@/lib/pdf/layout/store";
+import {
+	beginPdfNavigation,
+	cancelPdfNavigation,
+	completePdfNavigation,
+	type PdfNavigationIntent,
+} from "@/lib/pdf/pending-pdf-page";
 import type { PdfReadingSnapshot } from "@/lib/pdf/reading-position";
 import { PLAZA_SOURCES } from "@/lib/plaza/sources";
 
@@ -139,7 +151,7 @@ function MobileLibrarySearch({
 
 export default function MobileApp() {
 	useMobilePdfProcessingRuntime();
-	const { t } = useTranslation(["mobile", "sidebar", "shortcuts"]);
+	const { t } = useTranslation(["mobile", "sidebar", "shortcuts", "agent"]);
 	const [tab, setTab] = useState<MobileTab>("library");
 	const [libraryQuery, setLibraryQuery] = useState("");
 	const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -160,12 +172,19 @@ export default function MobileApp() {
 		null,
 	);
 	const [readerMode, setReaderMode] = useState<MobileReaderMode>("pdf");
+	const citationIntentRef = useRef<PdfNavigationIntent | null>(null);
+	const cancelCitation = useCallback(() => {
+		const intent = citationIntentRef.current;
+		citationIntentRef.current = null;
+		if (intent) cancelPdfNavigation(intent);
+	}, []);
 	const [readingSnapshot, setReadingSnapshot] = useState<{
 		paperId: string;
 		value: PdfReadingSnapshot;
 	} | null>(null);
 	const [workspacePreset, setWorkspacePreset] =
 		useState<MobileWorkspacePreset>("read");
+	const [showCitationReader, setShowCitationReader] = useState(false);
 	const figureLightboxOpen = useStore(figureLightboxStore, (state) =>
 		Boolean(state.request),
 	);
@@ -176,7 +195,6 @@ export default function MobileApp() {
 	const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
 	const [historyOpen, setHistoryOpen] = useState(false);
 	const [agentProvider, setAgentProvider] = useState("ds-harness-remote");
-	const [remoteSession, setRemoteSession] = useState<SessionRef | null>(null);
 	const [regionContext, setRegionContext] =
 		useState<MobilePaperRegionContext | null>(null);
 	const regionContextRef = useRef<MobilePaperRegionContext | null>(null);
@@ -188,12 +206,21 @@ export default function MobileApp() {
 		preset: workspacePreset,
 		tab,
 		hasPaper: selectedPaper !== null,
+		showCitationReader,
 	});
+	const stackCitationPanes =
+		widthClass === "narrow" &&
+		showCitationReader &&
+		layout.reader &&
+		layout.agent;
 	const {
 		vaultPath,
 		loading: vaultLoading,
 		retry: retryVault,
 	} = useMobileVault();
+	useLayoutEffect(() => {
+		if (vaultPath) return cancelCitation;
+	}, [vaultPath, cancelCitation]);
 
 	const latestRegionTarget = useRef({
 		vaultPath,
@@ -388,33 +415,40 @@ export default function MobileApp() {
 	}, [notesDirty, inkDirty, t]);
 	const closeReader = useCallback(() => {
 		if (!canLeaveReader()) return;
+		cancelCitation();
 		markInteraction();
 		setSelectedPaper(null);
+		setShowCitationReader(false);
 		setReadingSnapshot(null);
 		setInkMode(false);
 		setReaderMode("pdf");
-	}, [canLeaveReader, markInteraction]);
+	}, [canLeaveReader, cancelCitation, markInteraction]);
 	const selectPaper = useCallback(
-		(paper: PaperMetadata) => {
-			if (
-				selectedPaper?.path === paper.path &&
-				selectedPaper?.id === paper.id
-			) {
-				markInteraction();
-				setWorkspacePreset("read");
-				setTab("library");
-				return;
-			}
-			if (!canLeaveReader()) return;
+		(paper: PaperMetadata, mode?: MobileReaderMode, keepAgentOpen = false) => {
+			const samePaper =
+				selectedPaper?.path === paper.path && selectedPaper.id === paper.id;
+			if ((!samePaper || (mode && mode !== readerMode)) && !canLeaveReader())
+				return false;
+			cancelCitation();
 			markInteraction();
-			setInkMode(false);
-			setReadingSnapshot(null);
-			setWorkspacePreset("read");
-			setReaderMode("pdf");
+			setWorkspacePreset(keepAgentOpen ? "discuss" : "read");
+			setShowCitationReader(keepAgentOpen);
 			setTab("library");
-			setSelectedPaper(paper);
+			if (mode || !samePaper) setReaderMode(mode ?? "pdf");
+			if (!samePaper) {
+				setInkMode(false);
+				setReadingSnapshot(null);
+				setSelectedPaper(paper);
+			}
+			return true;
 		},
-		[selectedPaper, canLeaveReader, markInteraction],
+		[
+			selectedPaper,
+			readerMode,
+			canLeaveReader,
+			cancelCitation,
+			markInteraction,
+		],
 	);
 	const openPlazaUrl = useCallback(
 		(url: string) => {
@@ -423,6 +457,56 @@ export default function MobileApp() {
 			);
 		},
 		[t],
+	);
+	const openAgentSource = useCallback(
+		async (source: string, originalHref = source) => {
+			if (/^https?:\/\//i.test(source)) {
+				openPlazaUrl(source);
+				return;
+			}
+			const target = resolveMobilePaperCitation(originalHref, papers);
+			const reportFailure = () =>
+				notifyError(t("agent:citation.resolveFailed", { source }));
+			if (!target || !vaultPath) {
+				reportFailure();
+				return;
+			}
+			if (!selectPaper(target.paper, target.kind, true)) return;
+			if (!target.fragment) return;
+			const paths = mobilePaperPaths(vaultPath, target.paper);
+			const intent = beginPdfNavigation(paths.paperAbsPath);
+			citationIntentRef.current = intent;
+			if (target.fragment.kind === "page") {
+				completePdfNavigation(intent, { page: target.fragment.page });
+				return;
+			}
+			try {
+				const found = await resolvePdfCitation(
+					vaultPath,
+					target.fragment.source,
+				);
+				if (citationIntentRef.current !== intent) return;
+				if (found.paperPath !== paths.paperRelPath) {
+					cancelCitation();
+					reportFailure();
+					return;
+				}
+				completePdfNavigation(intent, {
+					page: found.pageIndex + 1,
+					region: {
+						id: found.regionId,
+						pageIndex: found.pageIndex,
+						bbox: found.bbox,
+						kind: layoutKindFromCitationFragment(found.fragment),
+					},
+				});
+			} catch {
+				if (citationIntentRef.current !== intent) return;
+				cancelCitation();
+				reportFailure();
+			}
+		},
+		[cancelCitation, openPlazaUrl, papers, selectPaper, t, vaultPath],
 	);
 	/** Permanently delete the paper folder, then refresh; never while a draft is unsaved. */
 	const deletePaper = useCallback(
@@ -450,6 +534,7 @@ export default function MobileApp() {
 				return;
 			}
 			markInteraction();
+			setShowCitationReader(false);
 			setWorkspacePreset(preset);
 			setReaderMode(preset === "compare" ? "notes" : "pdf");
 		},
@@ -462,6 +547,7 @@ export default function MobileApp() {
 				return;
 			}
 			markInteraction();
+			setShowCitationReader(false);
 			if (next === "library") setWorkspacePreset("read");
 			setTab(next);
 		},
@@ -748,6 +834,18 @@ export default function MobileApp() {
 			)}
 		</div>
 	) : undefined;
+	const fetchMissingPaper = paperSync.fetchMissing;
+	const remotePaperSource = useMemo(() => {
+		if (!vaultPath || !selectedPaper) return null;
+		return {
+			key: JSON.stringify([vaultPath, selectedPaper.id, selectedPaper.path]),
+			paper: selectedPaper,
+			loadPdf: (maxBytes: number) =>
+				loadMobilePaperPdfAttachment(vaultPath, selectedPaper, maxBytes, () =>
+					fetchMissingPaper(selectedPaper),
+				),
+		};
+	}, [vaultPath, selectedPaper, fetchMissingPaper]);
 
 	return (
 		<div
@@ -954,7 +1052,8 @@ export default function MobileApp() {
 				<div className="min-h-0 flex-1 overflow-hidden">
 					<MobilePaneGroup
 						id="mobile-workspace"
-						layoutKey={`${widthClass}:${workspacePreset}:${tab}:${Boolean(selectedPaper)}:${paperListCollapsed}`}
+						orientation={stackCitationPanes ? "vertical" : "horizontal"}
+						layoutKey={`${widthClass}:${workspacePreset}:${tab}:${Boolean(selectedPaper)}:${paperListCollapsed}:${stackCitationPanes}`}
 						panes={[
 							{
 								id: "plaza",
@@ -1102,32 +1201,6 @@ export default function MobileApp() {
 								weight: 1.7,
 								content: (
 									<div className="flex h-full min-h-0 flex-col">
-										<div className="flex shrink-0 flex-wrap items-center gap-2 border-b p-3">
-											<select
-												aria-label={t("remote.provider")}
-												className="h-11 min-w-0 max-w-full rounded-md border bg-background px-2 text-base"
-												value={agentProvider}
-												onChange={(event) =>
-													setAgentProvider(event.target.value)
-												}
-											>
-												<option value="ds-harness-remote">
-													{t("remote.dshProvider")}
-												</option>
-												<option value="agentero-bridge">
-													{t("remote.bridgeProvider")}
-												</option>
-											</select>
-											{agentProvider === "agentero-bridge" ? (
-												<MobileAgentToolbar
-													agents={agents}
-													loading={agentsLoading}
-													selectedAgentId={selectedAgentId}
-													onSelectAgent={handleSelectAgent}
-													onOpenHistory={() => setHistoryOpen(true)}
-												/>
-											) : null}
-										</div>
 										<div
 											hidden={agentProvider !== "ds-harness-remote"}
 											style={{
@@ -1138,7 +1211,30 @@ export default function MobileApp() {
 											}}
 											className="min-h-0 flex-1"
 										>
-											<MobileRemoteAgentPage
+											<AgentPanel
+												remoteOnly
+												vaultPath={vaultPath}
+												remotePaperSource={remotePaperSource}
+												onOpenSource={openAgentSource}
+												backendControl={
+													<MobileAgentToolbar
+														agents={agents}
+														loading={agentsLoading}
+														selectedAgentId={selectedAgentId}
+														remoteSelected
+														onSelectRemote={() =>
+															setAgentProvider("ds-harness-remote")
+														}
+														onSelectBridge={() =>
+															setAgentProvider("agentero-bridge")
+														}
+														onSelectAgent={(id) => {
+															setAgentProvider("agentero-bridge");
+															handleSelectAgent(id);
+														}}
+														onOpenHistory={() => setHistoryOpen(true)}
+													/>
+												}
 												active={
 													layout.agent &&
 													agentProvider === "ds-harness-remote" &&
@@ -1148,8 +1244,6 @@ export default function MobileApp() {
 													!paperImportOpen &&
 													!paperInfoOpen
 												}
-												selection={remoteSession}
-												onSelectionChange={setRemoteSession}
 												regionContext={regionContext}
 												onRegionContextHandled={handleRegionContext}
 											/>
@@ -1164,49 +1258,71 @@ export default function MobileApp() {
 											}}
 											className="min-h-0 flex-1"
 										>
-											{connected ? (
-												<MobileAgentPage
-													active={
-														layout.agent &&
-														agentProvider === "agentero-bridge" &&
-														!pairingRequested &&
-														!settingsOpen &&
-														!sidebarOpen &&
-														!paperImportOpen &&
-														!paperInfoOpen
-													}
-													key={selectedAgentId ?? "default"}
-													selectedAgentId={selectedAgentId}
-													sessionId={agentSessionId}
-													onSessionId={setAgentSessionId}
-													historyOpen={historyOpen}
-													onHistoryOpenChange={setHistoryOpen}
-												/>
-											) : (
-												<div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
-													<p className="max-w-sm text-muted-foreground text-sm">
-														{t("agent.connectionRequired")}
-													</p>
-													{paired ? (
-														<Button
-															variant="outline"
-															className="min-h-12"
-															onClick={() => void resume()}
-														>
-															{t("local.retry")}
-														</Button>
-													) : null}
-													{resetAvailable ? (
-														<MobileBridgeReset onStatus={setStatus} />
-													) : null}
-													<Button
-														className="min-h-12"
-														onClick={() => setPairingRequested(true)}
-													>
-														{t("connect.title")}
-													</Button>
+											<div className="flex h-full min-h-0 flex-col">
+												<PaneHeader className="h-12">
+													<MobileAgentToolbar
+														agents={agents}
+														loading={agentsLoading}
+														selectedAgentId={selectedAgentId}
+														remoteSelected={false}
+														onSelectRemote={() => {
+															setHistoryOpen(false);
+															setAgentProvider("ds-harness-remote");
+														}}
+														onSelectBridge={() =>
+															setAgentProvider("agentero-bridge")
+														}
+														onSelectAgent={handleSelectAgent}
+														onOpenHistory={() => setHistoryOpen(true)}
+													/>
+												</PaneHeader>
+												<div className="min-h-0 flex-1">
+													{connected ? (
+														<MobileAgentPage
+															active={
+																layout.agent &&
+																agentProvider === "agentero-bridge" &&
+																!pairingRequested &&
+																!settingsOpen &&
+																!sidebarOpen &&
+																!paperImportOpen &&
+																!paperInfoOpen
+															}
+															key={selectedAgentId ?? "default"}
+															paperPath={selectedPaper?.path ?? undefined}
+															selectedAgentId={selectedAgentId}
+															sessionId={agentSessionId}
+															onSessionId={setAgentSessionId}
+															historyOpen={historyOpen}
+															onHistoryOpenChange={setHistoryOpen}
+														/>
+													) : (
+														<div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+															<p className="max-w-sm text-muted-foreground text-sm">
+																{t("agent.connectionRequired")}
+															</p>
+															{paired ? (
+																<Button
+																	variant="outline"
+																	className="min-h-12"
+																	onClick={() => void resume()}
+																>
+																	{t("local.retry")}
+																</Button>
+															) : null}
+															{resetAvailable ? (
+																<MobileBridgeReset onStatus={setStatus} />
+															) : null}
+															<Button
+																className="min-h-12"
+																onClick={() => setPairingRequested(true)}
+															>
+																{t("connect.title")}
+															</Button>
+														</div>
+													)}
 												</div>
-											)}
+											</div>
 										</div>
 									</div>
 								),

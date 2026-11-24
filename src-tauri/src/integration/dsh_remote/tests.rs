@@ -303,6 +303,124 @@ async fn send_remote(
 }
 
 #[tokio::test]
+async fn offline_saved_host_keeps_account_catalog_and_explicit_selection_available() {
+    use super::provider::{DshConnectionConfig, DshRemoteProvider};
+    use crate::features::remote_agent::{
+        ConnectRequest, ConnectionRef, HostRef, RemoteAgentService, DEFAULT_PROVIDER_ID,
+    };
+    use std::{collections::HashMap, sync::Arc};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let offline = DeviceIdentity::generate("a-offline".into()).unwrap();
+    let chosen = DeviceIdentity::generate("z-selected".into()).unwrap();
+    let client = DeviceIdentity::generate("client".into()).unwrap();
+    let row = |device: &DeviceIdentity| {
+        json!({"deviceId":device.device_id,"name":device.device_id,"role":"host",
+               "platform":"test","membershipId":"member","identityKey":device.public_key})
+    };
+    let offline_row = row(&offline);
+    let chosen_row = row(&chosen);
+    let server = tokio::spawn(async move {
+        let list = json!({"items":[offline_row.clone(),chosen_row.clone()]});
+        let replies = [
+            ("/api/v1/devices?limit=50", list.clone()),
+            ("/api/v1/devices/a-offline", offline_row.clone()),
+            (
+                "/api/v1/devices/a-offline/presence",
+                json!({"deviceId":"a-offline","online":false}),
+            ),
+            ("/api/v1/devices/z-selected", chosen_row.clone()),
+            (
+                "/api/v1/devices/z-selected/presence",
+                json!({"deviceId":"z-selected","online":true}),
+            ),
+        ];
+        for (path, reply) in replies {
+            let (socket, _) = listener.accept().await.unwrap();
+            assert!(http_reply(socket, reply)
+                .await
+                .starts_with(&format!("GET {path} ")));
+        }
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(socket).await.unwrap();
+        assert_eq!(read_ws(&mut socket).await.kind, "hello");
+        write_ws(&mut socket, "hello.ack", json!({"protocol":1,"serverVersion":"fixture","connectionSessionId":"control-session","heartbeatIntervalMs":1000,"maxControlFrameBytes":MAX_CONTROL_BYTES,"maxRelayFrameBytes":MAX_RELAY_BYTES,"capabilities":["transport.relay"]})).await;
+        let selection = read_ws(&mut socket).await;
+        assert_eq!(selection.kind, "connect.request");
+        assert_eq!(selection.payload["hostDeviceId"], "z-selected");
+        write_ws(&mut socket, "error", json!({"code":"HOST_OFFLINE"})).await;
+
+        // A failure on the relay still allows an account-scoped Host refresh.
+        for (path, reply) in [
+            ("/api/v1/devices?limit=50", list),
+            ("/api/v1/devices/a-offline", offline_row),
+            (
+                "/api/v1/devices/a-offline/presence",
+                json!({"deviceId":"a-offline","online":false}),
+            ),
+            ("/api/v1/devices/z-selected", chosen_row),
+            (
+                "/api/v1/devices/z-selected/presence",
+                json!({"deviceId":"z-selected","online":true}),
+            ),
+        ] {
+            let (socket, _) = listener.accept().await.unwrap();
+            assert!(http_reply(socket, reply)
+                .await
+                .starts_with(&format!("GET {path} ")));
+        }
+    });
+    let service = RemoteAgentService::default();
+    let provider = Arc::new(DshRemoteProvider::default());
+    service.register(provider.clone()).unwrap();
+    let connection = ConnectionRef {
+        provider_id: DEFAULT_PROVIDER_ID.into(),
+        connection_id: "fixture".into(),
+    };
+    provider
+        .configure(
+            connection.connection_id.0.clone(),
+            DshConnectionConfig {
+                api: ServerApi::new(&origin, Duration::from_secs(2)).unwrap(),
+                identity: client,
+                access_token: "fixture-device-access-token".into(),
+                pinned_hosts: HashMap::from([(
+                    offline.device_id.clone(),
+                    offline.public_key.clone(),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .connect(&ConnectRequest {
+            connection: connection.clone(),
+            config_version: 1,
+        })
+        .await
+        .unwrap();
+    let host = HostRef {
+        connection: connection.clone(),
+        host_id: chosen.device_id.as_str().into(),
+    };
+    let error = provider
+        .select_host(&host, chosen.public_key.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "HOST_OFFLINE");
+    let rows = service.list_hosts(&connection).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].online, Some(false));
+    assert_eq!(rows[1].online, Some(true));
+    assert!(rows[1].pinned);
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn real_rest_noise_relay_rpc_timeout_never_replays_mutation() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -310,7 +428,7 @@ async fn real_rest_noise_relay_rpc_timeout_never_replays_mutation() {
     let server_vector = v.clone();
     let server = tokio::spawn(async move {
         let (http, _) = listener.accept().await.unwrap();
-        let request = http_reply(http, json!({"deviceId":"host","name":"Fixture Host","role":"host","platform":"test","membershipId":"member","identityKey":server_vector["staticKeys"]["responder"]["publicKey"]})).await;
+        let request = http_reply(http, json!({"deviceId":"host","name":"Fixture Host","role":"host","platform":"test","membershipId":"member","online":true,"identityKey":server_vector["staticKeys"]["responder"]["publicKey"]})).await;
         assert!(request.starts_with("GET /api/v1/devices/host "));
         let (socket, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(socket).await.unwrap();
@@ -510,6 +628,208 @@ async fn rest_host_discovery_reads_every_page() {
     let hosts = api.list_hosts("fixture-access-token").await.unwrap();
     assert_eq!(hosts.len(), 2);
     timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn host_descriptor_resolves_presence_when_the_server_omits_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = ServerApi::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let public_key = encode_base64(&[7; 32]);
+    let server_key = public_key.clone();
+    let second_key = public_key.clone();
+    let server = tokio::spawn(async move {
+        // Newer Servers omit `online` from the descriptor entirely.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"deviceId":"host-1","name":"Host","role":"host","platform":"test","membershipId":"member","identityKey":server_key})).await;
+        assert!(request.starts_with("GET /api/v1/devices/host-1 "));
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(
+            socket,
+            json!({"deviceId":"host-1","online":true,"lastSeenAt":1_700_000_000_000u64}),
+        )
+        .await;
+        assert!(request.starts_with("GET /api/v1/devices/host-1/presence "));
+        // A presence answer for another device must be refused.
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"deviceId":"host-1","name":"Host","role":"host","platform":"test","membershipId":"member","identityKey":second_key})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"deviceId":"other-device","online":true})).await;
+    });
+    let host = api.host("fixture-access-token", "host-1").await.unwrap();
+    assert_eq!(host.device.online, Some(true));
+    assert_eq!(host.device.last_seen_at, Some(1_700_000_000_000));
+    assert!(api.host("fixture-access-token", "host-1").await.is_err());
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+async fn http_reply_status(mut socket: TcpStream, status: &str, body: Value) -> String {
+    let mut request = Vec::new();
+    let mut chunk = [0; 1024];
+    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+        let size = socket.read(&mut chunk).await.unwrap();
+        assert!(size > 0);
+        request.extend_from_slice(&chunk[..size]);
+        assert!(request.len() < 16384);
+    }
+    let body = body.to_string();
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+    socket.write_all(response.as_bytes()).await.unwrap();
+    String::from_utf8(request).unwrap()
+}
+
+#[tokio::test]
+async fn oauth_browser_sign_in_discovers_starts_polls_and_registers() {
+    use super::api::OAuthQrPoll;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let api = ServerApi::new(&origin, Duration::from_secs(2)).unwrap();
+    let scan_origin = origin.clone();
+    let server = tokio::spawn(async move {
+        // Discovery advertises GitHub (QR-capable) and a redirect-only provider.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"/api/v1/auth/oauth/github/start","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"},
+            {"id":"google","displayName":"Google","startUrl":"/api/v1/auth/oauth/google/start"}
+        ]})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/providers "));
+        // Start returns a same-origin scan URL and a bounded lifetime.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"qrId":"github-qr-session-1234567890","scanUrl":format!("{scan_origin}/api/v1/auth/q/github-qr-session-1234567890"),"expiresIn":300,"provider":"github"})).await;
+        assert!(request.starts_with("POST /api/v1/auth/oauth/qr/start?provider=github "));
+        // Poll: pending, then complete with the one-time account token.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"status":"pending"})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/qr/github-qr-session-1234567890 "));
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(
+            socket,
+            json!({"status":"complete","token":"account-token-fixture-0123456789"}),
+        )
+        .await;
+        // Account profile under the fresh account token.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(
+            socket,
+            json!({"account":"reader@example.test","isAdmin":false}),
+        )
+        .await;
+        assert!(request.starts_with("GET /api/v1/auth/me "));
+        assert!(request.contains("Bearer account-token-fixture-0123456789"));
+        // Device registration exchanges the account token for a device pair.
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"accessToken":"device-access-fixture","accessTokenExpiresAt":9_000_000_000_000u64,"refreshToken":"device-refresh-fixture","refreshTokenExpiresAt":9_000_000_000_000u64})).await;
+        assert!(request.starts_with("POST /api/v1/devices/register "));
+        assert!(request.contains("Bearer account-token-fixture-0123456789"));
+    });
+    let providers = api.oauth_providers().await.unwrap();
+    assert_eq!(providers.len(), 2);
+    let github = providers.iter().find(|p| p.id == "github").unwrap();
+    assert!(providers
+        .iter()
+        .find(|p| p.id == "google")
+        .unwrap()
+        .qr_start_url
+        .is_none());
+    let session = api.start_oauth_qr(github).await.unwrap();
+    assert_eq!(session.expires_in, 300);
+    assert_eq!(
+        api.poll_oauth_qr(&session.qr_id).await.unwrap(),
+        OAuthQrPoll::Pending
+    );
+    let OAuthQrPoll::Complete(token) = api.poll_oauth_qr(&session.qr_id).await.unwrap() else {
+        panic!("expected completion");
+    };
+    assert_eq!(api.account_me(&token).await.unwrap(), "reader@example.test");
+    let identity = DeviceIdentity::generate(uuid::Uuid::new_v4().to_string()).unwrap();
+    let pair = api
+        .register(&identity, "Agentero", "windows", "0.0.0-test", &token)
+        .await
+        .unwrap();
+    assert_eq!(pair.access_token, "device-access-fixture");
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn oauth_discovery_falls_back_to_legacy_status_only_on_404() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = ServerApi::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply_status(
+            socket,
+            "404 Not Found",
+            json!({"error":{"code":"NOT_FOUND"}}),
+        )
+        .await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/providers "));
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply(socket, json!({"configured":true})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/status "));
+        let (socket, _) = listener.accept().await.unwrap();
+        let request = http_reply_status(socket, "404 Not Found", json!({})).await;
+        assert!(request.starts_with("GET /api/v1/auth/oauth/github/status "));
+    });
+    let providers = api.oauth_providers().await.unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "zhihu");
+    assert_eq!(
+        providers[0].qr_start_url.as_deref(),
+        Some("/api/v1/auth/oauth/qr/start?provider=zhihu")
+    );
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn oauth_rejects_cross_origin_scan_urls_and_unsafe_entry_paths() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = ServerApi::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"/api/v1/auth/oauth/github/start","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"}
+        ]})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"qrId":"github-qr-session-1234567890","scanUrl":"https://evil.example/api/v1/auth/q/x","expiresIn":300})).await;
+        // A discovery response pointing outside /api/v1/auth/ must be refused.
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"https://evil.example/start","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"}
+        ]})).await;
+        let (socket, _) = listener.accept().await.unwrap();
+        http_reply(socket, json!({"items":[
+            {"id":"github","displayName":"GitHub","startUrl":"/api/v1/auth/../devices","qrStartUrl":"/api/v1/auth/oauth/qr/start?provider=github"}
+        ]})).await;
+    });
+    let providers = api.oauth_providers().await.unwrap();
+    let session = api.start_oauth_qr(&providers[0]).await;
+    assert!(session.is_err());
+    assert!(api.oauth_providers().await.is_err());
+    assert!(api.oauth_providers().await.is_err());
+    timeout(Duration::from_secs(5), server)
         .await
         .unwrap()
         .unwrap();

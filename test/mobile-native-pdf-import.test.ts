@@ -159,9 +159,8 @@ vi.mock("@/components/mobile/mobile-reader-page", () => ({
 		);
 	},
 }));
-vi.mock("@/components/mobile/remote/mobile-remote-agent-page", () => ({
-	MobileRemoteAgentPage: () =>
-		h("textarea", { "aria-label": "retained-agent" }),
+vi.mock("@/components/agent/agent-panel", () => ({
+	AgentPanel: () => h("textarea", { "aria-label": "retained-agent" }),
 }));
 vi.mock("@/components/mobile/mobile-agent-page", () => ({
 	MobileAgentPage: () => null,
@@ -277,11 +276,10 @@ it("opens the real settings page from the real Sidebar while keeping runtime own
 	if (!page) throw Error("Real settings page missing");
 	expect(page.textContent).toContain("settings:title");
 	const navButtons = [...page.querySelectorAll("nav button")];
-	// Android adds a dedicated EasyScholar settings pane between translate and
-	// layout (mobile-settings-page NAV); the shared mobile surface has six.
 	expect(navButtons.map((item) => item.textContent)).toEqual([
 		"settings:nav.appearance",
 		"settings:nav.reading",
+		"settings:nav.agent",
 		"settings:nav.translate",
 		"settings:general.easyScholar.section",
 		"settings:nav.layout",
@@ -297,7 +295,7 @@ it("opens the real settings page from the real Sidebar while keeping runtime own
 	const translate = settingsPage();
 	expect(translate?.textContent).toContain("translate.title");
 	expect(translate?.textContent).not.toContain("appearance.title");
-	expect(document.querySelector("#translate-cache-ir")).not.toBeNull();
+	expect(document.querySelector("#translate-cache-translation")).not.toBeNull();
 	await clickLabel("settings:nav.layout");
 	const layout = settingsPage();
 	expect(layout?.textContent).toContain("layout.title");

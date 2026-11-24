@@ -163,6 +163,13 @@ impl DshRemoteProvider {
     pub async fn connect_host(&self, host: &HostRef) -> Result<RpcClient> {
         let state = self.connection(&host.connection).await?;
         let mut state = state.lock().await;
+        Self::connect_host_locked(&mut state, host, false).await
+    }
+    async fn connect_host_locked(
+        state: &mut Connection,
+        host: &HostRef,
+        allow_switch: bool,
+    ) -> Result<RpcClient> {
         if !state.connected {
             return Err(RemoteError::new(
                 "AUTH_REQUIRED",
@@ -174,10 +181,11 @@ impl DshRemoteProvider {
                 return Ok(runtime.rpc.clone());
             }
         }
-        if state
-            .hosts
-            .iter()
-            .any(|(id, active)| id != &host.host_id.0 && !active.rpc.is_closed())
+        if !allow_switch
+            && state
+                .hosts
+                .iter()
+                .any(|(id, active)| id != &host.host_id.0 && !active.rpc.is_closed())
         {
             return Err(RemoteError::new("CONNECTION_IN_USE", "This client identity already controls another Host; select_host must explicitly switch it"));
         }
@@ -223,30 +231,28 @@ impl DshRemoteProvider {
         );
         Ok(rpc)
     }
-    /// Explicitly switch the single active Host for this registered client.
-    /// The caller must refresh shared-service capabilities through resume after
-    /// selection; no pending operation or interaction answer is replayed.
-    pub async fn select_host(&self, host: &HostRef) -> Result<ConnectionInfo> {
+    /// Apply the persisted pin and open only the explicitly selected Host.
+    /// The caller refreshes shared-service capabilities through resume.
+    pub async fn select_host(&self, host: &HostRef, pinned_key: String) -> Result<()> {
         let state = self.connection(&host.connection).await?;
-        {
-            let mut state = state.lock().await;
-            if !state.connected {
-                return Err(RemoteError::new(
-                    "AUTH_REQUIRED",
-                    "Connect the account before selecting a Host",
-                ));
-            }
-            let previous = std::mem::take(&mut state.hosts);
-            for runtime in previous.into_values() {
-                runtime.rpc.close().await;
-            }
-        }
-        self.connect_host(host).await?;
-        let state = state.lock().await;
-        Ok(info(&host.connection, &state))
+        let mut state = state.lock().await;
+        state
+            .config
+            .pinned_hosts
+            .insert(host.host_id.0.clone(), pinned_key);
+        Self::connect_host_locked(&mut state, host, true).await?;
+        Ok(())
     }
     async fn mutate(&self, request: &OperationRequest) -> Result<OperationOutcome> {
-        let workspace = request.mutation.workspace();
+        let host_ref = request.mutation.host();
+        if let Mutation::EnsureWorkspace { .. } = &request.mutation {
+            let host = self.native_host(host_ref).await?;
+            return Self::mutate_on_host(&host, request).await;
+        }
+        let workspace = request
+            .mutation
+            .workspace()
+            .ok_or_else(|| RemoteError::invalid("Mutation has no workspace scope"))?;
         model::ensure_backend(workspace)?;
         let host = self.native_host(&workspace.host).await?;
         Self::mutate_on_host(&host, request).await
@@ -257,26 +263,46 @@ impl DshRemoteProvider {
     ) -> Result<OperationOutcome> {
         let operation = &request.operation_id.0;
         match &request.mutation {
+            Mutation::EnsureWorkspace { host: target, path } => {
+                let workspace = host.ensure_workspace(operation, target, path).await?;
+                Ok(OperationOutcome::Succeeded {
+                    result: OperationResult::WorkspaceEnsured { workspace },
+                })
+            }
             Mutation::CreateSession { workspace, title } => {
                 if title.is_some() {
                     return Err(RemoteError::new("FEATURE_NOT_SUPPORTED", "Native session/create has no title argument; creation with a requested title is unsupported"));
                 }
-                if !host
-                    .workspace_rows()
-                    .await?
-                    .iter()
-                    .any(|row| row.workspace_id == workspace.workspace_id.0)
-                {
-                    return Err(RemoteError::new(
-                        "WORKSPACE_NOT_FOUND",
-                        "Workspace is absent from the official native catalog",
-                    ));
-                }
+                let request = if workspace.workspace_id.0 == model::UNASSIGNED_WORKSPACE_ID {
+                    // True unassigned session: no workspaceId, only the exact
+                    // trusted Papers cwd (v3 Host with a known home). Upload
+                    // authority resolves the root from session/list cwd.
+                    let papers = host.papers_cwd().ok_or_else(|| {
+                        RemoteError::new(
+                            "FEATURE_NOT_SUPPORTED",
+                            "Unassigned sessions require a v3 Host with a known home",
+                        )
+                    })?;
+                    json!({"cwd":papers})
+                } else {
+                    if !host
+                        .workspace_rows()
+                        .await?
+                        .iter()
+                        .any(|row| row.workspace_id == workspace.workspace_id.0)
+                    {
+                        return Err(RemoteError::new(
+                            "WORKSPACE_NOT_FOUND",
+                            "Workspace is absent from the official native catalog",
+                        ));
+                    }
+                    json!({"workspaceId":workspace.workspace_id.0})
+                };
                 let value = call(
                     &host.wire,
                     operation,
                     "session/create",
-                    json!({"request":{"workspaceId":workspace.workspace_id.0}}),
+                    json!({"request":request}),
                     CallSemantics::Mutation,
                 )
                 .await?;
@@ -340,6 +366,12 @@ impl DshRemoteProvider {
                 }
                 Ok(OperationOutcome::Accepted)
             }
+            Mutation::SelectModel { session, selection } => Ok(OperationOutcome::Succeeded {
+                result: OperationResult::ModelSelected {
+                    session: session.clone(),
+                    selected: Box::new(host.select_model(operation, session, selection).await?),
+                },
+            }),
             Mutation::RespondPermission {
                 session,
                 request_id,
@@ -380,6 +412,7 @@ fn info(reference: &ConnectionRef, state: &Connection) -> ConnectionInfo {
             Capability::ListSessions,
             Capability::CreateSession,
             Capability::ReadSession,
+            Capability::SelectModel,
             Capability::SendMessage,
             Capability::Cancel,
             Capability::Subscribe,
@@ -398,7 +431,7 @@ fn info(reference: &ConnectionRef, state: &Connection) -> ConnectionInfo {
         capabilities: Capabilities {
             operations,
             authentication: vec![
-                AuthenticationMethod::Password,
+                AuthenticationMethod::Browser,
                 AuthenticationMethod::ExistingCredential,
             ],
             backends: if native {
@@ -438,6 +471,9 @@ impl RemoteAgentProvider for DshRemoteProvider {
             .map_err(app_error)?;
         let hosts = {
             let mut state = state.lock().await;
+            if state.connected && state.hosts.values().any(|runtime| !runtime.rpc.is_closed()) {
+                return Ok(info(&request.connection, &state));
+            }
             let hosts = state
                 .config
                 .api
@@ -445,29 +481,32 @@ impl RemoteAgentProvider for DshRemoteProvider {
                 .await
                 .map_err(app_error)?;
             state.connected = true;
-            if state.hosts.values().any(|runtime| !runtime.rpc.is_closed()) {
-                vec![]
-            } else {
-                let mut candidates = hosts
-                    .into_iter()
-                    .filter(|host| {
-                        host.online && state.config.pinned_hosts.contains_key(&host.device_id)
-                    })
-                    .collect::<Vec<_>>();
-                candidates.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-                candidates.into_iter().take(1).collect::<Vec<_>>()
-            }
-        };
-        for host in hosts {
-            if let Err(error) = self
-                .connect_host(&HostRef {
-                    connection: request.connection.clone(),
-                    host_id: HostId(host.device_id),
+            hosts
+                .into_iter()
+                .filter(|host| {
+                    // Presence can be omitted; connect_host checks the descriptor.
+                    host.online != Some(false)
+                        && state.config.pinned_hosts.contains_key(&host.device_id)
                 })
-                .await
-            {
-                let _ = self.disconnect(&request.connection).await;
-                return Err(app_error(error));
+                .min_by(|left, right| left.device_id.cmp(&right.device_id))
+        };
+        if let Some(host) = hosts {
+            let host = HostRef {
+                connection: request.connection.clone(),
+                host_id: HostId(host.device_id),
+            };
+            if let Err(error) = self.connect_host(&host).await {
+                // REST already authenticated the account. Its Host picker must
+                // remain available if the previously trusted Host is unreachable.
+                log::warn!(
+                    target: "agentero::dsh_remote",
+                    "Automatic Remote Host connection failed ({})",
+                    match error.code.as_str() {
+                        "HOST_OFFLINE" => "Host offline",
+                        "PEER_IDENTITY_MISMATCH" => "Host identity mismatch",
+                        _ => "Host setup failed",
+                    }
+                );
             }
         }
         let state = state.lock().await;
@@ -511,36 +550,63 @@ impl RemoteAgentProvider for DshRemoteProvider {
         reference: &ConnectionRef,
     ) -> std::result::Result<Vec<HostInfo>, AppError> {
         let state = self.connection(reference).await.map_err(app_error)?;
-        let state = state.lock().await;
-        if !state.connected {
-            return Err(app_error(RemoteError::new(
-                "AUTH_REQUIRED",
-                "Remote account is disconnected",
-            )));
-        }
-        Ok(state
-            .config
-            .api
-            .list_hosts(&state.config.access_token)
-            .await
-            .map_err(app_error)?
-            .into_iter()
-            .map(|host| HostInfo {
+        let (api, token, pins) = {
+            let state = state.lock().await;
+            if !state.connected {
+                return Err(app_error(RemoteError::new(
+                    "AUTH_REQUIRED",
+                    "Remote account is disconnected",
+                )));
+            }
+            (
+                state.config.api.clone(),
+                state.config.access_token.clone(),
+                state.config.pinned_hosts.clone(),
+            )
+        };
+        let hosts = api.list_hosts(&token).await.map_err(app_error)?;
+        // The device list omits presence on newer Servers. Resolve each Host's
+        // descriptor + presence like the official clients; a lookup failure is
+        // surfaced as unknown, never silently downgraded to offline.
+        let mut rows = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let (online, pinned) = match api.host(&token, &host.device_id).await {
+                Ok(peer) => (
+                    peer.device.online.or(host.online),
+                    pins.get(&host.device_id)
+                        .is_some_and(|pin| pin == &peer.identity_key),
+                ),
+                Err(_) => (host.online, pins.contains_key(&host.device_id)),
+            };
+            // Home comes from the connected native ready frame; an unconnected
+            // Host leaves it None rather than guessing from workspace paths.
+            let home = {
+                let state = state.lock().await;
+                state
+                    .hosts
+                    .get(&host.device_id)
+                    .filter(|runtime| !runtime.rpc.is_closed())
+                    .and_then(|runtime| runtime.native.home.clone())
+            };
+            rows.push(HostInfo {
                 host: HostRef {
                     connection: reference.clone(),
                     host_id: HostId(host.device_id),
                 },
                 name: host.name,
-                online: host.online,
-            })
-            .collect())
+                online,
+                pinned,
+                home,
+            });
+        }
+        Ok(rows)
     }
     async fn list_workspaces(
         &self,
         reference: &HostRef,
     ) -> std::result::Result<Vec<WorkspaceInfo>, AppError> {
         let host = self.native_host(reference).await.map_err(app_error)?;
-        Ok(host
+        let mut rows: Vec<WorkspaceInfo> = host
             .workspace_rows()
             .await
             .map_err(app_error)?
@@ -552,8 +618,23 @@ impl RemoteAgentProvider for DshRemoteProvider {
                     workspace_id: WorkspaceId(row.workspace_id),
                 },
                 name: row.title,
+                path: row.path,
             })
-            .collect())
+            .collect();
+        // Virtual unassigned scope (v3 + known home only). It is a listing
+        // convenience, never part of the official baseline or ownership union.
+        if let Some(papers) = host.papers_cwd() {
+            rows.push(WorkspaceInfo {
+                workspace: WorkspaceRef {
+                    host: reference.clone(),
+                    backend_id: model::BACKEND.into(),
+                    workspace_id: WorkspaceId(model::UNASSIGNED_WORKSPACE_ID.into()),
+                },
+                name: "Papers".into(),
+                path: Some(papers),
+            });
+        }
+        Ok(rows)
     }
     async fn list_sessions(
         &self,
@@ -592,6 +673,29 @@ impl RemoteAgentProvider for DshRemoteProvider {
             .await
             .map_err(app_error)
     }
+    async fn session_models(
+        &self,
+        reference: &SessionRef,
+    ) -> std::result::Result<Option<RemoteSessionModels>, AppError> {
+        model::ensure_backend(&reference.workspace).map_err(app_error)?;
+        self.native_host(&reference.workspace.host)
+            .await
+            .map_err(app_error)?
+            .session_models(reference)
+            .await
+            .map_err(app_error)
+    }
+    async fn host_models(
+        &self,
+        reference: &HostRef,
+    ) -> std::result::Result<Option<RemoteSessionModels>, AppError> {
+        self.native_host(reference)
+            .await
+            .map_err(app_error)?
+            .session_model_catalog()
+            .await
+            .map_err(app_error)
+    }
     async fn subscribe(
         &self,
         reference: &SessionRef,
@@ -609,7 +713,7 @@ impl RemoteAgentProvider for DshRemoteProvider {
         &self,
         request: &OperationRequest,
     ) -> std::result::Result<OperationOutcome, AppError> {
-        let reference = &request.mutation.workspace().host.connection;
+        let reference = &request.mutation.host().connection;
         let state = self.connection(reference).await.map_err(app_error)?;
         let fingerprint = serde_json::to_string(&request.mutation)
             .map_err(|_| app_error(RemoteError::invalid("Cannot fingerprint native mutation")))?;

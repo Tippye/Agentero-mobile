@@ -79,6 +79,7 @@ fn fixture(origin: &str) -> LaunchAccount {
             server: origin.into(),
             expires_at: now + 3_600_000,
             persistence: RemoteCredentialPersistence::SystemStore,
+            login_provider: Some("github".into()),
             info: ConnectionInfo {
                 connection,
                 capabilities: Capabilities {

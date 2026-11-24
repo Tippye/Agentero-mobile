@@ -14,6 +14,7 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
+import { PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/core/utils";
 
 export type ModelSelectorProps = ComponentProps<typeof Dialog>;
@@ -31,6 +32,7 @@ export const ModelSelectorTrigger = (props: ModelSelectorTriggerProps) => (
 export type ModelSelectorContentProps = ComponentProps<typeof DialogContent> & {
 	title?: ReactNode;
 	header?: ReactNode;
+	dropdown?: boolean;
 };
 
 export const ModelSelectorContent = ({
@@ -38,9 +40,30 @@ export const ModelSelectorContent = ({
 	children,
 	title,
 	header,
+	dropdown = false,
 	...props
 }: ModelSelectorContentProps) => {
 	const { t } = useTranslation("aiElements");
+	const content = (
+		<>
+			{header}
+			<Command className="**:data-[slot=command-input-wrapper]:h-auto">
+				{children}
+			</Command>
+		</>
+	);
+	if (dropdown) {
+		return (
+			<PopoverContent
+				align="start"
+				aria-label={t("modelSelector.label")}
+				className="w-[min(22rem,calc(100vw-1rem))] gap-0 p-0"
+				onOpenAutoFocus={(event) => event.preventDefault()}
+			>
+				{content}
+			</PopoverContent>
+		);
+	}
 
 	return (
 		<DialogContent
@@ -54,10 +77,7 @@ export const ModelSelectorContent = ({
 			<DialogTitle className="sr-only">
 				{title ?? t("modelSelector.label")}
 			</DialogTitle>
-			{header}
-			<Command className="**:data-[slot=command-input-wrapper]:h-auto">
-				{children}
-			</Command>
+			{content}
 		</DialogContent>
 	);
 };

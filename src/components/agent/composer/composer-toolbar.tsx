@@ -11,9 +11,13 @@ export function ComposerToolbar({
 	compact = false,
 	switching,
 	activeUsage,
+	showAttachments = true,
+	allowFiles = false,
 }: {
 	compact?: boolean;
 	switching: boolean;
+	showAttachments?: boolean;
+	allowFiles?: boolean;
 	activeUsage: { used: number; size: number } | null;
 }) {
 	return (
@@ -26,7 +30,12 @@ export function ComposerToolbar({
 					</ContextContent>
 				</Context>
 			) : null}
-			{compact ? null : <ComposerAttachImageButton disabled={switching} />}
+			{!compact && showAttachments && (
+				<ComposerAttachImageButton
+					disabled={switching}
+					allowFiles={allowFiles}
+				/>
+			)}
 		</>
 	);
 }
