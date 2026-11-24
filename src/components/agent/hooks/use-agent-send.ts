@@ -500,6 +500,7 @@ export function useAgentSend({
 		historyTitle: string;
 		files?: File[];
 		paperFile?: File;
+		paperId?: string;
 		contextNote?: string;
 	}): Promise<
 		RunOnceAccepted & {
@@ -530,6 +531,7 @@ export function useAgentSend({
 					images: turn.images,
 					files: turn.files,
 					paperFile: turn.paperFile,
+					paperId: turn.paperId,
 					modelId: turn.resumeSessionId ? undefined : turn.modelId,
 					title: turn.historyTitle,
 				},
@@ -938,6 +940,7 @@ export function useAgentSend({
 				historyTitle,
 				files,
 				paperFile,
+				paperId: paperFile ? submittedPaper?.source.paper.id : undefined,
 				contextNote:
 					transport && submittedPaper && !submittedPaper.includePdf
 						? [

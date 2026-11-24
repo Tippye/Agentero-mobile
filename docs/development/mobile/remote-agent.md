@@ -16,6 +16,8 @@ dsh-remote（ds-harness-remote）默认只提供 GitHub、Google、知乎等第�
 
 论文会话在主机用户目录下的 `Agentero/Papers` 运行。v3 主机创建的会话没有所属项目。v1 主机使用独立的 `Papers` 工作区。历史菜单也可打开此前存放在 `Papers` 工作区的会话。主机提供上下文用量和容量时，输入区显示相同的上下文占用面板。操作回执在后台保留，会话仅提示需要处理的异常。
 
+带当前 PDF 提问时，Agentero 要求远程 Agent 为关键论点附上经过核实的 PDF 页码。点击聊天中的出处会在当前 Vault 查找对应论文，并打开移动阅读器。历史消息中的引用也按原论文 ID 查找。当前 Vault 中能匹配的其他论文和论文笔记也可打开，外部网页走系统浏览器。章节、图表、公式和版面区域定位依赖本机已有的解析数据。
+
 移动端设置页另有「Agent」分区（[MobileAgentPane](../../../src/components/mobile/mobile-agent-pane.tsx)）：应用级 Agent 偏好 + 远程 Agent 连接模块；本地 CLI 安装、Node.js 工具与模型席位仍是桌面专属。
 
 ## Bridge 身份与配对
