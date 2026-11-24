@@ -77,6 +77,64 @@ pub(crate) fn sessions(value: Value, workspace: &WorkspaceRow) -> Result<Vec<Ses
     }
     Ok(result)
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCatalog {
+    default: RemoteModelSelection,
+    routable_providers: Option<Vec<String>>,
+    groups: Vec<RemoteModelProviderGroup>,
+    #[serde(default)]
+    failures: Vec<RemoteModelProviderFailure>,
+}
+
+fn valid_selection(selection: &RemoteModelSelection) -> bool {
+    !selection.provider.trim().is_empty() && !selection.model.trim().is_empty()
+}
+
+fn projected_model(row: &SessionRow) -> Option<RemoteModelSelection> {
+    let projection = row.projections.pointer("/values/modelSelection")?;
+    [
+        projection.get("next"),
+        projection.get("lastUsed"),
+        Some(projection),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|candidate| {
+        let selection: RemoteModelSelection = serde_json::from_value(candidate.clone()).ok()?;
+        valid_selection(&selection).then_some(selection)
+    })
+}
+
+pub(crate) fn session_models(row: &SessionRow, value: Value) -> Result<RemoteSessionModels> {
+    let catalog: ModelCatalog = serde_json::from_value(value)
+        .map_err(|_| RemoteError::invalid("Invalid native model catalog"))?;
+    if !valid_selection(&catalog.default) {
+        return Err(RemoteError::invalid("Invalid native default model"));
+    }
+    let current = projected_model(row).unwrap_or(catalog.default);
+    let routable = catalog.routable_providers.as_ref().map_or_else(
+        || !catalog.groups.is_empty(),
+        |providers| providers.contains(&current.provider),
+    );
+    Ok(RemoteSessionModels {
+        current,
+        routable,
+        groups: catalog.groups,
+        failures: catalog.failures,
+    })
+}
+
+pub(crate) fn selected_model(value: &Value) -> Result<RemoteModelSelection> {
+    let selected = value
+        .get("selected")
+        .cloned()
+        .and_then(|selected| serde_json::from_value(selected).ok())
+        .filter(valid_selection)
+        .ok_or_else(|| RemoteError::invalid("Invalid native model selection"))?;
+    Ok(selected)
+}
+
 pub(crate) fn ensure_backend(workspace: &WorkspaceRef) -> Result<()> {
     if workspace.backend_id.0 != BACKEND {
         return Err(RemoteError::new(

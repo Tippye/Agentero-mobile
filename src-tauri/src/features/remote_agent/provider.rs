@@ -57,6 +57,13 @@ pub trait RemoteAgentProvider: Send + Sync {
         Err(unsupported(Capability::ReadSession))
     }
 
+    async fn session_models(
+        &self,
+        _session: &SessionRef,
+    ) -> Result<Option<RemoteSessionModels>, AppError> {
+        Ok(None)
+    }
+
     /// Snapshot cursor is opaque. The adapter must use official history/stream
     /// recovery and close any race between baseline and subscription. There is
     /// no assumption that the backend supports an event replay buffer.

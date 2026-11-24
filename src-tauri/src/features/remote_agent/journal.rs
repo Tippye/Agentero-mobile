@@ -27,6 +27,9 @@ pub enum OperationContext {
     Cancel {
         session: SessionRef,
     },
+    SelectModel {
+        session: SessionRef,
+    },
     RespondPermission {
         session: SessionRef,
         request_id: String,
@@ -45,6 +48,7 @@ impl OperationContext {
             Self::CreateSession { workspace } => workspace,
             Self::SendMessage { session }
             | Self::Cancel { session }
+            | Self::SelectModel { session }
             | Self::RespondPermission { session, .. }
             | Self::RespondQuestion { session, .. }
             | Self::UploadAttachment { session } => &session.workspace,
@@ -59,6 +63,9 @@ impl OperationContext {
                 session: session.clone(),
             },
             Mutation::Cancel { session } => Self::Cancel {
+                session: session.clone(),
+            },
+            Mutation::SelectModel { session, .. } => Self::SelectModel {
                 session: session.clone(),
             },
             Mutation::RespondPermission {
@@ -235,6 +242,7 @@ impl JournalEntry {
                 }
                 OperationContext::SendMessage { session }
                 | OperationContext::Cancel { session }
+                | OperationContext::SelectModel { session }
                 | OperationContext::UploadAttachment { session } => {
                     super::service::session_ref(session)?
                 }
@@ -287,6 +295,11 @@ impl JournalEntry {
                 } => Some(OperationContext::UploadAttachment {
                     session: attachment.session.clone(),
                 }),
+                OperationOutcome::Succeeded {
+                    result: OperationResult::ModelSelected { session, .. },
+                } => Some(OperationContext::SelectModel {
+                    session: session.clone(),
+                }),
                 _ => None,
             };
         }
@@ -329,12 +342,26 @@ pub(super) fn validate_context_outcome(
                 }
             }
         }
+        OperationResult::ModelSelected { session, selected } => {
+            super::service::session_ref(session)?;
+            super::service::validate_model_selection(selected)?;
+            if &session.workspace.host.connection != connection {
+                return Err(super::service::boundary());
+            }
+            if let Some(context) = context {
+                if !matches!(context, OperationContext::SelectModel { session: target } if target == session)
+                {
+                    return Err(super::service::boundary());
+                }
+            }
+        }
         OperationResult::Acknowledged => {
             if matches!(
                 context,
                 Some(
                     OperationContext::CreateSession { .. }
                         | OperationContext::UploadAttachment { .. }
+                        | OperationContext::SelectModel { .. }
                 )
             ) {
                 return Err(invalid_record());

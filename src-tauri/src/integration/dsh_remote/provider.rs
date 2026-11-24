@@ -340,6 +340,12 @@ impl DshRemoteProvider {
                 }
                 Ok(OperationOutcome::Accepted)
             }
+            Mutation::SelectModel { session, selection } => Ok(OperationOutcome::Succeeded {
+                result: OperationResult::ModelSelected {
+                    session: session.clone(),
+                    selected: Box::new(host.select_model(operation, session, selection).await?),
+                },
+            }),
             Mutation::RespondPermission {
                 session,
                 request_id,
@@ -380,6 +386,7 @@ fn info(reference: &ConnectionRef, state: &Connection) -> ConnectionInfo {
             Capability::ListSessions,
             Capability::CreateSession,
             Capability::ReadSession,
+            Capability::SelectModel,
             Capability::SendMessage,
             Capability::Cancel,
             Capability::Subscribe,
@@ -608,6 +615,18 @@ impl RemoteAgentProvider for DshRemoteProvider {
             .await
             .map_err(app_error)?
             .read(reference)
+            .await
+            .map_err(app_error)
+    }
+    async fn session_models(
+        &self,
+        reference: &SessionRef,
+    ) -> std::result::Result<Option<RemoteSessionModels>, AppError> {
+        model::ensure_backend(&reference.workspace).map_err(app_error)?;
+        self.native_host(&reference.workspace.host)
+            .await
+            .map_err(app_error)?
+            .session_models(reference)
             .await
             .map_err(app_error)
     }
