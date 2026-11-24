@@ -38,24 +38,12 @@ Agentero 的移动端分支：面向 Android 平板与折叠屏（iOS 平板在�
 - **手写批注**：支持笔、荧光笔、按笔擦除、套索移动/复制/删除，以及撤销和重做。笔停 500 ms 会把笔迹吸附成直线、箭头、矩形、三角形或圆/椭圆，抬笔即提交。
 - **两种提问方式**：长按 1 秒选中一个词或一句话，用工具栏批注；或者切到区域框选，在 PDF 上圈一块没有笔迹的区域，连同截图一起发给 Agent。
 
-<p align="center">
-  <img src="docs/assets/screenshots/tablet-ink.png" alt="PDF 手写批注" width="90%" />
-  <br/>
-  <sub>手写层与原文叠在同一页上，笔迹随论文一起保存和同步。</sub>
-</p>
-
 ### 2. 翻译与版面解析
 
 - **译文、对照随时切换**：整篇或单页翻译，译文覆盖在原文上，也可以并排看。翻译和版面解析都在后台任务里跑，离开当前论文不会中断。
 - **成品 PDF 先看**：版面还没解析完、但已经有匹配当前语言和服务的译文 PDF 时，会先只读显示成品，解析和补块在后台继续。
 - **翻译缓存开关**（设置 → 翻译）：默认开启，译文 sidecar 与译文 PDF 随知识库同步；关闭后只留在本机。版面解析结果始终同步，图表、引用和按需下载都依赖它。
 - **离线也能排版**：排版保底字体打进安装包，没有网络或镜像不可用时仍然能生成译文 PDF。
-
-<p align="center">
-  <img src="docs/assets/screenshots/tablet-translate.png" alt="原文与译文对照" width="90%" />
-  <br/>
-  <sub>对照阅读时悬停原文句子，会标出对应的译文。</sub>
-</p>
 
 ### 3. 本地优先的知识库与同步
 
@@ -66,7 +54,7 @@ Agentero 的移动端分支：面向 Android 平板与折叠屏（iOS 平板在�
 <p align="center">
   <img src="docs/assets/screenshots/tablet-library.png" alt="论文库" width="90%" />
   <br/>
-  <sub>论文库卡片视图，可预览首页、按文件夹管理，左滑固定离线或删除。</sub>
+  <sub>论文库列表：标题、作者与年份直接来自元数据，可切换卡片视图、按文件夹管理，左滑固定离线或删除。</sub>
 </p>
 
 ### 4. 远程 Agent 伴读
@@ -80,7 +68,7 @@ Agentero 的移动端分支：面向 Android 平板与折叠屏（iOS 平板在�
 ## 界面预览
 
 <details>
-<summary><b>点击展开：更多平板截图（文献库、译文对照、手写、同步设置）</b></summary>
+<summary><b>点击展开：平板截图（文献库、阅读器）</b></summary>
 <br/>
 
 #### 文献库
@@ -89,16 +77,12 @@ Agentero 的移动端分支：面向 Android 平板与折叠屏（iOS 平板在�
   <img src="docs/assets/screenshots/tablet-library.png" alt="文献库" width="85%" />
 </p>
 
-#### 手写批注
+#### 阅读器
 
 <p align="center">
-  <img src="docs/assets/screenshots/tablet-ink.png" alt="手写批注" width="85%" />
-</p>
-
-#### 同步设置
-
-<p align="center">
-  <img src="docs/assets/screenshots/tablet-sync.png" alt="同步设置" width="85%" />
+  <img src="docs/assets/screenshots/tablet-reader.png" alt="阅读器" width="85%" />
+  <br/>
+  <sub>顶栏切换原文 / 译文 / 对照；底部浮层提供笔、撤销、套索、导出与缩放。</sub>
 </p>
 
 </details>
