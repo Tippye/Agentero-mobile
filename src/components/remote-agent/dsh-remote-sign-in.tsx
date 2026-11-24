@@ -304,19 +304,15 @@ export function DshRemoteSignIn({
 				waitingQrRef.current = null;
 				setPhase({ kind: "completing", providerId: waiting.providerId });
 				setQrImage(null);
+				// Changing phase ends this polling effect. Hand off the activated
+				// account before awaiting any follow-up work.
 				try {
-					const value = await remoteAgent.catalog();
-					if (!cancelled && run === runRef.current) adoptCatalog(value);
-				} catch {
-					/* The account view still arrives through onSignedIn. */
-				}
-				if (!cancelled && run === runRef.current) {
-					try {
-						await signedInRef.current(status.account);
-					} catch (error) {
-						// Sign-in itself succeeded; only the owner's follow-up failed.
-						notifyError(errorText(error));
-					}
+					await signedInRef.current(status.account);
+				} catch (error) {
+					notifyError(errorText(error));
+				} finally {
+					if (mounted.current && run === runRef.current)
+						setPhase({ kind: "idle" });
 				}
 			} catch (error) {
 				if (cancelled || run !== runRef.current) return;
@@ -336,7 +332,7 @@ export function DshRemoteSignIn({
 			cancelled = true;
 			clearTimeout(timer);
 		};
-	}, [waiting, adoptCatalog]);
+	}, [waiting]);
 
 	const retrySaved = useCallback(async () => {
 		try {
