@@ -755,6 +755,7 @@ export const commands = {
 	 *  its papers. Uses the stored key only.
 	 */
 	alphaxivListFolders: () => __TAURI_INVOKE<ApiResult<AlphaXivFolder[]>>("alphaxiv_list_folders"),
+	alphaxivPrepareNotes: (vaultPath: string, path: string, paperGroupId: string, arxivId: string) => __TAURI_INVOKE<ApiResult<ImportedReadingRecord[]>>("alphaxiv_prepare_notes", { vaultPath, path, paperGroupId, arxivId }),
 	/**  Current sync binding + last-pass info for the settings pane. */
 	syncGetStatus: (args: SyncVaultArgs) => typedError<ApiResult<SyncStatus_Serialize>, string>(__TAURI_INVOKE("sync_get_status", { args })),
 	/**  Validate and probe before publishing a protected credential reference. */
@@ -859,6 +860,7 @@ export const commands = {
 	exportSystemCjkFont: () => __TAURI_INVOKE<ApiResult<ExportFontPayload>>("export_system_cjk_font"),
 	/**  Replace only the exact PDF revision the outline editor read. */
 	pdfSaveBookmarks: (path: string, expectedHash: string, bytesBase64: string) => __TAURI_INVOKE<ApiResult<null>>("pdf_save_bookmarks", { path, expectedHash, bytesBase64 }),
+	pdfSaveAnnotations: (vaultPath: string, path: string, expected: string | null, data: string) => __TAURI_INVOKE<ApiResult<boolean>>("pdf_save_annotations", { vaultPath, path, expected, data }),
 	/**
 	 *  Ensure `host` may be served by the `agentero-web` proxy before its viewer
 	 *  frame loads.
@@ -2030,6 +2032,10 @@ export type AppSettings_Deserialize = {
 	pdfSpreadMode?: string,
 	/**  In-page translate tab: `hover` (default) | `always` | `hidden`. */
 	pdfTranslateTab?: string,
+	/**  Sentence wash and whole-sentence double-click. Default on. */
+	pdfSentenceHover?: boolean,
+	/**  PDF annotation notes: `rail` (default) | `gutter`. */
+	pdfCommentDisplay?: string,
 	libraryColumns?: LibraryColumnPref_Deserialize[],
 	connectorEnabled?: boolean,
 	connectorPort?: number,
@@ -2210,6 +2216,10 @@ export type AppSettings_Serialize = {
 	pdfSpreadMode: string,
 	/**  In-page translate tab: `hover` (default) | `always` | `hidden`. */
 	pdfTranslateTab: string,
+	/**  Sentence wash and whole-sentence double-click. Default on. */
+	pdfSentenceHover: boolean,
+	/**  PDF annotation notes: `rail` (default) | `gutter`. */
+	pdfCommentDisplay: string,
 	libraryColumns: LibraryColumnPref_Serialize[],
 	connectorEnabled: boolean,
 	connectorPort: number,
@@ -3893,6 +3903,13 @@ export type ImportLocalPdfResult_Serialize = {
 	papers: LookupImportResult_Serialize[],
 	/**  `"<file>: <reason>"` for each file that failed to import. */
 	errors: string[],
+};
+
+export type ImportedReadingRecord = {
+	sourceId: string,
+	annotations: Json[],
+	markdown: string | null,
+	excerpt: boolean,
 };
 
 export type InkApplyArgs = {
