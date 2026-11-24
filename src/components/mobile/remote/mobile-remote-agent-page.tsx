@@ -1,6 +1,10 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+	Check,
+	ChevronDown,
+	History,
 	LoaderCircle,
+	Monitor,
 	Paperclip,
 	Plus,
 	RefreshCw,
@@ -8,25 +12,41 @@ import {
 	ShieldCheck,
 	Square,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useId,
+	useRef,
+	useState,
+} from "react";
 import { useTranslation } from "react-i18next";
+import {
+	Conversation,
+	ConversationContent,
+	ConversationEmptyState,
+	ConversationScrollButton,
+} from "@/components/agent/conversation";
+import { Suggestion } from "@/components/agent/elements/suggestion";
 import { MobileRemoteTranscript } from "@/components/mobile/remote/mobile-remote-transcript";
 import { RemoteRegionContextPreview } from "@/components/mobile/remote/remote-region-context-preview";
 import { DshRemoteSignIn } from "@/components/remote-agent/dsh-remote-sign-in";
+import { RemoteModelMenu } from "@/components/remote-agent/remote-model-menu";
+import { PaneHeader } from "@/components/shell/pane-header";
 import { Button } from "@/components/ui/button";
 import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
+import { suggestionItems } from "@/lib/agent/chat-state";
 import type {
 	ConnectionRef,
 	HostInfo,
+	HostRef,
 	Mutation,
 	OperationOutcome,
 	Question,
@@ -42,6 +62,7 @@ import type {
 } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
+import { cn } from "@/lib/core/utils";
 import {
 	type MobilePaperRegionContext,
 	stagePaperRegionImage,
@@ -57,7 +78,6 @@ import {
 	sessionKey,
 	supports,
 	validAnswers,
-	validTrustConfirmation,
 	workspaceKey,
 } from "@/lib/remote-agent/model";
 import {
@@ -69,35 +89,45 @@ import { remoteAgent } from "@/lib/remote-agent/service";
 
 export type MobileRemoteAgentPageProps = {
 	active?: boolean;
+	mobile?: boolean;
+	backendControl?: ReactNode;
+	headerActions?: ReactNode;
 	selection?: SessionRef | null;
 	onSelectionChange?: (session: SessionRef | null) => void;
 	regionContext?: MobilePaperRegionContext | null;
 	onRegionContextHandled?: (id: string) => void;
 };
 
-/** DSH is the default provider; the existing Bridge page remains a separate parent choice. */
+/** Native remote sessions are shared by the mobile and desktop Agent surfaces. */
 export function MobileRemoteAgentPage({
 	active = true,
+	mobile = true,
+	backendControl,
+	headerActions,
 	selection,
 	onSelectionChange,
 	regionContext,
 	onRegionContextHandled,
 }: MobileRemoteAgentPageProps) {
 	const { t } = useTranslation("mobile");
-	const formId = useId();
+	const { t: agentText } = useTranslation("agent");
+	const draftRef = useRef<HTMLTextAreaElement>(null);
 	const [catalog, setCatalog] = useState<RemoteAgentCatalog | null>(null);
 	const [account, setAccount] = useState<RemoteAgentAccount | null>(null);
-	const [providerId, setProviderId] = useState("");
 	const [hosts, setHosts] = useState<HostInfo[]>([]);
 	const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
-	const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
+	const [selectedHost, setSelectedHost] = useState<HostRef | null>(
+		selection?.workspace.host ?? null,
+	);
+	const [connectedHost, setConnectedHost] = useState<HostRef | null>(null);
+	// The native catalog preserves the Host's workspace order.
+	const defaultWorkspace = workspaces[0]?.workspace ?? null;
 	const [sessions, setSessions] = useState<SessionInfo[]>([]);
 	const [session, setSession] = useState<SessionRef | null>(selection ?? null);
 	const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
 	const [identity, setIdentity] = useState<RemoteAgentHostIdentity | null>(
 		null,
 	);
-	const [confirmation, setConfirmation] = useState("");
 	const [pendingRegion, setPendingRegion] =
 		useState<MobilePaperRegionContext | null>(null);
 	const [includeRegionImage, setIncludeRegionImage] = useState(true);
@@ -167,13 +197,34 @@ export function MobileRemoteAgentPage({
 	);
 	const blocked =
 		!journalReady || (selectedKey ? journal.blocked(selectedKey) : false);
-	const entries = account
+	const workspaceTarget = defaultWorkspace
+		? workspaceKey(defaultWorkspace)
+		: null;
+	const unknownOperations = account
 		? journal
 				.all()
-				.filter((entry) =>
-					belongsToConnection(entry.target, account.info.connection),
+				.filter(
+					(entry) =>
+						belongsToConnection(entry.target, account.info.connection) &&
+						(entry.target === selectedKey ||
+							entry.target === workspaceTarget) &&
+						entry.outcome.status === "unknown" &&
+						entry.outcome.reason !== "dispatchPending" &&
+						!journal.isReviewed(entry.id),
 				)
 		: [];
+	const canCreate = Boolean(
+		workspaceTarget &&
+			journalReady &&
+			!journal.blocked(workspaceTarget) &&
+			supports(capabilities, "createSession"),
+	);
+	const composerDisabled =
+		busy ||
+		blocked ||
+		regionBlocked ||
+		!supports(capabilities, "sendMessage") ||
+		(!session && !canCreate);
 	void revision;
 
 	function chooseSession(value: SessionRef | null) {
@@ -184,30 +235,45 @@ export function MobileRemoteAgentPage({
 		setAttachments([]);
 		onSelectionChange?.(value);
 	}
-	const adoptCatalog = useCallback((value: RemoteAgentCatalog) => {
-		currentConnectionKey.current = value.account
-			? JSON.stringify([
-					value.account.info.connection.providerId,
-					value.account.info.connection.connectionId,
-				])
-			: null;
-		setCatalog(value);
-		setProviderId(
-			value.account?.info.connection.providerId ?? value.defaultProvider,
-		);
-		// Keep polling dependencies stable when a failed read only changes credential status.
-		setAccount((previous) =>
-			JSON.stringify(previous) === JSON.stringify(value.account)
-				? previous
-				: value.account,
-		);
-		if (!value.account) {
-			currentSelectionKey.current = null;
-			setSession(null);
-			setSnapshot(null);
-			setAttachments([]);
-		}
-	}, []);
+	const adoptCatalog = useCallback(
+		(value: RemoteAgentCatalog) => {
+			const nextConnection = value.account
+				? value.account.info.connection
+				: null;
+			const nextKey = nextConnection
+				? JSON.stringify([
+						nextConnection.providerId,
+						nextConnection.connectionId,
+					])
+				: null;
+			const changed =
+				currentConnectionKey.current !== null &&
+				currentConnectionKey.current !== nextKey;
+			currentConnectionKey.current = nextKey;
+			setCatalog(value);
+			// Keep polling dependencies stable when a failed read only changes credential status.
+			setAccount((previous) =>
+				JSON.stringify(previous) === JSON.stringify(value.account)
+					? previous
+					: value.account,
+			);
+			if (changed || !nextConnection) {
+				currentSelectionKey.current = null;
+				setSession(null);
+				setSnapshot(null);
+				setDraft("");
+				setAttachments([]);
+				setHosts([]);
+				setWorkspaces([]);
+				setSelectedHost(null);
+				setConnectedHost(null);
+				setIdentity(null);
+				setSessions([]);
+				onSelectionChange?.(null);
+			}
+		},
+		[onSelectionChange],
+	);
 	async function reloadCatalog() {
 		const value = await remoteAgent.catalog();
 		adoptCatalog(value);
@@ -216,11 +282,6 @@ export function MobileRemoteAgentPage({
 	async function clearSignIn() {
 		await remoteAgent.logout();
 		await reloadCatalog();
-		setHosts([]);
-		setWorkspaces([]);
-		setWorkspace(null);
-		setSessions([]);
-		chooseSession(null);
 	}
 	function finishRegion(id: string, clearComposer: boolean) {
 		if (currentRegionId.current !== id) return;
@@ -276,12 +337,12 @@ export function MobileRemoteAgentPage({
 			setIncludeRegionImage(true);
 		}
 	}, [regionContext, pendingRegion]);
-	async function run(action: () => Promise<void>) {
+	async function run<T>(action: () => Promise<T>): Promise<T | undefined> {
 		if (busyRef.current) return;
 		busyRef.current = true;
 		setBusy(true);
 		try {
-			await action();
+			return await action();
 		} catch (error) {
 			notifyError(errorText(error));
 			try {
@@ -354,7 +415,14 @@ export function MobileRemoteAgentPage({
 	}, [active, restoreOperations]);
 	// Official snapshots include history and currently-owned interactions. Never replay writes on focus/reconnect.
 	useEffect(() => {
-		if (!active || !session || !supports(capabilities, "readSession")) return;
+		if (
+			!active ||
+			!session ||
+			!account ||
+			!belongsToConnection(sessionKey(session), account.info.connection) ||
+			!supports(capabilities, "readSession")
+		)
+			return;
 		let cancelled = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		setLoading(true);
@@ -384,7 +452,7 @@ export function MobileRemoteAgentPage({
 			cancelled = true;
 			clearTimeout(timer);
 		};
-	}, [active, session, capabilities, adoptCatalog]);
+	}, [active, session, account, capabilities, adoptCatalog]);
 
 	async function refresh() {
 		if (session && supports(capabilities, "readSession")) {
@@ -392,10 +460,13 @@ export function MobileRemoteAgentPage({
 			if (currentSelectionKey.current === sessionKey(session))
 				setSnapshot(value);
 		}
-		if (workspace && supports(capabilities, "listSessions"))
-			setSessions(await remoteAgent.sessions(workspace.workspace));
-		if (account && supports(capabilities, "listHosts"))
-			setHosts(await remoteAgent.hosts(account.info.connection));
+	}
+	async function loadSessionHistory() {
+		const history: SessionInfo[] = [];
+		for (const { workspace } of workspaces) {
+			history.push(...(await remoteAgent.sessions(workspace)));
+		}
+		setSessions(history);
 	}
 	async function mutate(
 		mutation: Mutation,
@@ -413,61 +484,79 @@ export function MobileRemoteAgentPage({
 		return outcome;
 	}
 	async function signedIn(value: RemoteAgentAccount) {
-		setAccount(value);
-		await reloadCatalog();
+		if (catalog)
+			adoptCatalog({
+				...catalog,
+				account: value,
+				credentialState: "ready",
+				persistence: value.persistence,
+				canClearSavedSignIn: value.persistence === "systemStore",
+			});
+		else setAccount(value);
 		setHosts(await remoteAgent.hosts(value.info.connection));
 	}
-	async function trustHost() {
-		if (
-			!identity ||
-			!account ||
-			!validTrustConfirmation(identity, confirmation)
-		)
-			return;
-		const info = await remoteAgent.trust(identity.host, identity.fingerprint);
+	async function connectHost(value: RemoteAgentHostIdentity) {
+		if (!account) return;
+		const info = await remoteAgent.trust(value.host, value.fingerprint);
+		const rows = supports(info.capabilities, "listWorkspaces")
+			? await remoteAgent.workspaces(value.host)
+			: [];
 		setAccount({ ...account, info });
 		setIdentity(null);
-		setConfirmation("");
-		setWorkspace(null);
+		setConnectedHost(value.host);
+		setHosts((current) =>
+			current.map((host) =>
+				host.host.hostId === value.host.hostId
+					? { ...host, pinned: true }
+					: host,
+			),
+		);
+		setWorkspaces(rows);
+	}
+	async function selectHost(host: HostInfo) {
+		if (selectedHost?.hostId === host.host.hostId && connectedHost) return;
+		const value = await remoteAgent.identity(host.host);
+		setSelectedHost(value.host);
+		setConnectedHost(null);
+		setWorkspaces([]);
 		setSessions([]);
 		chooseSession(null);
-		setWorkspaces(
-			supports(info.capabilities, "listWorkspaces")
-				? await remoteAgent.workspaces(identity.host)
-				: [],
-		);
-	}
-	async function selectWorkspace(value: WorkspaceInfo) {
-		setWorkspace(value);
-		chooseSession(null);
-		setSessions(
-			supports(capabilities, "listSessions")
-				? await remoteAgent.sessions(value.workspace)
-				: [],
-		);
+		setIdentity(value);
+		if (value.pinned) await connectHost(value);
 	}
 	async function createSession() {
-		if (!workspace) return;
+		if (!defaultWorkspace || !workspaceTarget || !canCreate) return null;
+		const originalConnection = currentConnectionKey.current;
+		const originalSelection = currentSelectionKey.current;
 		const outcome = await mutate(
-			{ type: "createSession", workspace: workspace.workspace, title: null },
-			workspaceKey(workspace.workspace),
+			{ type: "createSession", workspace: defaultWorkspace, title: null },
+			workspaceTarget,
 		);
 		if (
 			outcome.status === "succeeded" &&
-			outcome.result.type === "sessionCreated"
+			outcome.result.type === "sessionCreated" &&
+			mounted.current &&
+			currentConnectionKey.current === originalConnection &&
+			currentSelectionKey.current === originalSelection
 		) {
-			chooseSession(outcome.result.session);
-			setSessions(await remoteAgent.sessions(workspace.workspace));
+			const next = outcome.result.session;
+			currentSelectionKey.current = sessionKey(next);
+			setSession(next);
+			setSnapshot(null);
+			onSelectionChange?.(next);
+			return next;
 		}
+		return null;
 	}
 	async function send() {
 		if (
-			!session ||
 			blocked ||
-			(!draft.trim() && attachments.length === 0 && !pendingRegion)
+			regionBlocked ||
+			(!draft.trim() && !attachments.length && !pendingRegion)
 		)
 			return;
-		const capturedSession = session;
+		const capturedSession = session ?? (await createSession());
+		if (!capturedSession) return;
 		const target = sessionKey(capturedSession);
 		const capturedConnection = connectionKey;
 		const current = () =>
@@ -566,435 +655,417 @@ export function MobileRemoteAgentPage({
 		}
 	}
 
+	const actionClass = mobile ? "min-h-11 min-w-11" : "size-8";
+	const selectedHostName = hosts.find(
+		(host) => host.host.hostId === selectedHost?.hostId,
+	)?.name;
 	return (
 		<section
-			className="flex h-full min-h-0 flex-col"
+			className="flex h-full min-h-0 flex-col bg-sidebar"
 			aria-label={t("remote.title")}
 		>
-			<div className="flex min-h-12 shrink-0 items-center gap-2 border-b px-3">
-				<strong className="min-w-0 flex-1 truncate">{t("remote.title")}</strong>
-				{busy && (
-					<LoaderCircle
-						className="size-4 animate-spin"
-						aria-label={t("remote.loading")}
-					/>
-				)}
-				{account && (
-					<Button
-						className="min-h-11 min-w-11"
-						variant="ghost"
-						disabled={busy}
-						onClick={() => void run(refresh)}
-						aria-label={t("remote.refresh")}
-					>
-						<RefreshCw className="size-4" />
-					</Button>
-				)}
-			</div>
-			<div className="min-h-0 flex-1 overflow-auto">
-				{catalog && credentialMessage && account && (
-					<div className="m-4 space-y-3 rounded-lg border p-3" role="status">
-						<p className="text-sm">{t(credentialMessage)}</p>
-						<div className="flex flex-wrap gap-2">
-							{canRetrySavedSignIn(catalog.credentialState) && (
+			<PaneHeader
+				className={mobile ? "h-12 gap-0.5 px-1" : undefined}
+				trailing={
+					<>
+						{connectedHost && (
+							<>
 								<Button
-									variant="outline"
-									className="min-h-12"
-									disabled={busy}
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									className={actionClass}
+									aria-label={t("remote.newSession")}
+									title={t("remote.newSession")}
+									disabled={busy || !canCreate}
 									onClick={() =>
 										void run(async () => {
-											const value = await reloadCatalog();
-											if (value.account)
-												setHosts(
-													await remoteAgent.hosts(
-														value.account.info.connection,
-													),
-												);
+											if (await createSession()) {
+												setDraft("");
+												setAttachments([]);
+											}
 										})
 									}
 								>
-									{t("remote.credentials.retry")}
+									<Plus className="size-4" />
 								</Button>
-							)}
-							{catalog.canClearSavedSignIn && (
-								<Button
-									variant="outline"
-									className="min-h-12"
-									disabled={busy}
-									onClick={() => void run(clearSignIn)}
+								<DropdownMenu
+									onOpenChange={(open) => {
+										if (open && supports(capabilities, "listSessions"))
+											void run(loadSessionHistory);
+									}}
 								>
-									{t("remote.credentials.clear")}
-								</Button>
-							)}
-						</div>
-					</div>
-				)}
-				{!account ? (
-					<div className="mx-auto flex max-w-md flex-col gap-4 p-4">
-						<label className="grid gap-1 text-sm">
-							{t("remote.provider")}
-							<select
-								className="min-h-12 rounded-md border bg-background px-3"
-								value={providerId}
-								onChange={(event) => setProviderId(event.target.value)}
-								disabled={busy}
-							>
-								{catalog?.providers.map((provider) => (
-									<option key={provider.providerId} value={provider.providerId}>
-										{provider.displayName}
-									</option>
-								))}
-							</select>
-						</label>
-						{providerId === "ds-harness-remote" ? (
-							<DshRemoteSignIn
-								mobile
-								onCatalog={adoptCatalog}
-								onSignedIn={(value) => run(() => signedIn(value))}
-							/>
-						) : (
-							<p className="text-muted-foreground text-sm">
-								{t("remote.providerSetup")}
-							</p>
-						)}
-					</div>
-				) : (
-					<>
-						<div className="flex flex-wrap items-center gap-2 border-b p-3 text-sm">
-							<div className="min-w-0 flex-1">
-								<p className="truncate">{account.account}</p>
-								<p className="text-muted-foreground">
-									{account.loginProvider
-										? t("remote.signedInWith", {
-												provider: account.loginProvider,
-											})
-										: null}
-									{account.loginProvider ? " · " : null}
-									{t(
-										account.persistence === "systemStore"
-											? "remote.secureSignIn"
-											: "remote.launchOnly",
-									)}
-								</p>
-							</div>
-							<Button
-								variant="outline"
-								className="min-h-11"
-								disabled={busy}
-								onClick={() => void run(clearSignIn)}
-							>
-								{t("remote.logout")}
-							</Button>
-						</div>
-						{!session ? (
-							<div className="grid gap-4 p-4 md:grid-cols-2">
-								<div className="space-y-2">
-									<h2 className="font-medium">{t("remote.hosts")}</h2>
-									{hosts.length === 0 && (
-										<p className="text-muted-foreground text-sm">
-											{t("remote.noHosts")}
-										</p>
-									)}
-									{hosts.map((host) => (
+									<DropdownMenuTrigger asChild>
 										<Button
-											key={host.host.hostId}
-											variant="outline"
-											className="min-h-12 w-full justify-between"
-											disabled={busy || host.online === false}
-											onClick={() =>
-												void run(async () => {
-													setConfirmation("");
-													setIdentity(await remoteAgent.identity(host.host));
-												})
-											}
+											type="button"
+											variant="ghost"
+											size="icon-sm"
+											className={actionClass}
+											aria-label={t("agent.history")}
+											title={t("agent.history")}
 										>
-											<span className="truncate">{host.name}</span>
-											<span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
-												{host.pinned ? (
-													<ShieldCheck
-														className="size-3.5 text-emerald-600"
-														aria-label={t("remote.trusted")}
-													/>
-												) : null}
-												{t(
-													host.online === true
-														? "remote.online"
-														: host.online === false
-															? "remote.offline"
-															: "remote.presenceUnknown",
-												)}
-											</span>
+											<History className="size-4" />
 										</Button>
-									))}
-									{workspaces.length > 0 && (
-										<h2 className="pt-3 font-medium">
-											{t("remote.workspaces")}
-										</h2>
-									)}
-									{workspaces.map((value) => (
-										<Button
-											key={JSON.stringify(value.workspace)}
-											variant={workspace === value ? "secondary" : "outline"}
-											className="min-h-12 w-full justify-start"
-											disabled={busy}
-											onClick={() => void run(() => selectWorkspace(value))}
-										>
-											{value.name}
-										</Button>
-									))}
-								</div>
-								{workspace && (
-									<div className="space-y-2">
-										<div className="flex items-center gap-2">
-											<h2 className="flex-1 font-medium">
-												{t("remote.tasks")}
-											</h2>
-											{supports(capabilities, "createSession") && (
-												<Button
-													variant="outline"
-													className="min-h-11 min-w-11"
+									</DropdownMenuTrigger>
+									<DropdownMenuContent
+										align="end"
+										className="max-h-72 w-64 overflow-y-auto"
+									>
+										{sessions.length ? (
+											sessions.map((value) => (
+												<DropdownMenuItem
+													key={sessionKey(value.session)}
+													className={cn("gap-2", mobile && "min-h-11")}
 													disabled={
-														busy ||
-														!journalReady ||
-														journal.blocked(workspaceKey(workspace.workspace))
+														busy || !supports(capabilities, "readSession")
 													}
-													aria-label={t("remote.newSession")}
-													onClick={() => void run(createSession)}
+													onSelect={() => chooseSession(value.session)}
 												>
-													<Plus className="size-4" />
-												</Button>
-											)}
-										</div>
-										{sessions.length === 0 && (
-											<p className="text-muted-foreground text-sm">
-												{t("remote.noSessions")}
+													<span className="min-w-0 flex-1 truncate">
+														{value.title || t("remote.untitled")}
+													</span>
+													{sessionKey(value.session) === selectedKey && (
+														<Check className="size-4 shrink-0" />
+													)}
+												</DropdownMenuItem>
+											))
+										) : (
+											<p className="px-2 py-1.5 text-muted-foreground text-sm">
+												{t(busy ? "remote.loading" : "remote.noSessions")}
 											</p>
 										)}
-										{sessions.map((value) => (
-											<Button
-												key={sessionKey(value.session)}
-												variant="outline"
-												className="h-auto min-h-12 w-full justify-between gap-2 py-3 text-left"
-												disabled={
-													busy || !supports(capabilities, "readSession")
-												}
-												onClick={() => chooseSession(value.session)}
-											>
-												<span className="truncate">
-													{value.title || t("remote.untitled")}
-												</span>
-												<span className="text-muted-foreground text-xs">
-													{t(`remote.status.${value.status}`)}
-												</span>
-											</Button>
-										))}
-									</div>
+									</DropdownMenuContent>
+								</DropdownMenu>
+							</>
+						)}
+						{headerActions}
+					</>
+				}
+			>
+				{backendControl ?? <span className="font-medium">dsh-remote</span>}
+				{account && (
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild disabled={busy}>
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								title={selectedHostName ?? t("remote.hosts")}
+								aria-label={t("remote.hosts")}
+								className={cn(
+									"min-w-0 shrink gap-1 px-1.5",
+									mobile ? "h-11" : "h-7",
+								)}
+							>
+								<Monitor className="size-4 shrink-0" />
+								<span className="truncate">
+									{selectedHostName ?? t("remote.hosts")}
+								</span>
+								<ChevronDown className="size-3 shrink-0 opacity-70" />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="start" className="w-60">
+							{hosts.map((host) => (
+								<DropdownMenuItem
+									key={host.host.hostId}
+									className={cn("gap-2", mobile && "min-h-11")}
+									disabled={host.online === false}
+									onSelect={() => void run(() => selectHost(host))}
+								>
+									<span className="min-w-0 flex-1 truncate">{host.name}</span>
+									{host.pinned && (
+										<ShieldCheck
+											className="size-4 shrink-0 text-emerald-600"
+											aria-label={t("remote.trusted")}
+										/>
+									)}
+									<span className="text-muted-foreground text-xs">
+										{t(
+											host.online === true
+												? "remote.online"
+												: host.online === false
+													? "remote.offline"
+													: "remote.presenceUnknown",
+										)}
+									</span>
+									{host.host.hostId === selectedHost?.hostId && (
+										<Check className="size-4 shrink-0" />
+									)}
+								</DropdownMenuItem>
+							))}
+							<DropdownMenuSeparator />
+							<DropdownMenuItem
+								className={mobile ? "min-h-11" : undefined}
+								onSelect={() =>
+									void run(async () => {
+										setHosts(await remoteAgent.hosts(account.info.connection));
+										if (
+											connectedHost &&
+											supports(capabilities, "listWorkspaces")
+										)
+											setWorkspaces(
+												await remoteAgent.workspaces(connectedHost),
+											);
+										await refresh();
+									})
+								}
+							>
+								<RefreshCw className="size-4" />
+								{t("remote.refreshHosts")}
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				)}
+			</PaneHeader>
+			<Conversation key={selectedKey ?? "draft"} className="min-h-0">
+				<ConversationContent className="gap-3 p-3">
+					{catalog && credentialMessage && account && (
+						<div className="m-4 space-y-3 rounded-lg border p-3" role="status">
+							<p className="text-sm">{t(credentialMessage)}</p>
+							<div className="flex flex-wrap gap-2">
+								{canRetrySavedSignIn(catalog.credentialState) && (
+									<Button
+										variant="outline"
+										className="min-h-12"
+										disabled={busy}
+										onClick={() =>
+											void run(async () => {
+												const value = await reloadCatalog();
+												if (value.account)
+													setHosts(
+														await remoteAgent.hosts(
+															value.account.info.connection,
+														),
+													);
+											})
+										}
+									>
+										{t("remote.credentials.retry")}
+									</Button>
+								)}
+								{catalog.canClearSavedSignIn && (
+									<Button
+										variant="outline"
+										className="min-h-12"
+										disabled={busy}
+										onClick={() => void run(clearSignIn)}
+									>
+										{t("remote.credentials.clear")}
+									</Button>
 								)}
 							</div>
-						) : (
-							<div className="space-y-4 p-4">
-								<div className="flex items-center gap-2">
-									<Button
-										className="min-h-11"
-										variant="outline"
-										disabled={busy}
-										onClick={() => chooseSession(null)}
-									>
-										{t("remote.tasks")}
-									</Button>
-									<p className="min-w-0 flex-1 truncate">
-										{snapshot?.info.title || t("remote.untitled")}
-									</p>
-									{snapshot && (
-										<span className="text-muted-foreground text-sm">
-											{t(`remote.status.${snapshot.info.status}`)}
-										</span>
-									)}
-								</div>
-								{loading && (
-									<p className="text-muted-foreground">{t("remote.loading")}</p>
-								)}
-								{snapshot && (
-									<MobileRemoteTranscript
-										events={snapshot.events}
-										sessionRunning={snapshot.info.status === "running"}
-										renderInteraction={(event) => (
-											<>
-												{event.payload.type === "permissionRequest" && (
-													<div className="space-y-3 rounded-lg border p-3">
-														<p className="font-medium">
-															{t("remote.permission")}
-														</p>
-														<p className="whitespace-pre-wrap break-words text-sm">
-															{event.payload.description}
-														</p>
-														<div className="flex flex-wrap gap-2">
-															{event.payload.options.map((option) => (
-																<Button
-																	className="min-h-12"
-																	variant="outline"
-																	key={option}
-																	disabled={
-																		busy ||
-																		blocked ||
-																		!supports(capabilities, "respondPermission")
-																	}
-																	onClick={() =>
-																		void run(async () => {
-																			if (
-																				event.payload.type !==
-																				"permissionRequest"
-																			)
-																				return;
-																			await mutate(
-																				{
-																					type: "respondPermission",
-																					session,
-																					requestId: event.payload.requestId,
-																					optionId: option,
-																				},
-																				sessionKey(session),
-																			);
-																			await refresh();
-																		})
-																	}
-																>
-																	{option === "allowed-once"
-																		? t("remote.allowOnce")
-																		: option === "rejected"
-																			? t("remote.reject")
-																			: option}
-																</Button>
-															))}
-														</div>
-													</div>
-												)}
-												{event.payload.type === "questionRequest" && (
-													<QuestionForm
-														questions={event.payload.questions}
+						</div>
+					)}
+					{!account ? (
+						<div className="mx-auto flex w-full max-w-md flex-col gap-4 p-2">
+							{catalog ? (
+								<DshRemoteSignIn
+									mobile={mobile}
+									onCatalog={adoptCatalog}
+									onSignedIn={(value) => void run(() => signedIn(value))}
+								/>
+							) : (
+								<p className="text-muted-foreground text-sm">
+									{t("remote.loading")}
+								</p>
+							)}
+						</div>
+					) : identity ? (
+						<div className="flex flex-col items-center gap-3 p-3 text-center">
+							<p className="break-words font-medium">{identity.name}</p>
+							<Button
+								disabled={busy}
+								className={mobile ? "min-h-11" : undefined}
+								onClick={() => void run(() => connectHost(identity))}
+							>
+								<ShieldCheck className="size-4" />
+								{t("remote.trustAndConnect")}
+							</Button>
+						</div>
+					) : !connectedHost && !session ? (
+						<p className="px-3 py-5 text-center text-muted-foreground text-sm">
+							{t(
+								busy
+									? "remote.loading"
+									: hosts.length
+										? "remote.chooseHost"
+										: "remote.noHosts",
+							)}
+						</p>
+					) : loading && !snapshot ? (
+						<LoaderCircle
+							className="mx-auto size-4 animate-spin motion-reduce:animate-none"
+							aria-label={t("remote.loading")}
+						/>
+					) : !session && !defaultWorkspace ? (
+						<p className="px-3 py-5 text-center text-muted-foreground text-sm">
+							{t("remote.noWorkspace")}
+						</p>
+					) : !session ||
+						(snapshot?.events.length === 0 &&
+							snapshot.info.status === "idle") ? (
+						<ConversationEmptyState className="p-3">
+							<div className="flex w-full max-w-sm flex-col gap-2">
+								{suggestionItems(false).map(({ key }) => (
+									<Suggestion
+										key={key}
+										suggestion={agentText(`suggestions.${key}`)}
+										className={cn(
+											"h-auto justify-start whitespace-normal rounded-lg px-3 py-2.5 text-left",
+											mobile && "min-h-11",
+										)}
+										disabled={composerDisabled}
+										onClick={(value) => {
+											setDraft(value);
+											draftRef.current?.focus();
+										}}
+									/>
+								))}
+							</div>
+						</ConversationEmptyState>
+					) : null}
+					{snapshot && session && (
+						<MobileRemoteTranscript
+							events={snapshot.events}
+							sessionRunning={snapshot.info.status === "running"}
+							renderInteraction={(event) => (
+								<>
+									{event.payload.type === "permissionRequest" && (
+										<div className="space-y-3 rounded-lg border p-3">
+											<p className="font-medium">{t("remote.permission")}</p>
+											<p className="whitespace-pre-wrap break-words text-sm">
+												{event.payload.description}
+											</p>
+											<div className="flex flex-wrap gap-2">
+												{event.payload.options.map((option) => (
+													<Button
+														className="min-h-12"
+														variant="outline"
+														key={option}
 														disabled={
 															busy ||
 															blocked ||
-															!supports(capabilities, "respondQuestion")
+															!supports(capabilities, "respondPermission")
 														}
-														onSubmit={(answers) =>
+														onClick={() =>
 															void run(async () => {
-																if (event.payload.type !== "questionRequest")
+																if (event.payload.type !== "permissionRequest")
 																	return;
 																await mutate(
 																	{
-																		type: "respondQuestion",
+																		type: "respondPermission",
 																		session,
 																		requestId: event.payload.requestId,
-																		answers,
+																		optionId: option,
 																	},
 																	sessionKey(session),
 																);
 																await refresh();
 															})
 														}
-													/>
-												)}
-											</>
-										)}
-									/>
-								)}
-							</div>
-						)}
-					</>
-				)}
-				{account && !journalReady && (
-					<div className="flex items-center gap-3 p-3 text-sm" role="status">
-						<p className="min-w-0 flex-1 text-muted-foreground">
-							{t(
-								journalFault
-									? "remote.journalUnavailable"
-									: "remote.recoveringOperations",
+													>
+														{option === "allowed-once"
+															? t("remote.allowOnce")
+															: option === "rejected"
+																? t("remote.reject")
+																: option}
+													</Button>
+												))}
+											</div>
+										</div>
+									)}
+									{event.payload.type === "questionRequest" && (
+										<QuestionForm
+											questions={event.payload.questions}
+											disabled={
+												busy ||
+												blocked ||
+												!supports(capabilities, "respondQuestion")
+											}
+											onSubmit={(answers) =>
+												void run(async () => {
+													if (event.payload.type !== "questionRequest") return;
+													await mutate(
+														{
+															type: "respondQuestion",
+															session,
+															requestId: event.payload.requestId,
+															answers,
+														},
+														sessionKey(session),
+													);
+													await refresh();
+												})
+											}
+										/>
+									)}
+								</>
 							)}
-						</p>
-						{journalFault ? (
+						/>
+					)}
+					{account && journalFault && (
+						<div className="flex items-center gap-3 p-2 text-sm" role="status">
+							<p className="flex-1 text-muted-foreground">
+								{t("remote.journalUnavailable")}
+							</p>
 							<Button
 								variant="outline"
-								className="min-h-11"
 								onClick={() => void restoreOperations()}
 							>
 								{t("local.retry")}
 							</Button>
-						) : null}
-					</div>
-				)}
-				{entries.length > 0 && (
-					<div className="space-y-2 border-t p-3 text-sm" aria-live="polite">
-						{entries.map((entry) => (
-							<div key={entry.id} className="rounded-md bg-muted/40 p-2">
-								<div className="flex flex-wrap items-center gap-2">
-									<code className="min-w-0 flex-1 break-all text-xs">
-										{entry.id}
-									</code>
-									<span>{t(`remote.outcome.${entry.outcome.status}`)}</span>
-									{account &&
-										supports(capabilities, "operationReceipts") &&
-										(entry.outcome.status === "unknown" ||
-											entry.outcome.status === "accepted") && (
-											<Button
-												variant="outline"
-												className="min-h-11"
-												disabled={busy}
-												onClick={() =>
-													void run(async () => {
-														await inspectOperation(
-															entry.id,
-															account.info.connection,
-														);
-													})
+						</div>
+					)}
+					{account &&
+						unknownOperations.map((entry) => (
+							<div
+								key={entry.id}
+								className="space-y-2 rounded-md bg-muted/40 p-3 text-sm"
+								role="status"
+							>
+								<p>{t("remote.unknownOutcome")}</p>
+								<div className="flex flex-wrap gap-2">
+									{supports(capabilities, "operationReceipts") && (
+										<Button
+											variant="outline"
+											disabled={busy}
+											onClick={() =>
+												void run(() =>
+													inspectOperation(entry.id, account.info.connection),
+												)
+											}
+										>
+											{t("remote.inspectReceipt")}
+										</Button>
+									)}
+									<Button
+										variant="outline"
+										disabled={busy}
+										onClick={() =>
+											void run(async () => {
+												await refresh();
+												if (
+													entry.target === selectedKey &&
+													!regionWorkflow.ownsOperation(entry.id)
+												) {
+													setDraft("");
+													setAttachments([]);
 												}
-											>
-												{t("remote.inspectReceipt")}
-											</Button>
-										)}
+												journal.allowNewActions(entry.id);
+											})
+										}
+									>
+										{t("remote.continueNewTask")}
+									</Button>
 								</div>
-								{entry.outcome.status === "unknown" && (
-									<div className="mt-2 space-y-2">
-										<p className="text-muted-foreground">
-											{t("remote.unknownOutcome")}
-										</p>
-										{!journal.isReviewed(entry.id) && (
-											<Button
-												variant="outline"
-												className="min-h-11"
-												disabled={
-													busy ||
-													!(
-														entry.target === selectedKey ||
-														(workspace &&
-															entry.target ===
-																workspaceKey(workspace.workspace))
-													)
-												}
-												onClick={() =>
-													void run(async () => {
-														await refresh();
-														if (!regionWorkflow.ownsOperation(entry.id)) {
-															setDraft("");
-															setAttachments([]);
-														}
-														journal.allowNewActions(entry.id);
-													})
-												}
-											>
-												{t("remote.continueNewTask")}
-											</Button>
-										)}
-									</div>
-								)}
 							</div>
 						))}
-					</div>
-				)}
-			</div>
-			{(session || pendingRegion) && (
+				</ConversationContent>
+				<ConversationScrollButton />
+			</Conversation>
+			{account && (session || defaultWorkspace || pendingRegion) && (
 				<form
-					className="shrink-0 space-y-2 border-t bg-background p-3"
+					className="m-2 shrink-0 space-y-1.5 rounded-xl border bg-background p-2"
 					onSubmit={(event) => {
 						event.preventDefault();
 						void run(send);
@@ -1035,25 +1106,47 @@ export function MobileRemoteAgentPage({
 						</p>
 					))}
 					<Textarea
+						ref={draftRef}
+						rows={2}
 						value={draft}
 						onChange={(event) => setDraft(event.target.value)}
 						placeholder={t("remote.message")}
 						aria-label={t("remote.message")}
-						className="max-h-36 min-h-12 resize-none text-base"
-						disabled={
-							busy ||
-							blocked ||
-							!session ||
-							Boolean(regionState?.uncertain) ||
-							!supports(capabilities, "sendMessage")
-						}
+						className={cn(
+							"max-h-36 min-h-12 resize-none border-transparent bg-transparent shadow-none",
+							mobile && "text-base md:text-base",
+						)}
+						disabled={composerDisabled}
 					/>
-					<div className="flex items-center justify-end gap-2">
+					<div className="flex items-center justify-end gap-1">
+						{session && supports(capabilities, "selectModel") && (
+							<RemoteModelMenu
+								key={selectedKey}
+								session={session}
+								mobile={mobile}
+								disabled={
+									busy || blocked || snapshot?.info.status === "running"
+								}
+								onSelect={async (selection) =>
+									(await run(async () => {
+										const outcome = await mutate(
+											{ type: "selectModel", session, selection },
+											sessionKey(session),
+										);
+										return outcome.status === "succeeded" &&
+											outcome.result.type === "modelSelected"
+											? outcome.result.selected
+											: null;
+									})) ?? null
+								}
+							/>
+						)}
 						{session && canUpload(capabilities) && (
 							<Button
 								type="button"
-								variant="outline"
-								className="min-h-12 min-w-12"
+								variant="ghost"
+								size="icon-sm"
+								className={actionClass}
 								disabled={busy || blocked || Boolean(regionState?.uncertain)}
 								aria-label={t("remote.uploadPrivate")}
 								title={t("remote.uploadPrivate")}
@@ -1062,36 +1155,38 @@ export function MobileRemoteAgentPage({
 								<Paperclip className="size-4" />
 							</Button>
 						)}
-						{session && supports(capabilities, "cancel") && (
-							<Button
-								type="button"
-								variant="outline"
-								className="min-h-12 min-w-12"
-								disabled={busy || blocked}
-								aria-label={t("remote.cancel")}
-								onClick={() =>
-									void run(async () => {
-										await mutate(
-											{ type: "cancel", session },
-											sessionKey(session),
-										);
-										await refresh();
-									})
-								}
-							>
-								<Square className="size-4" />
-							</Button>
-						)}
+						{session &&
+							(snapshot?.info.status === "running" ||
+								snapshot?.info.status === "waitingForPermission" ||
+								snapshot?.info.status === "waitingForAnswer") &&
+							supports(capabilities, "cancel") && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="icon-sm"
+									className={actionClass}
+									disabled={busy || blocked}
+									aria-label={t("remote.cancel")}
+									onClick={() =>
+										void run(async () => {
+											await mutate(
+												{ type: "cancel", session },
+												sessionKey(session),
+											);
+											await refresh();
+										})
+									}
+								>
+									<Square className="size-4" />
+								</Button>
+							)}
 						<Button
 							type="submit"
-							className="min-h-12 min-w-12"
+							size="icon-sm"
+							className={actionClass}
 							aria-label={t("remote.send")}
 							disabled={
-								busy ||
-								blocked ||
-								!session ||
-								regionBlocked ||
-								!supports(capabilities, "sendMessage") ||
+								composerDisabled ||
 								(!draft.trim() && !attachments.length && !pendingRegion)
 							}
 						>
@@ -1100,72 +1195,6 @@ export function MobileRemoteAgentPage({
 					</div>
 				</form>
 			)}
-			<Dialog
-				open={identity !== null}
-				onOpenChange={(value) => {
-					if (!value && !busy) {
-						setIdentity(null);
-						setConfirmation("");
-					}
-				}}
-			>
-				<DialogContent>
-					<DialogHeader>
-						<DialogTitle>{t("remote.trustTitle")}</DialogTitle>
-						<DialogDescription>
-							{t(
-								account?.persistence === "systemStore"
-									? "remote.trustDescriptionSecure"
-									: "remote.trustDescription",
-							)}
-						</DialogDescription>
-					</DialogHeader>
-					<p className="break-words">{identity?.name}</p>
-					<code className="select-text break-all rounded bg-muted p-3 text-sm">
-						{identity?.fingerprint}
-					</code>
-					<label
-						htmlFor={`${formId}-fingerprint`}
-						className="grid gap-2 text-sm"
-					>
-						{t("remote.confirmFingerprint")}
-						<Input
-							id={`${formId}-fingerprint`}
-							className="min-h-12"
-							value={confirmation}
-							onChange={(event) => setConfirmation(event.target.value)}
-							autoComplete="off"
-							autoCapitalize="none"
-							disabled={busy}
-						/>
-					</label>
-					<DialogFooter>
-						<Button
-							variant="outline"
-							className="min-h-12"
-							disabled={busy}
-							onClick={() => setIdentity(null)}
-						>
-							{t("remote.reject")}
-						</Button>
-						<Button
-							className="min-h-12"
-							disabled={
-								busy ||
-								!identity ||
-								!validTrustConfirmation(identity, confirmation)
-							}
-							onClick={() => void run(trustHost)}
-						>
-							{t(
-								account?.persistence === "systemStore"
-									? "remote.trustConnectSecure"
-									: "remote.trustConnect",
-							)}
-						</Button>
-					</DialogFooter>
-				</DialogContent>
-			</Dialog>
 		</section>
 	);
 }

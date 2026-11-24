@@ -89,6 +89,7 @@
 	},
 	"agentMenu": {
 		"title": "ACP 后端",
+		"remote": "远程 Agent",
 		"empty": "没有就绪的 ACP Agent。请在设置中配置。",
 		"openSettings": "打开 Agent 设置"
 	},
@@ -273,6 +274,7 @@
 		"regionNotFound": "找不到区域：{{source}}"
 	},
 	"models": {
+		"emptyCatalog": "暂无可用模型",
 		"currentSelection": "当前选择",
 		"locateCurrent": "定位当前模型",
 		"defaultGroup": "模型",
