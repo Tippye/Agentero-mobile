@@ -14,6 +14,7 @@ import {
 	ModelSelectorTrigger,
 } from "@/components/agent/elements/model-selector";
 import type { GroupedModel } from "@/components/agent/hooks/use-agent-config";
+import { Popover, PopoverTrigger } from "@/components/ui/popover";
 import {
 	Tooltip,
 	TooltipContent,
@@ -23,6 +24,7 @@ import type { AgentEffortChoice, AgentModelChoice } from "@/lib/agent";
 import { cn } from "@/lib/core/utils";
 
 export function ComposerModelSelector({
+	dropdown = false,
 	open,
 	onOpenChange,
 	models,
@@ -38,6 +40,7 @@ export function ComposerModelSelector({
 	onReasoningEffortChange,
 }: {
 	open: boolean;
+	dropdown?: boolean;
 	onOpenChange: (open: boolean) => void;
 	models: AgentModelChoice[];
 	groupedModels: GroupedModel[];
@@ -62,6 +65,7 @@ export function ComposerModelSelector({
 	const [modelQuery, setModelQuery] = useState("");
 	const customModelId = modelQuery.trim();
 	const canUseCustomModel =
+		!dropdown &&
 		customModelId.length > 0 &&
 		!models.some(
 			(m) =>
@@ -100,8 +104,10 @@ export function ComposerModelSelector({
 		return () => clearTimeout(timer);
 	}, [highlightedModelId]);
 
+	const Root = dropdown ? Popover : ModelSelector;
+	const Trigger = dropdown ? PopoverTrigger : ModelSelectorTrigger;
 	return (
-		<ModelSelector
+		<Root
 			open={open}
 			onOpenChange={(next) => {
 				onOpenChange(next);
@@ -112,7 +118,7 @@ export function ComposerModelSelector({
 				}
 			}}
 		>
-			<ModelSelectorTrigger asChild>
+			<Trigger asChild>
 				<PromptInputButton
 					type="button"
 					className="h-7 min-w-0 max-w-[min(16rem,100%)] shrink gap-1 px-1.5 text-sm font-medium text-foreground"
@@ -131,8 +137,9 @@ export function ComposerModelSelector({
 					</span>
 					<ChevronDown className="size-3 shrink-0 opacity-70" />
 				</PromptInputButton>
-			</ModelSelectorTrigger>
+			</Trigger>
 			<ModelSelectorContent
+				dropdown={dropdown}
 				className="sm:max-w-md"
 				onOpenAutoFocus={(event) => {
 					event.preventDefault();
@@ -285,6 +292,6 @@ export function ComposerModelSelector({
 					</ModelSelectorEmpty>
 				</ModelSelectorList>
 			</ModelSelectorContent>
-		</ModelSelector>
+		</Root>
 	);
 }

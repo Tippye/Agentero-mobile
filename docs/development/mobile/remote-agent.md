@@ -2,6 +2,24 @@
 
 平板的远程 Agent 状态由 Rust 持有。DSH 是默认 provider；已配对用户可以选择 Bridge。Vault 文件仍是论文与笔记的权威来源，下面的设备身份和操作记录均位于 Vault 之外。
 
+## DSH 第三方登录
+
+dsh-remote（ds-harness-remote）默认只提供 GitHub、Google、知乎等第三方授权，没有账号密码登录。移动端与桌面设置页共用同一套流程：`remote_agent_oauth_providers` 发现服务器提供的登录方式（404 时回退到旧的逐项 status 端点），`remote_agent_oauth_start` 创建一次浏览器授权会话，移动端用系统浏览器打开 `scanUrl`、桌面展示二维码并可选打开浏览器，随后 `remote_agent_oauth_poll` 轮询直到完成。账号 token 只在 Rust 内换取设备凭据（`auth/me` → `devices/register`），不经过 IPC；轮询会话由 Rust 按 qrId 持有并在完成/过期/取消后丢弃。发现响应的入口路径必须同源且位于 `/api/v1/auth/` 下，`scanUrl` 必须留在服务器 origin。登录成功后账号视图带 `loginProvider`，凭据记录向后兼容旧格式。桌面入口在设置 → Agent →「远程 Agent」分组，与移动端共用同一原生账号。
+
+实现：[REST 客户端](../../../src-tauri/src/integration/dsh_remote/api.rs)、[登录命令](../../../src-tauri/src/app/remote_agent.rs)、[共享登录组件](../../../src/components/remote-agent/dsh-remote-sign-in.tsx)、[设置分组](../../../src/components/settings/panes/agent/dsh-remote-connection.tsx)。
+
+## 主机在线状态与信任
+
+新版 Server 的设备列表（`GET /api/v1/devices`）不再内联 `online`，在线状态改由 `GET /api/v1/devices/{id}/presence` 提供。客户端与官方 dsh-Go / app-core 一致：列出主机后逐台读取授权描述符（含 identityKey），描述符缺少 `online` 时再查 presence；查询失败只记为「状态未知」，绝不降级成离线。`HostInfo.online` 因此是可空布尔，UI 仅在明确 `false` 时禁用选择。已固定（pin）且密钥与 Server 一致的主机带 `pinned` 标记，列表显示盾牌图标；选中新主机后点击「信任并连接」即可确认。Rust 重新获取描述符，核对确认时捕获的指纹并固定该密钥。连接前 Relay 会再次核对描述符，明确离线的主机返回 `HOST_OFFLINE`。设备注册名使用 `Agentero (主机名)`，便于在其他客户端的设备列表中辨认。
+
+桌面和移动端可以从 Agent 面板的 ACP 后端菜单选择「远程 Agent → dsh-remote」。主机下拉菜单位于后端旁边。远程和本地对话共用 Agent 面板的输入区、历史、消息、思考与工具卡片、审批、问答和 OpenUI 渲染。连接主机后，空白对话即可选择模型。主机支持 `workspace.upload.v1` 时，输入区可以添加文件，按下发送才上传。远程附件在提示词中以主机工作区相对路径传递。移动端阅读论文时，输入区会显示可移除的当前论文 PDF。按下发送后，Agentero 从移动端读取 PDF，上传到该远程会话，再用主机确认的附件路径提交提示词。用户选中的论文区域也可作为图片随消息发送。PDF 无法读取、超过主机上限或立即发送时上传失败，输入区保留草稿。用户可以移除 PDF 后发送。
+
+论文会话在主机用户目录下的 `Agentero/Papers` 运行。v3 主机创建的会话没有所属项目。v1 主机使用独立的 `Papers` 工作区。历史菜单也可打开此前存放在 `Papers` 工作区的会话。主机提供上下文用量和容量时，输入区显示相同的上下文占用面板。操作回执在后台保留，会话仅提示需要处理的异常。
+
+带当前 PDF 提问时，Agentero 要求远程 Agent 为关键论点附上经过核实的 PDF 页码。点击聊天中的出处会在当前 Vault 查找对应论文，并在保留 Agent 面板的同时打开移动阅读器。窄屏上下分栏，宽屏左右分栏。历史消息中的引用也按原论文 ID 查找。当前 Vault 中能匹配的其他论文和论文笔记也可打开，外部网页走系统浏览器。章节、图表、公式和版面区域定位依赖本机已有的解析数据。
+
+移动端设置页另有「Agent」分区（[MobileAgentPane](../../../src/components/mobile/mobile-agent-pane.tsx)）：应用级 Agent 偏好 + 远程 Agent 连接模块；本地 CLI 安装、Node.js 工具与模型席位仍是桌面专属。
+
 ## Bridge 身份与配对
 
 Android/iOS 的 Bridge Ed25519 身份复用应用管理的系统 `CredentialStore`，与 DSH 登录及同步凭据共用后端健康状态和串行读写通道。系统记录为 Rust 私有的 v2 envelope；设备 ID、私钥、公钥和创建时间不进入 IPC。桌面继续使用原有文件身份。
@@ -32,6 +50,6 @@ Android/iOS 的 Bridge Ed25519 身份复用应用管理的系统 `CredentialStor
 
 ## 验证边界
 
-宿主注入存储测试覆盖身份字节与签名连续性、错误分类、未知写入、迁移期间旧记录变化、清除标记、profile CAS、并发恢复和 transport 取消。实际临时 SQLite 测试覆盖重启、取消、提交失败、并发 reservation、回执、损坏和 managed directory 丢失。UI 回归覆盖选中 provider 才恢复 Bridge、保留配对 metadata、显式重置确认、失败后重试及 WebView 丢失后恢复 native operation ID。
+宿主注入存储测试覆盖身份字节与签名连续性、错误分类、未知写入、迁移期间旧记录变化、清除标记、profile CAS、并发恢复和 transport 取消。实际临时 SQLite 测试覆盖重启、取消、提交失败、并发 reservation、回执、损坏和 managed directory 丢失。UI 回归覆盖选中 provider 才恢复 Bridge、保留配对 metadata、显式重置确认、失败后重试及 WebView 丢失后恢复 native operation ID。DSH 第三方登录另有回环 REST 测试（provider 发现与 404 回退、QR 会话 start/poll、`auth/me` 与设备注册、跨 origin scanUrl 与不安全入口路径拒绝）和前端 service 测试（发现 → 开始 → 轮询完成/过期/取消，账号 token 不经过 IPC）。
 
 这些测试不替代 Android Keystore / iOS Keychain、真实 Host、设备后台及完整视觉验收；平台限制和后续工作记录在[共享实施计划](tablet-shared.md)。

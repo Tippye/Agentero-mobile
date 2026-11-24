@@ -41,6 +41,8 @@
 		{
 			"identifier": "fs:scope",
 			"allow": [
+				{ "path": "$APPCACHE/remote-agent-attachments" },
+				{ "path": "$APPCACHE/remote-agent-attachments/**" },
 				{ "path": "$HOME/**" },
 				{ "path": "$DOCUMENT/**" },
 				{ "path": "$DESKTOP/**" },

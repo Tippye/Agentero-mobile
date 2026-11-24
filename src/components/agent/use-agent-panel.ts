@@ -22,7 +22,10 @@ import { useAgentPanelContext } from "@/components/agent/hooks/use-agent-panel-c
 import { useAgentPermissionSurfaces } from "@/components/agent/hooks/use-agent-permission-surfaces";
 import { useAgentSend } from "@/components/agent/hooks/use-agent-send";
 import { useAgentSessionRuntime } from "@/components/agent/hooks/use-agent-session-runtime";
-import type { AgentPanelProps } from "@/components/agent/types";
+import type {
+	AgentPanelProps,
+	RemotePaperContext,
+} from "@/components/agent/types";
 import { useSessionComposerState } from "@/hooks/use-session-composer-state";
 import {
 	cancelAgentRun,
@@ -61,6 +64,7 @@ import {
 import { notifyError } from "@/lib/core/notify";
 import { isTauri } from "@/lib/core/tauri";
 import { toSafeDisposer } from "@/lib/core/tauri-events";
+import type { RemoteAgentTransport } from "@/lib/remote-agent/agent-transport";
 import {
 	broadcastAgentSessionHandoff,
 	listenAgentSessionHandoff,
@@ -92,6 +96,9 @@ export type UseAgentPanelArgs = Pick<
 	onOpenHistoryHandled?: () => void;
 	/** Skip the per-panel ACP session import (Zen rail owns the history list). */
 	suppressHistoryImport?: boolean;
+	transport?: RemoteAgentTransport | null;
+	remotePaper?: RemotePaperContext | null;
+	includeLocalOptions?: boolean;
 };
 
 export function useAgentPanel({
@@ -108,6 +115,9 @@ export function useAgentPanel({
 	openHistoryItem = null,
 	onOpenHistoryHandled,
 	suppressHistoryImport = false,
+	transport,
+	remotePaper,
+	includeLocalOptions = true,
 }: UseAgentPanelArgs) {
 	const { t, i18n } = useTranslation("agent");
 	const { store: sessionStore, scopeId } = useAgentSessionScope();
@@ -264,6 +274,7 @@ export function useAgentPanel({
 		modelSelectorOpen,
 		setModelSelectorOpen,
 		warming,
+		agentListenersReady,
 		setAgentListenersReady,
 		usage,
 		setUsage,
@@ -297,10 +308,21 @@ export function useAgentPanel({
 		refs,
 		t,
 		setLines,
+		transport,
+		includeLocalOptions,
 	});
 
 	const options = buildOptions(registry, catalog);
-	const selected = resolveSelected(options, selectedAgentId, registry);
+	const selected: AgentOption | undefined = transport
+		? {
+				key: transport.agentId,
+				id: transport.agentId,
+				templateId: null,
+				name: "dsh-remote",
+				isDefault: false,
+				source: "registry",
+			}
+		: resolveSelected(options, selectedAgentId, registry);
 	// PERF: depend on the primitive template id — `selected` comes from
 	// buildOptions/resolveSelected with a fresh identity every render, which
 	// made selectedLogin → onAgentLogin unstable and defeated
@@ -308,7 +330,8 @@ export function useAgentPanel({
 	const selectedTemplateId = selected?.templateId ?? selected?.template ?? null;
 	// Chat-only built-in agents (Zhihu) cannot read Vault files: keep no auto
 	// context so the UI matches what is actually sent (no path leakage).
-	const chatOnlyAgent = isChatOnlyAgentTemplate(selected?.template);
+	const chatOnlyAgent =
+		transport !== undefined || isChatOnlyAgentTemplate(selected?.template);
 	const contextPaths = useMemo(() => {
 		if (chatOnlyAgent) return [];
 		const paths = [
@@ -365,7 +388,8 @@ export function useAgentPanel({
 	}, [isRailScope, onAgentChange, selectedId, selectedName, selectedTemplate]);
 
 	const activeTabIsRunning = useAgentSessionStore(isActiveTabRunning);
-	const activeUsage = usageBySession[activeTabId] ?? usage;
+	const activeUsage =
+		usageBySession[activeTabId] ?? (transport === undefined ? usage : null);
 	// Primitive selector: the sessions array identity changes per streamed
 	// chunk, so subscribe to the boolean the UI actually needs.
 	const hasRunningSessions = useAgentSessionStore((s) =>
@@ -404,6 +428,20 @@ export function useAgentPanel({
 		setToolAskUserRequest,
 		ownsSession: isChatOwnedSession,
 	});
+
+	useEffect(() => {
+		if (!transport || hasRunningSessions || submitting) return;
+		setPermissionRequest(null);
+		setElicitationRequest(null);
+		setToolAskUserRequest(null);
+	}, [
+		transport,
+		hasRunningSessions,
+		submitting,
+		setPermissionRequest,
+		setElicitationRequest,
+		setToolAskUserRequest,
+	]);
 
 	/** Request-shaping context for the send pipeline (agent/model selection). */
 	const turnConfig = {
@@ -446,6 +484,9 @@ export function useAgentPanel({
 		composer: composerState,
 		turnConfig,
 		runtime,
+		transport,
+		remotePaper,
+		agentListenersReady,
 	});
 
 	const {
@@ -459,6 +500,7 @@ export function useAgentPanel({
 		cancelEditingMessage,
 		resendEditedMessage,
 	} = useAgentMessageEdit({
+		forceNewOnResend: Boolean(transport),
 		refs,
 		activeTabId,
 		activeTabIsRunning,
@@ -527,7 +569,9 @@ export function useAgentPanel({
 		previousVaultPathRef.current = vaultPath;
 		for (const session of sessionHistoryRef.current) {
 			if (session.status === "running") {
-				void cancelAgentRun(session.id).catch(() => undefined);
+				void (
+					transport ? transport.cancel(session.id) : cancelAgentRun(session.id)
+				).catch(() => undefined);
 			}
 		}
 		resetSessionContext();
@@ -564,6 +608,7 @@ export function useAgentPanel({
 		activeConversationRef,
 		submissionGenRef,
 		sessionHistoryRef.current,
+		transport,
 	]);
 
 	// Publish unsent composer / queue / asks so a popout snapshot can copy them.
@@ -760,6 +805,9 @@ export function useAgentPanel({
 		historyOpen,
 		clearMessageQueue,
 		importHistory: !suppressHistoryImport,
+		transport,
+		onContextUsage: (id, usage) =>
+			setUsageBySession((previous) => ({ ...previous, [id]: usage })),
 	});
 
 	// Zen history rows: load straight away (the agent is known from the slot),
@@ -810,6 +858,7 @@ export function useAgentPanel({
 		openHistorySession,
 		removeHistorySession,
 		// Agent switcher
+		agentListenersReady,
 		options,
 		selectedAgentId,
 		hasRunningSessions,

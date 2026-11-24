@@ -118,6 +118,7 @@ async fn load_account(
             server: restored.server,
             expires_at,
             persistence: RemoteCredentialPersistence::SystemStore,
+            login_provider: restored.login_provider,
             info: ConnectionInfo {
                 connection: restored.connection,
                 capabilities: Capabilities {

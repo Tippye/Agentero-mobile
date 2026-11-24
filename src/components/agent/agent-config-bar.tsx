@@ -23,6 +23,7 @@ import type {
 import { cn } from "@/lib/core/utils";
 
 export type AgentConfigBarProps = {
+	modelDropdown?: boolean;
 	modelSelectorOpen: boolean;
 	onModelSelectorOpenChange: (open: boolean) => void;
 	models: AgentModelChoice[];
@@ -47,6 +48,7 @@ export type AgentConfigBarProps = {
 
 /** Session config row under the pane header: model (including effort), collaboration, fast. */
 export function AgentConfigBar({
+	modelDropdown,
 	modelSelectorOpen,
 	onModelSelectorOpenChange,
 	models,
@@ -78,6 +80,7 @@ export function AgentConfigBar({
 		>
 			<div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1 overflow-hidden">
 				<ComposerModelSelector
+					dropdown={modelDropdown}
 					open={modelSelectorOpen}
 					onOpenChange={onModelSelectorOpenChange}
 					models={models}

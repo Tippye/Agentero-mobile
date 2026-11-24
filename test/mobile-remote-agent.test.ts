@@ -6,6 +6,10 @@ const ipc = vi.hoisted(() => ({
 	catalog: vi.fn(),
 	logout: vi.fn(),
 	localOperations: vi.fn(),
+	oauthProviders: vi.fn(),
+	oauthStart: vi.fn(),
+	oauthPoll: vi.fn(),
+	oauthCancel: vi.fn(),
 }));
 vi.mock("@/lib/core/bindings", () => ({
 	commands: {
@@ -14,6 +18,10 @@ vi.mock("@/lib/core/bindings", () => ({
 		remoteAgentCatalog: ipc.catalog,
 		remoteAgentLogout: ipc.logout,
 		remoteAgentLocalOperations: ipc.localOperations,
+		remoteAgentOauthProviders: ipc.oauthProviders,
+		remoteAgentOauthStart: ipc.oauthStart,
+		remoteAgentOauthPoll: ipc.oauthPoll,
+		remoteAgentOauthCancel: ipc.oauthCancel,
 	},
 }));
 vi.mock("@/lib/core/tauri", () => ({ isTauri: () => true }));
@@ -37,14 +45,13 @@ import {
 	sessionKey,
 	supports,
 	validAnswers,
-	validTrustConfirmation,
 } from "@/lib/remote-agent/model";
 
 import { remoteAgent } from "@/lib/remote-agent/service";
 
 const capabilities: Capabilities = {
 	operations: ["listHosts", "sendMessage"],
-	authentication: ["password"],
+	authentication: ["browser"],
 	backends: ["harness"],
 	attachments: null,
 };
@@ -135,6 +142,89 @@ describe("native saved sign-in recovery", () => {
 	});
 });
 
+describe("third-party browser sign-in", () => {
+	const ok = <T>(data: T) => ({
+		status: "ok",
+		data: { ok: true, data, error: null },
+	});
+	it("discovers providers, starts a session and completes without a password", async () => {
+		ipc.oauthProviders.mockResolvedValueOnce(
+			ok([{ id: "github", displayName: "GitHub" }]),
+		);
+		expect(await remoteAgent.oauthProviders("https://remote.example")).toEqual([
+			{ id: "github", displayName: "GitHub" },
+		]);
+		expect(ipc.oauthProviders).toHaveBeenCalledWith("https://remote.example");
+		ipc.oauthStart.mockResolvedValueOnce(
+			ok({
+				qrId: "github-qr-session-1234567890",
+				scanUrl: "https://remote.example/api/v1/auth/q/x",
+				expiresIn: 300,
+			}),
+		);
+		const session = await remoteAgent.oauthStart(
+			"https://remote.example",
+			"github",
+		);
+		expect(session.qrId).toBe("github-qr-session-1234567890");
+		expect(ipc.oauthStart).toHaveBeenCalledWith(
+			"https://remote.example",
+			"github",
+		);
+		ipc.oauthPoll.mockResolvedValueOnce(ok({ status: "pending" }));
+		expect(await remoteAgent.oauthPoll(session.qrId)).toEqual({
+			status: "pending",
+		});
+		const account = {
+			account: "reader@example.test",
+			server: "https://remote.example",
+			expiresAt: 9_000_000_000_000,
+			persistence: "systemStore",
+			loginProvider: "github",
+			info: {
+				connection: { providerId: "ds-harness-remote", connectionId: "launch" },
+				capabilities: {
+					operations: [],
+					authentication: ["browser"],
+					backends: [],
+					attachments: null,
+				},
+			},
+		};
+		ipc.oauthPoll.mockResolvedValueOnce(ok({ status: "complete", account }));
+		expect(await remoteAgent.oauthPoll(session.qrId)).toEqual({
+			status: "complete",
+			account,
+		});
+		// The account token never crosses IPC: only the activated account view.
+		expect(JSON.stringify(ipc.oauthPoll.mock.calls)).not.toContain("token");
+	});
+	it("surfaces expiry and cancellation as explicit states", async () => {
+		ipc.oauthPoll.mockResolvedValueOnce(ok({ status: "expired" }));
+		expect(await remoteAgent.oauthPoll("expired-session")).toEqual({
+			status: "expired",
+		});
+		ipc.oauthCancel.mockResolvedValueOnce(ok(null));
+		await expect(
+			remoteAgent.oauthCancel("expired-session"),
+		).resolves.toBeNull();
+		ipc.oauthPoll.mockResolvedValueOnce({
+			status: "ok",
+			data: {
+				ok: false,
+				data: null,
+				error: {
+					code: "remote_agent_oauth_unknown_session",
+					message: "This sign-in session is no longer active; start again",
+				},
+			},
+		});
+		await expect(remoteAgent.oauthPoll("gone")).rejects.toThrow(
+			"no longer active",
+		);
+	});
+});
+
 describe("mobile Remote Agent capabilities and identity", () => {
 	it("requires negotiated operations and route limits rather than assuming provider support", () => {
 		expect(supports(undefined, "sendMessage")).toBe(false);
@@ -191,29 +281,6 @@ describe("mobile Remote Agent capabilities and identity", () => {
 				},
 			}),
 		).not.toBe(key);
-	});
-	it("requires the complete displayed fingerprint even for a previously pinned Host", () => {
-		const identity = {
-			host: session.workspace.host,
-			name: "Host",
-			fingerprint: `SHA256:${"ab".repeat(32)}`,
-			pinned: true,
-		};
-		expect(validTrustConfirmation(identity, "")).toBe(false);
-		expect(validTrustConfirmation(identity, "yes")).toBe(false);
-		expect(
-			validTrustConfirmation(identity, identity.fingerprint.slice(0, 20)),
-		).toBe(false);
-		expect(validTrustConfirmation(identity, `SHA256:${"cd".repeat(32)}`)).toBe(
-			false,
-		);
-		expect(validTrustConfirmation(identity, identity.fingerprint)).toBe(true);
-		expect(
-			validTrustConfirmation(
-				{ ...identity, fingerprint: "server said okay" },
-				"server said okay",
-			),
-		).toBe(false);
 	});
 	it("validates structured answers against exactly the advertised options", () => {
 		const questions: Question[] = [

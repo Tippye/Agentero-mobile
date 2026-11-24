@@ -11,11 +11,11 @@ import type {
 	AgentFailedEvent,
 	AgentLine,
 	AgentPermissionRequest,
-	AgentResultEvent,
 	AgentStatusEvent,
 	AgentStreamEvent,
 	AgentTurnPhase,
 } from "@/components/mobile/types";
+import type { AgentResultPayload } from "@/lib/agent/api";
 import { bridgeRpc, listenBridgeEvent } from "@/lib/bridge/client";
 import { toSafeDisposer } from "@/lib/core/tauri-events";
 
@@ -43,11 +43,16 @@ export function useMobileAgentChat({
 	/** Loading phase of the in-flight turn (label under the sending state). */
 	const [phase, setPhase] = useState<AgentStatusEvent | null>(null);
 	const sessionRef = useRef<string | null>(sessionId);
+	const runRef = useRef<string | null>(null);
+	const submittingRef = useRef(false);
+	const restoreGeneration = useRef(0);
 	const pendingPermissionRef = useRef<AgentPermissionRequest | null>(null);
 	pendingPermissionRef.current = permission;
 
 	const restore = useCallback(
 		async (target: string) => {
+			if (submittingRef.current) return;
+			const generation = ++restoreGeneration.current;
 			setRestoring(true);
 			try {
 				const history = await bridgeRpc<AcpLoadSessionResult>(
@@ -57,6 +62,7 @@ export function useMobileAgentChat({
 						sessionId: target,
 					},
 				);
+				if (generation !== restoreGeneration.current) return;
 				sessionRef.current = history.sessionId;
 				onSessionId(history.sessionId);
 				setLines(
@@ -69,7 +75,7 @@ export function useMobileAgentChat({
 			} catch {
 				// Session history is best-effort; keep the current timeline.
 			} finally {
-				setRestoring(false);
+				if (generation === restoreGeneration.current) setRestoring(false);
 			}
 		},
 		[agentId, onSessionId],
@@ -77,6 +83,9 @@ export function useMobileAgentChat({
 
 	useEffect(() => {
 		if (sessionRef.current) void restore(sessionRef.current);
+		return () => {
+			restoreGeneration.current += 1;
+		};
 	}, [restore]);
 
 	useEffect(() => {
@@ -93,14 +102,14 @@ export function useMobileAgentChat({
 		const unlisten = [
 			toSafeDisposer(
 				listenBridgeEvent<AgentStreamEvent>("agent:stream", (event) => {
-					if (!active || event.sessionId !== sessionRef.current) return;
+					if (!active || event.sessionId !== runRef.current) return;
 					setPhase(null);
 					setLines((current) => appendStreamChunk(current, event.chunk));
 				}),
 			),
 			toSafeDisposer(
 				listenBridgeEvent<AgentStatusEvent>("agent:status", (event) => {
-					if (!active || event.sessionId !== sessionRef.current) return;
+					if (!active || event.sessionId !== runRef.current) return;
 					if (
 						event.phase !== "starting" &&
 						event.phase !== "waiting-model" &&
@@ -112,8 +121,12 @@ export function useMobileAgentChat({
 				}),
 			),
 			toSafeDisposer(
-				listenBridgeEvent<AgentResultEvent>("agent:completed", (event) => {
-					if (!active || event.sessionId !== sessionRef.current) return;
+				listenBridgeEvent<AgentResultPayload>("agent:completed", (event) => {
+					if (!active || event.sessionId !== runRef.current) return;
+					runRef.current = null;
+					submittingRef.current = false;
+					sessionRef.current = event.providerSessionId ?? null;
+					onSessionId(sessionRef.current);
 					setSending(false);
 					setPhase(null);
 					setLines((current) => completeStream(current, event.content));
@@ -121,7 +134,9 @@ export function useMobileAgentChat({
 			),
 			toSafeDisposer(
 				listenBridgeEvent<AgentFailedEvent>("agent:failed", (event) => {
-					if (!active || event.sessionId !== sessionRef.current) return;
+					if (!active || event.sessionId !== runRef.current) return;
+					runRef.current = null;
+					submittingRef.current = false;
 					setSending(false);
 					setPhase(null);
 					setLines((current) =>
@@ -133,7 +148,7 @@ export function useMobileAgentChat({
 				listenBridgeEvent<AgentPermissionRequest>(
 					"agent:permission-request",
 					(event) => {
-						if (!active || event.sessionId !== sessionRef.current) return;
+						if (!active || event.sessionId !== runRef.current) return;
 						setPermission(event);
 					},
 				),
@@ -150,11 +165,15 @@ export function useMobileAgentChat({
 				});
 			}
 		};
-	}, [t]);
+	}, [onSessionId, t]);
 
 	const clearSession = useCallback(() => {
-		const current = sessionRef.current;
+		const current = runRef.current;
+		restoreGeneration.current += 1;
+		runRef.current = null;
 		sessionRef.current = null;
+		submittingRef.current = false;
+		setRestoring(false);
 		setLines([]);
 		setSending(false);
 		setPhase(null);
@@ -178,9 +197,18 @@ export function useMobileAgentChat({
 	}, []);
 
 	const send = useCallback(
-		async (value: string) => {
+		async (
+			value: string,
+			{
+				modelId,
+				workflow,
+				target,
+			}: { modelId?: string; workflow?: string; target?: string } = {},
+		) => {
 			const next = value.trim();
-			if (!next || sending) return;
+			if (!next || submittingRef.current || restoring) return;
+			submittingRef.current = true;
+			const generation = ++restoreGeneration.current;
 			setLines((previous) => appendUserLine(previous, next));
 			setSending(true);
 			setPhase(null);
@@ -189,13 +217,25 @@ export function useMobileAgentChat({
 					"agent_run_once",
 					{
 						agentId: agentId ?? undefined,
+						sessionId: sessionRef.current ?? undefined,
 						prompt: next,
+						workflow,
+						target,
+						modelId,
+						forceModel: modelId !== undefined,
 						permissionMode: "ask",
 					},
 				);
-				sessionRef.current = accepted.sessionId;
-				onSessionId(accepted.sessionId);
+				if (generation !== restoreGeneration.current) {
+					void bridgeRpc("agent_cancel_run", {
+						sessionId: accepted.sessionId,
+					}).catch(() => undefined);
+					return;
+				}
+				runRef.current = accepted.sessionId;
 			} catch (error) {
+				if (generation !== restoreGeneration.current) return;
+				submittingRef.current = false;
 				setSending(false);
 				setPhase(null);
 				setLines((current) =>
@@ -206,7 +246,7 @@ export function useMobileAgentChat({
 				);
 			}
 		},
-		[agentId, onSessionId, sending, t],
+		[agentId, restoring, t],
 	);
 
 	return {

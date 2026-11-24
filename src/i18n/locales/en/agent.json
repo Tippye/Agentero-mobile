@@ -89,6 +89,7 @@
 	},
 	"agentMenu": {
 		"title": "ACP backend",
+		"remote": "Remote Agent",
 		"empty": "No ready ACP agents. Configure one in Settings.",
 		"openSettings": "Open Agent settings"
 	},
@@ -145,6 +146,10 @@
 		"imagePickFailed": "Could not open the image picker.",
 		"imageOnlyPrompt": "Please analyze the attached image(s).",
 		"currentFileRemove": "Remove current file from context",
+		"remotePaperPdf": "Include paper PDF",
+		"remotePaperPdfUnavailable": "Could not read the paper PDF. Turn off the PDF attachment to send with paper details only.",
+		"remotePaperPdfTooLarge": "The paper PDF exceeds the remote attachment size limit. Turn off the PDF attachment to send with paper details only.",
+		"remotePaperPdfUnsupported": "This remote agent cannot accept attachments. Turn off the PDF attachment to send with paper details only.",
 		"mentionEnterFolder": "Open {{name}}",
 		"mentionBack": "Back to parent folder",
 		"mentionEmptyFolder": "No items in this folder",
@@ -273,6 +278,7 @@
 		"regionNotFound": "Region not found: {{source}}"
 	},
 	"models": {
+		"emptyCatalog": "No models available",
 		"currentSelection": "Current selection",
 		"locateCurrent": "Locate current model",
 		"defaultGroup": "Models",

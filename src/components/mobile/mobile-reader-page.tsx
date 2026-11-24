@@ -92,12 +92,9 @@ export function MobileReaderPage({
 	// Dual-pane translation reuses the reader split: original PDF on the left,
 	// translated companion on the right. Narrow screens show the companion
 	// alone until it is closed, since three panes would be unusable.
-	// On narrow screens the notes pane belongs to the Compare preset; a stale
-	// `notes` mode under the Read preset must not leave an empty half-pane.
-	const notesVisible = translationVisible
-		? false
-		: compare ||
-			(widthClass === "narrow" && mode === "notes" && preset === "compare");
+	// Discussion can show a cited note alongside the Agent. Read always shows the PDF.
+	const notesVisible =
+		!translationVisible && (compare || (mode === "notes" && preset !== "read"));
 	const pdfVisible = translationVisible
 		? widthClass !== "narrow"
 		: compare || !notesVisible;

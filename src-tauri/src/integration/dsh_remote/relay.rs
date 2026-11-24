@@ -52,6 +52,12 @@ impl RelayChannel {
             return Err(RemoteError::invalid("Connection timeout must be positive"));
         }
         let host = api.host(token, host_id).await?;
+        if host.device.online == Some(false) {
+            return Err(RemoteError::new(
+                "HOST_OFFLINE",
+                "The Host is offline; try again once it reconnects",
+            ));
+        }
         if host.identity_key != pinned_host_key {
             return Err(RemoteError::new(
                 "PEER_IDENTITY_MISMATCH",

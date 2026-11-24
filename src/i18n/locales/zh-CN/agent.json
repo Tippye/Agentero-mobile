@@ -89,6 +89,7 @@
 	},
 	"agentMenu": {
 		"title": "ACP 后端",
+		"remote": "远程 Agent",
 		"empty": "没有就绪的 ACP Agent。请在设置中配置。",
 		"openSettings": "打开 Agent 设置"
 	},
@@ -145,6 +146,10 @@
 		"imagePickFailed": "无法打开图片选择器。",
 		"imageOnlyPrompt": "请分析附带的图片。",
 		"currentFileRemove": "从上下文移除当前文件",
+		"remotePaperPdf": "附上论文 PDF",
+		"remotePaperPdfUnavailable": "无法读取论文 PDF。取消附上 PDF 后，可以仅使用论文信息发送。",
+		"remotePaperPdfTooLarge": "论文 PDF 超过远程附件大小限制。取消附上 PDF 后，可以仅使用论文信息发送。",
+		"remotePaperPdfUnsupported": "此远程 Agent 不支持附件。取消附上 PDF 后，可以仅使用论文信息发送。",
 		"mentionEnterFolder": "进入 {{name}}",
 		"mentionBack": "返回上级目录",
 		"mentionEmptyFolder": "此文件夹中没有可选项",
@@ -273,6 +278,7 @@
 		"regionNotFound": "找不到区域：{{source}}"
 	},
 	"models": {
+		"emptyCatalog": "暂无可用模型",
 		"currentSelection": "当前选择",
 		"locateCurrent": "定位当前模型",
 		"defaultGroup": "模型",

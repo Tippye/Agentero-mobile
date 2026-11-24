@@ -64,6 +64,7 @@ pub enum Capability {
     ListSessions,
     CreateSession,
     ReadSession,
+    SelectModel,
     SendMessage,
     Cancel,
     Subscribe,
@@ -136,7 +137,15 @@ pub struct ConnectionInfo {
 pub struct HostInfo {
     pub host: HostRef,
     pub name: String,
-    pub online: bool,
+    /// `None` when the Server did not report presence and the descriptor lookup
+    /// failed; absence is not an offline verdict.
+    pub online: Option<bool>,
+    /// This device has already approved and pinned the Host's current identity.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Host home directory from the native ready frame, once connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -144,6 +153,9 @@ pub struct HostInfo {
 pub struct WorkspaceInfo {
     pub workspace: WorkspaceRef,
     pub name: String,
+    /// Absolute Host-side directory when the official baseline reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -166,6 +178,64 @@ pub struct SessionInfo {
     pub title: String,
     /// Idle and Completed are distinct; an idle transport is not task success.
     pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelSelection {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelReasoningEffort {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelReasoning {
+    pub efforts: Vec<RemoteModelReasoningEffort>,
+    pub default_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub reasoning: Option<RemoteModelReasoning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelProviderGroup {
+    pub id: String,
+    pub name: String,
+    pub models: Vec<RemoteModelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteModelProviderFailure {
+    pub id: String,
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSessionModels {
+    pub current: RemoteModelSelection,
+    pub routable: bool,
+    pub groups: Vec<RemoteModelProviderGroup>,
+    pub failures: Vec<RemoteModelProviderFailure>,
 }
 
 /// Adapter-owned opaque token. It is never parsed or incremented by the service.
@@ -213,6 +283,21 @@ pub enum EventPayload {
     Message {
         role: String,
         text: String,
+        /// Model reasoning attached to this reply; rendered as a disclosure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
+    },
+    /// One native tool invocation. `call` and `result` share the same source ID
+    /// so clients fold them into a single activity row.
+    Tool {
+        call_id: String,
+        name: String,
+        /// `running`, `finished` or `failed`.
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     TaskStatus {
         status: TaskStatus,
@@ -225,6 +310,14 @@ pub enum EventPayload {
     QuestionRequest {
         request_id: String,
         questions: Vec<Question>,
+    },
+    /// One live assistant streaming row. Deltas concatenate onto the current
+    /// assistant turn; the final durable message replaces the streamed text.
+    AssistantChunk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_delta: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_delta: Option<String>,
     },
     ConnectionStatus {
         status: ConnectionStatus,
@@ -243,6 +336,15 @@ pub struct RemoteEvent {
     pub payload: EventPayload,
 }
 
+/// Host-reported context pressure for the current session, in tokens.
+/// Absence means the Host did not project usage; never guess a window size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub used: u64,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
@@ -251,6 +353,9 @@ pub struct SessionSnapshot {
     /// A subscription opened with this token must cover changes after this
     /// baseline. Adapters implement this using their official history/streams.
     pub cursor: Option<EventCursor>,
+    /// Latest projected context usage from the official snapshot, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -283,6 +388,12 @@ pub enum Mutation {
         workspace: WorkspaceRef,
         title: Option<String>,
     },
+    /// Open (or reuse) the Host workspace for an absolute directory before
+    /// creating a session in it. Reuse is read-only; creation is journaled.
+    EnsureWorkspace {
+        host: HostRef,
+        path: String,
+    },
     SendMessage {
         session: SessionRef,
         text: String,
@@ -290,6 +401,10 @@ pub enum Mutation {
     },
     Cancel {
         session: SessionRef,
+    },
+    SelectModel {
+        session: SessionRef,
+        selection: RemoteModelSelection,
     },
     RespondPermission {
         session: SessionRef,
@@ -307,22 +422,35 @@ pub enum Mutation {
 }
 
 impl Mutation {
-    pub fn workspace(&self) -> &WorkspaceRef {
+    /// Workspace scope for workspace/session mutations; `None` for host-level
+    /// mutations such as EnsureWorkspace.
+    pub fn workspace(&self) -> Option<&WorkspaceRef> {
         match self {
-            Self::CreateSession { workspace, .. } => workspace,
+            Self::CreateSession { workspace, .. } => Some(workspace),
+            Self::EnsureWorkspace { .. } => None,
             Self::SendMessage { session, .. }
             | Self::Cancel { session }
+            | Self::SelectModel { session, .. }
             | Self::RespondPermission { session, .. }
-            | Self::RespondQuestion { session, .. } => &session.workspace,
-            Self::UploadAttachment { upload } => &upload.session.workspace,
+            | Self::RespondQuestion { session, .. } => Some(&session.workspace),
+            Self::UploadAttachment { upload } => Some(&upload.session.workspace),
+        }
+    }
+
+    /// Host scope shared by every mutation, including host-level ones.
+    pub fn host(&self) -> &HostRef {
+        match self {
+            Self::EnsureWorkspace { host, .. } => host,
+            other => &other.workspace().expect("workspace-scoped mutation").host,
         }
     }
 
     pub fn capability(&self) -> Capability {
         match self {
-            Self::CreateSession { .. } => Capability::CreateSession,
+            Self::CreateSession { .. } | Self::EnsureWorkspace { .. } => Capability::CreateSession,
             Self::SendMessage { .. } => Capability::SendMessage,
             Self::Cancel { .. } => Capability::Cancel,
+            Self::SelectModel { .. } => Capability::SelectModel,
             Self::RespondPermission { .. } => Capability::RespondPermission,
             Self::RespondQuestion { .. } => Capability::RespondQuestion,
             Self::UploadAttachment { .. } => Capability::UploadAttachment,
@@ -344,8 +472,20 @@ pub struct OperationRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum OperationResult {
-    SessionCreated { session: SessionRef },
-    AttachmentUploaded { attachment: RemoteAttachment },
+    SessionCreated {
+        session: SessionRef,
+    },
+    /// The Host workspace for the requested directory exists (reused or created).
+    WorkspaceEnsured {
+        workspace: WorkspaceRef,
+    },
+    AttachmentUploaded {
+        attachment: RemoteAttachment,
+    },
+    ModelSelected {
+        session: SessionRef,
+        selected: Box<RemoteModelSelection>,
+    },
     Acknowledged,
 }
 

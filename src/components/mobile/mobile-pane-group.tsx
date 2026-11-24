@@ -21,10 +21,12 @@ export function MobilePaneGroup({
 	id,
 	layoutKey,
 	panes,
+	orientation = "horizontal",
 }: {
 	id: string;
 	layoutKey: string;
 	panes: MobileWorkspacePane[];
+	orientation?: "horizontal" | "vertical";
 }) {
 	const group = useRef<GroupImperativeHandle>(null);
 	const layouts = useRef(new Map<string, Layout>());
@@ -70,7 +72,7 @@ export function MobilePaneGroup({
 			id={id}
 			groupRef={group}
 			defaultLayout={layouts.current.get(layoutKey) ?? desired}
-			orientation="horizontal"
+			orientation={orientation}
 			className="h-full min-h-0 min-w-0"
 			resizeTargetMinimumSize={{ coarse: 44, fine: 12 }}
 			disabled={panes.filter((pane) => pane.visible).length < 2}
@@ -118,7 +120,11 @@ export function MobilePaneGroup({
 								disabled={!separator}
 								hidden={!separator}
 								style={{ display: separator ? undefined : "none" }}
-								className="after:w-3 data-[separator=active]:bg-primary/50"
+								className={
+									orientation === "vertical"
+										? "h-px w-full after:inset-x-0 after:top-1/2 after:bottom-auto after:h-3 after:w-full after:translate-x-0 after:-translate-y-1/2 data-[separator=active]:bg-primary/50"
+										: "after:w-3 data-[separator=active]:bg-primary/50"
+								}
 							/>
 						) : null}
 					</Fragment>

@@ -1,4 +1,4 @@
-import { ImageIcon } from "lucide-react";
+import { ImageIcon, Paperclip, X } from "lucide-react";
 import {
 	type KeyboardEvent,
 	type DragEvent as ReactDragEvent,
@@ -40,7 +40,11 @@ import {
 	usePromptInputAttachments,
 } from "@/components/agent/composer/prompt-input";
 import { useComposerFileDrag } from "@/components/agent/hooks/use-composer-file-drag";
-import type { QueuedPrompt } from "@/components/agent/types";
+import type {
+	QueuedPrompt,
+	RemotePaperContext,
+} from "@/components/agent/types";
+import { RemoteRegionContextPreview } from "@/components/mobile/remote/remote-region-context-preview";
 import { Popover, PopoverAnchor } from "@/components/ui/popover";
 import type { AgentSkill, PromptImage } from "@/lib/agent";
 import {
@@ -65,6 +69,8 @@ import type { AcpCommand } from "@/lib/agent/slash-commands";
 import type { PdfVisualDraft } from "@/lib/agent/visual-context-store";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
+import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
+import { regionPromptValues } from "@/lib/remote-agent/region-context-workflow";
 import { registerAgentHandoffReaders } from "@/lib/shell/workspace-broadcast";
 
 /** Copies live attachments into the handoff snapshot (blob URLs die with this webview). */
@@ -108,6 +114,13 @@ function SeedHandoffImages() {
 }
 
 export type AgentComposerProps = {
+	remotePaper?: RemotePaperContext | null;
+	onRemotePaperPdfChange?: (include: boolean) => void;
+	regionContext?: MobilePaperRegionContext | null;
+	onRegionContextHandled?: (id: string) => void;
+	showCompactToolbar?: boolean;
+	remoteAttachments?: boolean;
+	remoteAttachmentLimit?: number;
 	autoFocus: boolean;
 	heightPx?: number;
 	compact?: boolean;
@@ -118,7 +131,12 @@ export type AgentComposerProps = {
 	submitting: boolean;
 	composerText: string;
 	onComposerTextChange: (text: string) => void;
-	onSubmit: (text: string, images?: PromptImage[]) => Promise<void>;
+	onSubmit: (
+		text: string,
+		images?: PromptImage[],
+		files?: File[],
+		contextNote?: string,
+	) => Promise<void>;
 	onComposerKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
 	onComposerDragOver: (e: ReactDragEvent) => void;
 	onComposerDrop: (e: ReactDragEvent) => void;
@@ -192,12 +210,23 @@ export function AgentComposer(props: AgentComposerProps) {
 		onCancelRun,
 	} = props;
 	const { t } = useTranslation("agent");
+	const { t: tMobile } = useTranslation("mobile");
+	const { remotePaper, onRemotePaperPdfChange } = props;
+	const region = props.regionContext;
+	const [regionWithoutImage, setRegionWithoutImage] = useState<string | null>(
+		null,
+	);
+	const includeRegionImage = regionWithoutImage !== region?.id;
+	const regionImageSupported = Boolean(props.remoteAttachments);
 	const hasComposerText = Boolean(composerText.trim());
 	const hasVisualDrafts = extractVisualIds(composerText).some((id) =>
 		visualDrafts.some((draft) => draft.id === id),
 	);
 	// Attachments live inside PromptInput; base gate ignores them (see ComposerSubmitControl).
-	const canSubmitBase = hasComposerText || hasVisualDrafts;
+	const canSubmitBase =
+		hasComposerText ||
+		hasVisualDrafts ||
+		Boolean(region && (!includeRegionImage || regionImageSupported));
 	const composerMenuOpen = showMentionMenu || showSkillMenu || showSlashMenu;
 	const hasQueuedMessages = props.messageQueue.length > 0;
 	const [referenceHover, setReferenceHover] = useState<ReferenceHover | null>(
@@ -353,6 +382,29 @@ export function AgentComposer(props: AgentComposerProps) {
 						/>
 					</div>
 				) : null}
+				{remotePaper && (
+					<button
+						type="button"
+						aria-label={t("composer.remotePaperPdf")}
+						aria-pressed={remotePaper.includePdf}
+						title={t("composer.remotePaperPdf")}
+						disabled={submitting || switching}
+						onClick={() => onRemotePaperPdfChange?.(!remotePaper.includePdf)}
+						className={cn(
+							"flex min-h-8 max-w-full shrink-0 items-center gap-1.5 self-start rounded-full border px-2 text-xs hover:bg-muted",
+							remotePaper.includePdf
+								? "bg-muted/40"
+								: "border-dashed text-muted-foreground",
+						)}
+					>
+						<Paperclip className="size-3.5 shrink-0" aria-hidden />
+						<span className="shrink-0">PDF</span>
+						<span className="truncate">{remotePaper.source.paper.title}</span>
+						{remotePaper.includePdf && (
+							<X className="size-3 shrink-0" aria-hidden />
+						)}
+					</button>
+				)}
 				{visualHover && hoveredVisual ? (
 					<VisualReferenceCard
 						draft={hoveredVisual}
@@ -376,6 +428,20 @@ export function AgentComposer(props: AgentComposerProps) {
 						onRemove={props.onRemoveContextPath}
 					/>
 				) : null}
+				{region && (
+					<RemoteRegionContextPreview
+						context={region}
+						includeImage={includeRegionImage}
+						imageSupported={regionImageSupported}
+						uncertain={false}
+						uploaded={false}
+						busy={submitting || switching}
+						onIncludeImage={(include) =>
+							setRegionWithoutImage(include ? null : region.id)
+						}
+						onRemove={() => props.onRegionContextHandled?.(region.id)}
+					/>
+				)}
 				<div
 					className={cn(
 						"relative min-h-0",
@@ -395,10 +461,14 @@ export function AgentComposer(props: AgentComposerProps) {
 							isFileDragOver &&
 								"border-primary/55 bg-primary/5 shadow-[inset_0_0_0_1px] shadow-primary/25 ring-2 ring-primary/35 dark:bg-primary/5",
 						)}
-						accept={COMPOSER_IMAGE_ACCEPT}
+						accept={props.remoteAttachments ? undefined : COMPOSER_IMAGE_ACCEPT}
+						attachmentsEnabled={props.remoteAttachments !== false}
+						rawAttachments={props.remoteAttachments}
 						multiple
 						maxFiles={COMPOSER_IMAGE_MAX_FILES}
-						maxFileSize={COMPOSER_IMAGE_MAX_BYTES}
+						maxFileSize={
+							props.remoteAttachmentLimit ?? COMPOSER_IMAGE_MAX_BYTES
+						}
 						onError={(err) => {
 							if (err.code === "accept") {
 								notifyError(t("composer.imageAcceptError"));
@@ -410,10 +480,31 @@ export function AgentComposer(props: AgentComposerProps) {
 						onDragLeave={onFileDragLeave}
 						onDragOver={onFileDragOver}
 						onDrop={onFileDropHighlightEnd}
-						onSubmit={async ({ files }) => {
+						onSubmit={async ({ files, rawFiles }) => {
 							const images = fileUiPartsToPromptImages(files);
 							// Prefer controlled draft (includes inline token markers).
-							await onSubmit(composerText, images.length ? images : undefined);
+							if (region && includeRegionImage && !regionImageSupported) {
+								notifyError(tMobile("paperContext.referenceOnly"));
+								throw new Error("Paper region upload unavailable");
+							}
+							if (region && includeRegionImage) images.push(region.image);
+							const contextNote = region
+								? tMobile("paperContext.prompt", {
+										...regionPromptValues(region),
+										imageStatus: tMobile(
+											includeRegionImage
+												? "paperContext.imageAttached"
+												: "paperContext.imageOmitted",
+										),
+									})
+								: undefined;
+							await onSubmit(
+								composerText,
+								images.length ? images : undefined,
+								rawFiles,
+								contextNote,
+							);
+							if (region) props.onRegionContextHandled?.(region.id);
 						}}
 					>
 						<PublishHandoffImages />
@@ -554,21 +645,25 @@ export function AgentComposer(props: AgentComposerProps) {
 								</PopoverAnchor>
 							</Popover>
 						</PromptInputBody>
-						{compact ? null : (
+						{compact && !props.showCompactToolbar ? null : (
 							<PromptInputFooter className="flex-wrap items-end gap-x-2 gap-y-1.5 px-3 pb-2.5">
 								<PromptInputTools className="min-w-0 flex-1 flex-wrap gap-1">
 									<ComposerToolbar
 										switching={switching}
 										activeUsage={props.activeUsage}
+										allowFiles={props.remoteAttachments}
+										showAttachments={props.remoteAttachments !== false}
 									/>
 								</PromptInputTools>
-								<ComposerSubmitControl
-									canSubmitBase={canSubmitBase}
-									switching={switching}
-									submitting={submitting}
-									activeTabIsRunning={activeTabIsRunning}
-									onCancelRun={onCancelRun}
-								/>
+								{!compact && (
+									<ComposerSubmitControl
+										canSubmitBase={canSubmitBase}
+										switching={switching}
+										submitting={submitting}
+										activeTabIsRunning={activeTabIsRunning}
+										onCancelRun={onCancelRun}
+									/>
+								)}
 							</PromptInputFooter>
 						)}
 					</PromptInput>

@@ -2,12 +2,12 @@ import type {
 	Capabilities,
 	Capability,
 	ConnectionRef,
+	HostRef,
 	JournalEntry,
 	OperationOutcome,
 	Question,
 	QuestionAnswer,
 	ReceiptLookup,
-	RemoteAgentHostIdentity,
 	SessionRef,
 	WorkspaceRef,
 } from "@/lib/core/bindings";
@@ -36,21 +36,22 @@ export function workspaceKey(workspace: WorkspaceRef): string {
 export function sessionKey(session: SessionRef): string {
 	return `${workspaceKey(session.workspace).slice(0, -1)},${JSON.stringify(session.sessionId)}]`;
 }
+/** Host-level journal target for opening a workspace directory by path. */
+export function ensureWorkspaceKey(host: HostRef, path: string): string {
+	return JSON.stringify([
+		host.connection.providerId,
+		host.connection.connectionId,
+		host.hostId,
+		"workspace",
+		path,
+	]);
+}
 export function belongsToConnection(
 	target: string,
 	connection: ConnectionRef,
 ): boolean {
 	return target.startsWith(
 		`${JSON.stringify([connection.providerId, connection.connectionId]).slice(0, -1)},`,
-	);
-}
-export function validTrustConfirmation(
-	identity: RemoteAgentHostIdentity,
-	entered: string,
-): boolean {
-	return (
-		/^SHA256:[a-f0-9]{64}$/.test(identity.fingerprint) &&
-		entered.trim() === identity.fingerprint
 	);
 }
 export function validAnswers(
@@ -163,7 +164,9 @@ export class OperationJournal {
 					]))
 				: context.type === "createSession"
 					? workspaceKey(context.workspace)
-					: sessionKey(context.session);
+					: context.type === "ensureWorkspace"
+						? ensureWorkspaceKey(context.host, context.path)
+						: sessionKey(context.session);
 			if (!belongsToConnection(target, connection))
 				throw new Error("Remote operation journal crossed its target");
 			if (previous && previous.target !== target)
