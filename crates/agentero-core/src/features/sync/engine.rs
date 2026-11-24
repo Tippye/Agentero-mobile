@@ -1049,8 +1049,8 @@ pub struct OverwritePreview {
     pub remote_version: u64,
 }
 
-/// Resolve the degraded protocol from a live probe: supported store → false;
-/// ignoring store + per-device opt-in on WebDAV → true; otherwise the
+/// Resolve the degraded protocol from a live probe: supported store — false;
+/// ignoring store + per-device opt-in on WebDAV — true; otherwise the
 /// localized hard stop. Phase 1 keeps degraded sync WebDAV-only.
 async fn resolve_degraded<S: RemoteStore>(
     cfg: &SyncBackendConfig,
@@ -2367,6 +2367,12 @@ async fn run_mirror<S: RemoteStore>(
             ),
             None => (None, None),
         };
+// A mirror has no degraded protocol, so a HEAD without a strong
+        // ETag can never be replaced. Stop here instead of uploading blobs
+        // and a manifest that no HEAD would reference.
+        if let Some(tag) = &head_etag {
+            PutCondition::IfMatch(tag.clone()).header()?;
+        }
         let remote = match &head_ptr {
             Some(ptr) => load_manifest(client, ptr).await?,
             None => Manifest::default(),
