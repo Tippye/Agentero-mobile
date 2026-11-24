@@ -435,12 +435,25 @@ describe("mobile local-first shell", () => {
 	it("opens a cited paper from the remote conversation and jumps after layout", async () => {
 		await click("open-local-paper");
 		await click("agent-tab");
+		await click("edit-remote-draft");
 		await click("open-cited-page");
 		expect(
 			host.querySelector("[data-reader]")?.getAttribute("data-paper"),
 		).toBe(state.secondPaper.id);
 		expect(state.navigate).toHaveBeenCalledExactlyOnceWith({ page: 4 });
-		await click("agent-tab");
+		expect(
+			host.querySelector<HTMLElement>("#mobile-workspace")?.style.flexDirection,
+		).toBe("column");
+		for (const id of ["reader", "agent"]) {
+			const pane = host.querySelector(`[data-workspace-pane="${id}"]`);
+			expect(pane).not.toBeNull();
+			expect(pane?.hasAttribute("hidden")).toBe(false);
+		}
+		expect(
+			host.querySelector('[data-remote="true"]')?.getAttribute("data-active"),
+		).toBe("true");
+		expect(host.textContent).toContain("unsent-dsh-draft");
+		expect(state.remoteMounts).toBe(1);
 		await click("open-cited-notes");
 		expect(host.querySelector("[data-reader]")?.getAttribute("data-mode")).toBe(
 			"notes",

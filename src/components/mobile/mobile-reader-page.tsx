@@ -76,7 +76,9 @@ export function MobileReaderPage({
 	);
 	const widthClass = suppliedWidth ?? measurement.widthClass;
 	const compare = widthClass !== "narrow" && preset === "compare";
-	const notesVisible = compare || (widthClass === "narrow" && mode === "notes");
+	const notesVisible =
+		compare ||
+		(mode === "notes" && (widthClass === "narrow" || preset === "discuss"));
 	const pdfVisible = compare || !notesVisible;
 	const [pdf, setPdf] = useState<{
 		paperId: string;
