@@ -28,6 +28,8 @@
 		"unsaved": "Finish saving or discard the pending handwriting before leaving."
 	},
 	"pdf": {
+		"cachedTranslationPreview": "Showing the cached translated PDF; layout analysis continues in the background",
+		"cachedTranslationPreviewClose": "Close translated preview",
 		"apiOnly": {
 			"layoutProviderRequired": "Configure a remote layout API provider before analyzing this paper.",
 			"translateProviderRequired": "Choose an API translation provider before translating on this device."

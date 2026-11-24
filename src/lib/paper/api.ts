@@ -23,6 +23,7 @@ import type {
 	PaperTagInput,
 } from "@/lib/paper/types";
 import { paperFromWire } from "@/lib/paper/wire";
+import { clearOrphanedTranslationCaches } from "@/lib/pdf/reflow/build-cache";
 import { DEFAULT_TRANSLATOR_BASE_URL } from "@/lib/settings";
 import type { WikiRenameResult } from "@/lib/wiki";
 
@@ -284,6 +285,7 @@ export async function purgeAllTrash(vaultPath: string): Promise<void> {
 	await callApiResult(() => commands.pathPurgeTrash({ vaultPath }), {
 		fallback: i18n.t("sidebar:recycleBin.purgeFailed"),
 	});
+	void clearOrphanedTranslationCaches(vaultPath).catch(() => {});
 }
 
 export type PaperMoveResult = {

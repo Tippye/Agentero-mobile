@@ -451,6 +451,12 @@ pub struct TranslateSettings {
     /// translated paper reuses the built PDF instead of typesetting again.
     #[serde(default = "default_true")]
     pub cache_reflow_final: bool,
+    /// Sync translation artifacts with the vault: the translation sidecar and the
+    /// finished translated PDF. On by default so every translation artifact is
+    /// available on the other devices; turning it off keeps them local (app
+    /// cache) instead. Layout files always sync as paper metadata.
+    #[serde(default = "default_true")]
+    pub cache_translation_sync: bool,
     /// Full-document translation runs in the background after a paper is
     /// imported and its layout lands (default off: it spends provider quota).
     #[serde(default)]
@@ -482,6 +488,7 @@ impl Default for TranslateSettings {
             custom_user: String::new(),
             cache_reflow_ir: true,
             cache_reflow_final: true,
+            cache_translation_sync: true,
             auto_translate_import: false,
             auto_translate_import_concurrency: default_auto_translate_import_concurrency(),
             always_show_translate_card: false,

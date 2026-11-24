@@ -95,15 +95,17 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
   - `source` — `papers/<id>/source/`（LaTeX / e-print）
   - `attachments` — `papers/<id>/attachments/`（支撑材料）
   - `ink` — `papers/<id>/marks/ink/`（手写笔迹 sidecar；**仅移动端设置页展示**，桌面只读显示、不产生笔迹，因此桌面始终按开启处理）
-  - `translated` — `papers/<id>/translated/`（全文翻译完成后的译文 PDF；所有端都可配置）
-  - 例外：`source/layout.json` 与 `source/layout-translate.json` 属于共享元数据，始终同步——译文 sidecar 是另一台设备复用已同步译文 PDF 的内容键输入，不能随 `source` 关闭。
+  - `translated` — 翻译缓存：`papers/<id>/translated/`（译文 PDF）与 `source/layout-translate.json`（译文 sidecar）；由「设置 → 翻译 → 翻译缓存」控制，**默认开启**
+  - 例外：`source/layout.json` 与 `source/layout-index.json` 始终同步——图表、引用和按需下载论文的可用性都依赖它；`scope.translated` 只控制译文 sidecar 与译文 PDF。
 - **对称过滤**：同一谓词同时作用于本地扫描、base 与远端 manifest——被过滤的文件「双向失明」：不上传、不下载，也**绝不因缺失而被当作删除**。
 - **manifest 携带 scope**：发布端把自己过滤掉的分类写进 manifest（`scope` 字段，全量同步时省略）。合并时：远端失明的路径不触发 `delete_local`，本地仍可见该分类时以本地条目为准并继续上传，否则携带 base 条目供其他设备可见；本地失明的路径完全惰性（不下载、不传播删除）。
 - **边界**：所有设备都过滤某分类时，该分类条目会从 manifest 消失（blob 仍在，待孤儿 GC）；重新启用后本地仍有文件则自动重新上传，本地没有则需从来源重取。
 - **重取**：PDF/TeX 可从 `metadata.json` 的来源字段（arXiv ID / DOI / `pdf_url`）重新下载——`job_download_assets_enqueue`（DownloadAssets 后台任务；库表格右键「从来源下载 PDF」、打开论文时自动补下均走此路径）。库列表的 `has_pdf` 由 `paper_list` 经 CapsCache 投影。
-- **配置**：`SyncBackendConfig.scope`（缺省值：`pdf` / `source` / `attachments` / `ink` 开，`translated` 关；旧配置缺字段按此默认，旧 manifest 缺 `scope` 字段仍按「全量」读取）；设置页以「同步范围」小标题分组展示逐类开关（附本地体积 `sync_scope_sizes`）。`translated` 只在「设置 → 翻译 → 缓存 → 缓存译文 PDF」开启并实际完成整篇翻译后才有文件；该同步开关只决定是否上传，不负责触发翻译。
-- **译文 PDF 落盘**：本地论文的最终译文 PDF 写入 `papers/<id>/translated/`（按 PDF 哈希 + 内容指纹命名），另一台设备命中同一内容键时直接复用，不再重新提取与构建；远程 Vault / 无论文路径的会话回退到应用缓存。`translated` 关闭时文件仍留在本地论文目录，只是不上传、不下载。清除「设置 → 关于 → 翻译缓存」会删除本地 `translated/`，若该分类开启，删除会在下一次同步传播到其它设备。
-- **笔迹与论文删除**：远端整篇论文删除的证明使用 `is_all_for_paper_presence()`（忽略 `translated`），因此默认关闭译文 PDF 不会让旧的整篇删除逻辑失效；发布端关掉 `ink` 时，笔迹按「失明」处理，不因缺失被删除。
+- **配置**：`SyncBackendConfig.scope` 的 `translated` 字段不再由同步页编辑；每次实际同步前，Host 用应用设置 `translate.cacheTranslationSync` 覆盖主库与镜像的该字段（`src-tauri/src/integration/sync/commands.rs`）。同步页仍展示 PDF / 源码 / 附件 / 笔迹四类；翻译缓存开关在「设置 → 翻译」。
+- **本地缓存目录**：开关关闭时，译文 PDF 不再写入 `papers/<id>/translated/`，而是写入应用缓存 `reflow-build/<pdf 哈希>-final-<内容指纹>.pdf`，旁边写一份 `.json` 元数据（目标语言、服务指纹、论文路径、生成时间）。译文 sidecar 仍在 `source/layout-translate.json` 供本机复用，但按 `translated` 分类排除同步。删除论文时前端清理对应的 `reflow-build` 条目与 `reflow-ir/<paper slug>-*`；删除应用时随缓存目录一起删除。
+- **译文 PDF 复用**：本地论文命中 `papers/<id>/translated/` 或应用缓存中的同一内容键时直接复用；读取先查当前开关目录，再回退另一目录，切换开关不会丢掉已有译文。清除「设置 → 关于 → 翻译缓存」会删除两处译文 PDF、IR 与 `translated/`。
+- **快速预览**：点「译文」且版面 sidecar 尚不可用时，先按目标语言 + 服务指纹查 `.json` 元数据；命中就把成品 PDF 以只读方式立即显示，版面分析/补块继续在后台跑，可交互译文就绪后接管。
+- **笔迹与论文删除**：远端整篇论文删除的证明使用 `is_all_for_paper_presence()`（忽略 `translated`），因此关闭翻译缓存不会让旧的整篇删除逻辑失效；发布端关掉 `ink` 时，笔迹按「失明」处理，不因缺失被删除。
 
 ## WebDAV 后端
 
@@ -122,7 +124,7 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
 
 - **形态**：Vault 根目录就是 Git work tree；远端名固定 `origin`，分支由 `gitBranch` 指定（默认 `main`）。不经过 blob/manifest 引擎，Git 自己保存历史与合并。
 - **要求**：本机安装 Git 并可通过 PATH 找到（桌面 GUI 也走 `resolve_command` 的补充路径）。Vault 不能位于另一个 work tree 内、不能是 bare repo / detached HEAD；已有仓库的当前分支必须与配置一致、已有 `origin` 必须与配置 URL 一致，否则同步报错而不静默改仓库。
-- **忽略**：`.agentero/`、`.DS_Store`、`*.tmp`、`node_modules/` 通过 `.git/info/exclude` 排除，不写进 `.gitignore`；本地或远端已跟踪 `.agentero` 直接报 `git_agentero_tracked`。`catalog.sqlite` 仍可由 sidecar 重建。同步范围关闭的 PDF / `source/` / `attachments/` / `marks/ink/` / `translated/` 写在 `.gitignore` 的标记区块里；**排除项只对新文件生效，已跟踪文件继续在各设备之间同步**，关闭类别不产生删除提交。关闭 `source` 时按内容忽略（`source/*`）并显式恢复 `!…/source/layout.json` 与 `!…/source/layout-translate.json`，避免整目录忽略把始终同步的版面/译文 sidecar 一并挡掉。分类规则由 `scope.rs` 提供，支持 `papers/` 下嵌套集合的论文根识别。
+- **忽略**：`.agentero/`、`.DS_Store`、`*.tmp`、`node_modules/` 通过 `.git/info/exclude` 排除，不写进 `.gitignore`；本地或远端已跟踪 `.agentero` 直接报 `git_agentero_tracked`。`catalog.sqlite` 仍可由 sidecar 重建。同步范围关闭的 PDF / `source/` / `attachments/` / `marks/ink/` / `translated/` 写在 `.gitignore` 的标记区块里；**排除项只对新文件生效，已跟踪文件继续在各设备之间同步**，关闭类别不产生删除提交。关闭 `source` 时按内容忽略（`source/*`）并显式恢复 `!…/source/layout.json` 与 `!…/source/layout-index.json`，避免整目录忽略把始终同步的版面文件一并挡掉；译文 sidecar 由翻译缓存开关单独控制。分类规则由 `scope.rs` 提供，支持 `papers/` 下嵌套集合的论文根识别。
 - **一次 pass**：按 scope 更新 `.gitignore` → 暂存并提交范围内改动 → 查询远端分支并按需 fetch → 合并 → push。远端无分支时直接推送；本地没有提交时用 `checkout --no-overwrite-ignore -B` 采纳远端，无共同祖先时走 Git 三方合并。检出或合并前先检查远端路径是否与本地未跟踪且被忽略的文件重叠，重叠则停止请先备份移开。push 被非 fast-forward 拒绝时重新获取和合并（最多 3 次 push）。
 - **冲突**：使用 Git 原生三方合并；有冲突时收集 `--diff-filter=U` 路径、`git merge --abort` 并返回 `sync_conflict`，**不 push、不 auto-resolve**。本地提交保留，用户用 Git/编辑器解决后再同步。
 - **认证**：不把 token 写入 `sync.json`；使用系统 credential helper / SSH agent。子进程设置 `GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=never`、`SSH_ASKPASS_REQUIRE=never`（Unix 未自定义 `GIT_SSH_COMMAND` 时加 `ssh -o BatchMode=yes`），非交互环境失败而不是挂起。HTTPS 没有凭据时设置页按 `git_auth_failed` 提示先用 `git credential approve` 或系统凭据助手存 token，SSH 则提示 `ssh-add`。URL 内嵌凭据、`ext::`、`git://` 一律拒绝。非 loopback 的明文 `http://` 默认关闭，设置页「允许明文 HTTP」（`gitAllowInsecureHttp`，CLI `--git-allow-insecure-http true`）打开后才保存，令牌以明文传输，只适合没有 HTTPS 的内网。自签 HTTPS 可填 CA 证书的绝对 PEM 路径（`gitSslCaInfo`，CLI `--git-ssl-ca`），每次 Git 命令带 `-c http.sslCAInfo=<path>`；留空用系统信任库。证书校验失败为 `git_tls_failed`。不提供关闭证书校验的开关。
@@ -146,7 +148,7 @@ S3 / WebDAV 共用同一套状态化同步协议（内容寻址 blob + 不可变
 
 ## 前端
 
-设置窗口「同步」pane：`src/components/settings/panes/sync-pane.tsx`；命令封装 `src/lib/sync/api.ts`。仅本地 Vault 可配置（`remote:` 句柄显示提示）。标题旁用小色点展示连接状态（灰=未连接，绿=已连接，蓝=同步中，红=最近一次同步/连接失败）。后端选择为与服务商 logo 同行的下拉框（对象存储 / WebDAV / Git；已配置时禁用并提示先解绑），随后按后端渲染表单（S3：endpoint/bucket/AK/SK + 高级项；WebDAV：服务器地址/用户名/密码；Git：仓库地址/分支、明文 HTTP 开关、CA 证书路径，并说明 HTTPS 需预先存好凭据）。服务商 logo 按钮按后端分组（S3：AWS/R2/MinIO/OSS/BOS；WebDAV：坚果云/Nextcloud；Git：GitHub/GitLab），打开官方配置指南，不会通过外链自动创建或回填凭据。同步范围（见上）在同一 pane：小标题 + 逐类开关（行内显示本地体积）。`ink` 仅在移动端（`mobile`）渲染；`translated` 全端渲染并附带说明其依赖翻译缓存开关。Git 下说明改为写入 `.gitignore`。
+设置窗口「同步」pane：`src/components/settings/panes/sync-pane.tsx`；命令封装 `src/lib/sync/api.ts`。仅本地 Vault 可配置（`remote:` 句柄显示提示）。标题旁用小色点展示连接状态（灰=未连接，绿=已连接，蓝=同步中，红=最近一次同步/连接失败）。后端选择为与服务商 logo 同行的下拉框（对象存储 / WebDAV / Git；已配置时禁用并提示先解绑），随后按后端渲染表单（S3：endpoint/bucket/AK/SK + 高级项；WebDAV：服务器地址/用户名/密码；Git：仓库地址/分支、明文 HTTP 开关、CA 证书路径，并说明 HTTPS 需预先存好凭据）。服务商 logo 按钮按后端分组（S3：AWS/R2/MinIO/OSS/BOS；WebDAV：坚果云/Nextcloud；Git：GitHub/GitLab），打开官方配置指南，不会通过外链自动创建或回填凭据。同步范围（见上）在同一 pane：小标题 + 逐类开关（行内显示本地体积）。`ink` 仅在移动端（`mobile`）渲染；`translated` 不再在同步页展示，由「设置 → 翻译 → 翻译缓存」统一控制。Git 下说明改为写入 `.gitignore`。
 
 ## 自动同步
 

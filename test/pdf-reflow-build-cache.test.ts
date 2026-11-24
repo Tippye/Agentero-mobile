@@ -2,7 +2,10 @@ import type { PdfDocumentObject, PdfEngine } from "@embedpdf/models";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LayoutTranslateItem } from "@/lib/pdf/layout/types";
 import type { ReflowBuildCacheStore } from "@/lib/pdf/reflow/build-cache";
-import { createReflowBuildCache } from "@/lib/pdf/reflow/build-cache";
+import {
+	createReflowBuildCache,
+	findCachedTranslatedPdf,
+} from "@/lib/pdf/reflow/build-cache";
 import { paragraphFromCharacters } from "@/lib/pdf/reflow/extract";
 import { ReflowPreviewSession } from "@/lib/pdf/reflow/preview";
 
@@ -256,6 +259,41 @@ describe("reflow build cache", () => {
 		expect(
 			[...disk.files.keys()][0]?.startsWith("/app-cache/reflow-build/"),
 		).toBe(true);
+	});
+
+	it("finds a local-only final by language and service metadata", async () => {
+		const identity = {
+			sourceLang: "en",
+			targetLang: "zh-CN",
+			providerId: "openaiCompatible",
+			serviceKey: "openaiCompatible:https://example.test:v1:model",
+		};
+		const cache = createReflowBuildCache({
+			paperKey: "papers/demo",
+			paperAbsPath: "/vault/papers/demo",
+			pdfBytes: new TextEncoder().encode("pdf-one"),
+			localOnly: true,
+			identity: () => identity,
+		});
+		const ir = { version: 1 as const, pages: [] };
+		const bytes = new Uint8Array([
+			0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34,
+		]);
+		await cache.writeFinal(ir, new Map(), fontBytes, bytes);
+		expect(
+			await findCachedTranslatedPdf({
+				paperAbsPath: "/vault/papers/demo",
+				paperKey: "papers/demo",
+				identity,
+			}),
+		).toMatchObject({ bytes });
+		expect(
+			await findCachedTranslatedPdf({
+				paperAbsPath: "/vault/papers/demo",
+				paperKey: "papers/demo",
+				identity: { ...identity, targetLang: "en" },
+			}),
+		).toBeNull();
 	});
 
 	it("hits when only paragraph draw order jitters between runs", async () => {

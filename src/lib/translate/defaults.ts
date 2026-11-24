@@ -18,6 +18,7 @@ export const DEFAULT_TRANSLATE_SETTINGS: TranslateSettings = {
 	customUser: "",
 	cacheReflowIr: true,
 	cacheReflowFinal: true,
+	cacheTranslationSync: true,
 	autoTranslateImport: false,
 	autoTranslateImportConcurrency: 1,
 	alwaysShowTranslateCard: false,

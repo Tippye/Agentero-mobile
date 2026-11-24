@@ -689,7 +689,11 @@
 			"final": {
 				"label": "Cache translated PDF"
 			},
-			"tip": "Turning a switch off only stops new writes; existing entries keep being reused.",
+			"translation": {
+				"label": "Translation cache",
+				"help": "On by default: the translation sidecar and translated PDFs sync with the vault; layout analysis always syncs. When off, translation caches stay on this device and are removed with the paper or the app."
+			},
+			"tip": "Turning it off stops uploads; this device still creates and reuses the cache.",
 			"reset": "Restore defaults",
 			"dictionary": {
 				"label": "Word lookup cache",
@@ -1302,8 +1306,6 @@
 		"scopePdf": "PDFs",
 		"scopeSource": "LaTeX sources",
 		"scopeAttachments": "Attachments",
-		"scopeTranslated": "Translated PDFs",
-		"scopeTranslatedHint": "Finished translated PDFs live in the paper's translated/ folder. They are only produced when Settings → Translate → Cache → Cache translated PDFs is on; this switch controls whether they upload.",
 		"scopeInk": "Ink annotations"
 	},
 	"cloudSync": {

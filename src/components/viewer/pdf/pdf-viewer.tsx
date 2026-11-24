@@ -41,6 +41,7 @@ import {
 	ZoomMode,
 	ZoomPluginPackage,
 } from "@embedpdf/plugin-zoom/react";
+import { X } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -61,6 +62,7 @@ import { PdfReferencesPanel } from "@/components/viewer/pdf/chrome/pdf-reference
 import { PdfToolbar } from "@/components/viewer/pdf/chrome/pdf-toolbar";
 import { usePdfEngineContext } from "@/components/viewer/pdf/engine-provider";
 import { EPHEMERAL_PREVIEW_OPEN_MS } from "@/components/viewer/pdf/floating-hover";
+import { useCachedTranslationPreview } from "@/components/viewer/pdf/hooks/use-cached-translation-preview";
 import { useHoverIntent } from "@/components/viewer/pdf/hooks/use-hover-intent";
 import { usePdfActiveAnchors } from "@/components/viewer/pdf/hooks/use-pdf-active-anchors";
 import { usePdfAskThreads } from "@/components/viewer/pdf/hooks/use-pdf-ask-threads";
@@ -1562,6 +1564,18 @@ function PdfViewerInner({
 		reflowOutput,
 		docId,
 	);
+	const cachedTranslationPreview = useCachedTranslationPreview({
+		enabled:
+			!translationOnly &&
+			!plainViewer &&
+			!isRemotePaper &&
+			viewMode === "translated" &&
+			!(layoutRawRegions?.length ?? 0),
+		paperAbsPath,
+		paperKey,
+		pdfBytes: sourceBytes,
+		ready: Boolean(reflowOutput),
+	});
 	const mobileRuntime =
 		(runtime ?? (isMobileApp() ? "mobile" : "desktop")) === "mobile";
 	const mobileInk = mobileRuntime;
@@ -3303,6 +3317,59 @@ function PdfViewerInner({
 						onRenderThumb={handleRenderLayoutThumb}
 					/>
 				)}
+			{cachedTranslationPreview.preview ? (
+				<CachedTranslationPreview
+					bytes={cachedTranslationPreview.preview.bytes}
+					docId={`${docId}:cached-preview`}
+					onClose={cachedTranslationPreview.dismiss}
+				/>
+			) : null}
+		</div>
+	);
+}
+
+function CachedTranslationPreview({
+	bytes,
+	docId,
+	onClose,
+}: {
+	bytes: Uint8Array;
+	docId: string;
+	onClose: () => void;
+}) {
+	const { t } = useTranslation("viewer");
+	const sourceBytes = bytes.buffer.slice(
+		bytes.byteOffset,
+		bytes.byteOffset + bytes.byteLength,
+	) as ArrayBuffer;
+	return (
+		<div
+			data-cached-translation-preview
+			className="absolute inset-0 z-50 flex min-h-0 flex-col bg-background"
+		>
+			<div className="flex h-10 shrink-0 items-center justify-between gap-2 border-border/70 border-b px-3">
+				<span className="truncate text-muted-foreground text-xs">
+					{t("pdf.cachedTranslationPreview")}
+				</span>
+				<button
+					type="button"
+					onClick={onClose}
+					aria-label={t("pdf.cachedTranslationPreviewClose")}
+					className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+				>
+					<X className="size-4" aria-hidden />
+				</button>
+			</div>
+			<div className="min-h-0 flex-1">
+				<PdfViewer
+					source={null}
+					sourceBytes={sourceBytes}
+					docId={docId}
+					plainViewer
+					rememberReadingPosition={false}
+					className="h-full"
+				/>
+			</div>
 		</div>
 	);
 }

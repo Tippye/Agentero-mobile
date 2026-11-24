@@ -5,6 +5,7 @@ import { useSettings } from "@/hooks/use-app-stores";
 import { errorText } from "@/lib/core/error";
 import { logOp } from "@/lib/core/logger";
 import { notifyError } from "@/lib/core/notify";
+import { currentLayoutTranslateCacheKey } from "@/lib/pdf/layout";
 import type {
 	LayoutTranslateItem,
 	PdfLayoutRegion,
@@ -31,12 +32,13 @@ export function usePdfReflow(
 	pageOnly = false,
 ) {
 	const { t } = useTranslation("viewer");
-	// Cache persistence is user-controlled (Settings → Translate). The ref keeps
-	// a running session in sync without rebuilding it when a switch flips.
-	const cacheReflowIr = useSettings((s) => s.translate.cacheReflowIr);
-	const cacheReflowFinal = useSettings((s) => s.translate.cacheReflowFinal);
-	const cacheFlags = useRef({ ir: cacheReflowIr, final: cacheReflowFinal });
-	cacheFlags.current = { ir: cacheReflowIr, final: cacheReflowFinal };
+	// Translation results are always cached locally now; the settings switch
+	// only decides whether the finished PDF lives in the paper folder (synced)
+	// or in the app cache (local-only).
+	const cacheTranslationSync = useSettings(
+		(s) => s.translate.cacheTranslationSync,
+	);
+	const cacheFlags = useRef({ ir: true, final: true });
 	const current = useRef({
 		context,
 		regions,
@@ -113,6 +115,8 @@ export function usePdfReflow(
 					paperKey: current.current.paperKey || current.current.paperAbsPath,
 					paperAbsPath: current.current.paperAbsPath,
 					pdfBytes: current.current.pdfBytes,
+					localOnly: !cacheTranslationSync,
+					identity: () => currentLayoutTranslateCacheKey(),
 				},
 				{ writesEnabled: () => cacheFlags.current.final },
 			),
@@ -122,7 +126,7 @@ export function usePdfReflow(
 			value.dispose();
 			if (session.current === value) session.current = null;
 		};
-	}, [engine, document, documentKey, t]);
+	}, [engine, document, documentKey, t, cacheTranslationSync]);
 	// Re-run when the owning session is recreated, even if inputs are unchanged.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: session lifetime dependencies
 	useEffect(() => {
