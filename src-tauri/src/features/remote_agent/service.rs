@@ -23,14 +23,45 @@ pub(super) fn identifier(value: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub(super) fn validate_model_selection(selection: &RemoteModelSelection) -> Result<(), AppError> {
+    identifier(&selection.provider)?;
+    identifier(&selection.model)?;
+    if let Some(effort) = &selection.reasoning_effort {
+        identifier(effort)?;
+    }
+    Ok(())
+}
+
 pub(super) fn connection_ref(connection: &ConnectionRef) -> Result<(), AppError> {
     identifier(&connection.provider_id.0)?;
     identifier(&connection.connection_id.0)
 }
 
-fn host_ref(host: &HostRef) -> Result<(), AppError> {
+pub(super) fn host_ref(host: &HostRef) -> Result<(), AppError> {
     connection_ref(&host.connection)?;
     identifier(&host.host_id.0)
+}
+
+/// Absolute Host-side directory for EnsureWorkspace. The Host owns existence
+/// and permission checks; this only bounds the opaque path reference.
+pub(super) fn workspace_path(path: &str) -> Result<(), AppError> {
+    let trimmed = path.trim();
+    let absolute = trimmed.starts_with('/')
+        || (trimmed.len() >= 3
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':'
+            && matches!(trimmed.as_bytes()[2], b'/' | b'\\'));
+    let root = matches!(trimmed, "/" | "\\")
+        || (trimmed.len() == 3
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+            && trimmed.as_bytes()[1] == b':'
+            && matches!(trimmed.as_bytes()[2], b'/' | b'\\'));
+    if !absolute || root || path.len() > 1024 || path.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(invalid(
+            "Workspace path must be an absolute non-root Host directory",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn workspace_ref(workspace: &WorkspaceRef) -> Result<(), AppError> {
@@ -404,6 +435,58 @@ impl RemoteAgentService {
         Ok(result)
     }
 
+    pub async fn session_models(
+        &self,
+        session: &SessionRef,
+    ) -> Result<Option<RemoteSessionModels>, AppError> {
+        session_ref(session)?;
+        let provider = self.provider(&session.workspace.host.connection)?;
+        let state = self.state(&session.workspace.host.connection).await;
+        let state = state.lock().await;
+        let info = state.connected()?;
+        backend(info, &session.workspace)?;
+        if !info.capabilities.supports(Capability::SelectModel) {
+            return Ok(None);
+        }
+        let result = provider.adapter.session_models(session).await?;
+        if let Some(models) = &result {
+            validate_model_selection(&models.current)?;
+        }
+        Ok(result)
+    }
+
+    /// Host-global model catalog, usable before any session exists. The
+    /// current selection is the Host default; per-session projections are
+    /// layered on by `session_models`.
+    pub async fn host_models(
+        &self,
+        host: &HostRef,
+    ) -> Result<Option<RemoteSessionModels>, AppError> {
+        host_ref(host)?;
+        let provider = self.provider(&host.connection)?;
+        let state = self.state(&host.connection).await;
+        let state = state.lock().await;
+        let info = state.connected()?;
+        if !info
+            .capabilities
+            .backends
+            .contains(&BackendId::from("harness"))
+        {
+            return Err(AppError::domain(
+                "remote_agent_backend_unsupported",
+                "Remote Agent backend is unavailable",
+            ));
+        }
+        if !info.capabilities.supports(Capability::SelectModel) {
+            return Ok(None);
+        }
+        let result = provider.adapter.host_models(host).await?;
+        if let Some(models) = &result {
+            validate_model_selection(&models.current)?;
+        }
+        Ok(result)
+    }
+
     /// Explicit reconnect recovery: return a complete official baseline and a
     /// subscriber seeded with its source IDs. Each window gets its own baseline
     /// and de-duplication set. No mutations are dispatched during recovery.
@@ -463,9 +546,9 @@ impl RemoteAgentService {
 
     pub async fn execute(&self, request: &OperationRequest) -> Result<OperationOutcome, AppError> {
         operation_id(&request.operation_id)?;
-        let workspace = request.mutation.workspace();
-        workspace_ref(workspace)?;
-        let connection = &workspace.host.connection;
+        let host = request.mutation.host();
+        host_ref(host)?;
+        let connection = &host.connection;
         let provider = self.provider(connection)?;
         let state = self.state(connection).await;
         let mut state = state.lock().await;
@@ -479,7 +562,19 @@ impl RemoteAgentService {
         }
         let info = state.connected()?;
         require(info, request.mutation.capability())?;
-        backend(info, workspace)?;
+        if let Some(workspace) = request.mutation.workspace() {
+            workspace_ref(workspace)?;
+            backend(info, workspace)?;
+        } else if !info
+            .capabilities
+            .backends
+            .contains(&BackendId::from("harness"))
+        {
+            return Err(AppError::domain(
+                "remote_agent_backend_unsupported",
+                "Remote Agent backend is unavailable",
+            ));
+        }
         validate_mutation(&request.mutation, info)?;
         let intent = JournalEntry::intent(request)?;
         // Cache first to quarantine the ID if the commit future is cancelled.
@@ -640,6 +735,7 @@ impl RemoteAgentService {
 fn validate_mutation(mutation: &Mutation, info: &ConnectionInfo) -> Result<(), AppError> {
     match mutation {
         Mutation::CreateSession { .. } => (),
+        Mutation::EnsureWorkspace { path, .. } => workspace_path(path)?,
         Mutation::SendMessage {
             session,
             attachments,
@@ -651,6 +747,10 @@ fn validate_mutation(mutation: &Mutation, info: &ConnectionInfo) -> Result<(), A
                     return Err(boundary());
                 }
             }
+        }
+        Mutation::SelectModel { session, selection } => {
+            session_ref(session)?;
+            validate_model_selection(selection)?;
         }
         Mutation::Cancel { session }
         | Mutation::RespondPermission { session, .. }
@@ -702,6 +802,18 @@ fn validate_outcome(
                     }
                 }
             }
+            OperationResult::WorkspaceEnsured { workspace } => {
+                workspace_ref(workspace)?;
+                if &workspace.host.connection != connection {
+                    return Err(boundary());
+                }
+                if let Some(mutation) = mutation {
+                    match mutation {
+                        Mutation::EnsureWorkspace { host, .. } if host == &workspace.host => {}
+                        _ => return Err(boundary()),
+                    }
+                }
+            }
             OperationResult::AttachmentUploaded { attachment } => {
                 session_ref(&attachment.session)?;
                 if &attachment.session.workspace.host.connection != connection {
@@ -715,10 +827,28 @@ fn validate_outcome(
                     }
                 }
             }
+            OperationResult::ModelSelected { session, selected } => {
+                session_ref(session)?;
+                validate_model_selection(selected)?;
+                if &session.workspace.host.connection != connection {
+                    return Err(boundary());
+                }
+                if let Some(mutation) = mutation {
+                    if !matches!(mutation, Mutation::SelectModel { session: target, .. } if target == session)
+                    {
+                        return Err(boundary());
+                    }
+                }
+            }
             OperationResult::Acknowledged => {
                 if matches!(
                     mutation,
-                    Some(Mutation::CreateSession { .. } | Mutation::UploadAttachment { .. })
+                    Some(
+                        Mutation::CreateSession { .. }
+                            | Mutation::EnsureWorkspace { .. }
+                            | Mutation::UploadAttachment { .. }
+                            | Mutation::SelectModel { .. }
+                    )
                 ) {
                     return Err(invalid("Completed operation is missing its result"));
                 }

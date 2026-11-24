@@ -9,7 +9,9 @@ enum InkIoFailure {
 #[derive(Debug)]
 enum InkIoEvent {
     Attempt(PathBuf, bool),
-    Visible(PathBuf, Vec<u8>),
+    // The visible bytes are asserted only by the unix-gated post-rename tests;
+    // on other targets the payload is carried but never read.
+    Visible(PathBuf, #[cfg_attr(not(unix), allow(dead_code))] Vec<u8>),
     Directory(PathBuf, PathBuf),
     RemotePut(String),
 }

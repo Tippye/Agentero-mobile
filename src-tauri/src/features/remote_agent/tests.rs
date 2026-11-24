@@ -54,6 +54,7 @@ fn event(session: &SessionRef, stream: &str, id: &str) -> RemoteEvent {
         payload: EventPayload::Message {
             role: "assistant".into(),
             text: id.into(),
+            reasoning: None,
         },
     }
 }
@@ -188,7 +189,9 @@ impl RemoteAgentProvider for FakeProvider {
         Ok(vec![HostInfo {
             host,
             name: "Host".into(),
-            online: true,
+            online: Some(true),
+            pinned: true,
+            home: None,
         }])
     }
 
@@ -198,6 +201,7 @@ impl RemoteAgentProvider for FakeProvider {
         Ok(vec![WorkspaceInfo {
             workspace: result,
             name: "Workspace".into(),
+            path: Some("/remote/workspace".into()),
         }])
     }
 
@@ -227,6 +231,7 @@ impl RemoteAgentProvider for FakeProvider {
             },
             events: vec![first.clone(), first.clone()],
             cursor: first.cursor,
+            context_usage: None,
         })
     }
 
@@ -842,5 +847,104 @@ fn wire_contract_keeps_namespaces_and_explicit_unknown_and_question_fields() {
         })
         .unwrap()["status"],
         "unknown"
+    );
+}
+
+#[tokio::test]
+async fn ensure_workspace_is_host_scoped_journaled_and_path_bound() {
+    let (service, provider, connection) = setup().await;
+    provider
+        .capabilities
+        .lock()
+        .unwrap()
+        .operations
+        .push(Capability::CreateSession);
+    service.resume(&connection).await.unwrap();
+    let host = workspace(&connection, "harness").host;
+    let request = OperationRequest {
+        operation_id: "ensure-workspace-0001".into(),
+        mutation: Mutation::EnsureWorkspace {
+            host: host.clone(),
+            path: "/remote/paper-project".into(),
+        },
+    };
+    // The journaled intent binds the host-level context and path digest.
+    let entry = JournalEntry::intent(&request).unwrap();
+    assert_eq!(entry.connection, connection);
+    assert!(matches!(
+        entry.context,
+        Some(OperationContext::EnsureWorkspace { ref path, .. }) if path == "/remote/paper-project"
+    ));
+    // FakeProvider acknowledges generically; EnsureWorkspace requires its typed
+    // result, so a bare Acknowledged is conservatively Unknown.
+    assert!(matches!(
+        service.execute(&request).await.unwrap(),
+        OperationOutcome::Unknown { .. }
+    ));
+    assert_eq!(provider.dispatches.load(Ordering::SeqCst), 1);
+    // The journaled digest binds the path: a different directory conflicts.
+    let mut changed = request.clone();
+    changed.mutation = Mutation::EnsureWorkspace {
+        host: host.clone(),
+        path: "/remote/other-project".into(),
+    };
+    assert_code(
+        service.execute(&changed).await,
+        "remote_agent_operation_conflict",
+    );
+    // Relative, root and control-character paths are refused before dispatch.
+    for (index, path) in ["relative/dir", "/", "C:\\", "/bad\0path"]
+        .into_iter()
+        .enumerate()
+    {
+        let invalid = OperationRequest {
+            operation_id: format!("ensure-invalid-{index:04}").as_str().into(),
+            mutation: Mutation::EnsureWorkspace {
+                host: host.clone(),
+                path: path.into(),
+            },
+        };
+        assert_code(service.execute(&invalid).await, "remote_agent_invalid");
+    }
+    assert_eq!(provider.dispatches.load(Ordering::SeqCst), 1);
+    // A typed WorkspaceEnsured result settles the original operation.
+    *provider.receipt.lock().unwrap() = ReceiptLookup::Found(OperationOutcome::Succeeded {
+        result: OperationResult::WorkspaceEnsured {
+            workspace: workspace(&connection, "harness"),
+        },
+    });
+    service
+        .lookup_receipt(&connection, &request.operation_id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.execute(&request).await.unwrap(),
+        OperationOutcome::Succeeded {
+            result: OperationResult::WorkspaceEnsured { .. }
+        }
+    ));
+    assert_eq!(provider.dispatches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn host_models_requires_harness_backend_and_select_model_capability() {
+    let (service, provider, connection) = setup().await;
+    let host = workspace(&connection, "harness").host;
+    // The base fixture has no SelectModel: the catalog gate returns None.
+    assert!(service.host_models(&host).await.unwrap().is_none());
+    provider
+        .capabilities
+        .lock()
+        .unwrap()
+        .operations
+        .push(Capability::SelectModel);
+    service.resume(&connection).await.unwrap();
+    // FakeProvider keeps the trait default: no catalog on this route.
+    assert!(service.host_models(&host).await.unwrap().is_none());
+    provider.capabilities.lock().unwrap().backends = vec!["acp".into()];
+    service.resume(&connection).await.unwrap();
+    assert_code(
+        service.host_models(&host).await,
+        "remote_agent_backend_unsupported",
     );
 }

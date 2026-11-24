@@ -64,6 +64,7 @@ import {
 import { isTauri } from "@/lib/core/tauri";
 import { mapLimit } from "@/lib/core/utils";
 import { nextLineId } from "@/lib/pdf-visual/ids";
+import type { RemoteAgentTransport } from "@/lib/remote-agent/agent-transport";
 
 /** Strip Host/Codex machine envelopes so Chat never shows system preamble. */
 export const sanitizeChatLines = (raw: ChatLine[]): ChatLine[] =>
@@ -278,20 +279,23 @@ export async function deleteHistorySession(
 	>,
 	vaultPath: string | null,
 	store: AgentSessionStoreApi = agentSessionStore,
+	transport?: RemoteAgentTransport | null,
 ): Promise<AcpDeleteSessionResult> {
 	const providerId = item.providerSessionId?.trim() || item.id;
 	if (item.status === "running") {
 		try {
-			await cancelAgentRun(item.id);
+			await (transport ? transport.cancel(item.id) : cancelAgentRun(item.id));
 		} catch {
 			// The turn may already have finished. Still hide the row.
 		}
 	}
-	const result = await deleteSession({
-		agentId: item.agentId,
-		sessionId: providerId,
-		vaultPath: vaultPath ?? undefined,
-	});
+	const result = transport
+		? { sessionId: providerId, deletedOnAgent: false }
+		: await deleteSession({
+				agentId: item.agentId,
+				sessionId: providerId,
+				vaultPath: vaultPath ?? undefined,
+			});
 	rememberDismissedAcpSession(item.agentId, providerId);
 	if (item.id !== providerId) {
 		rememberDismissedAcpSession(item.agentId, item.id);
@@ -452,6 +456,11 @@ export function mergeImportedSessions(
 }
 
 export type UseAgentHistoryOptions = {
+	transport?: RemoteAgentTransport | null;
+	onContextUsage?: (
+		sessionId: string,
+		usage: { used: number; size: number },
+	) => void;
 	refs: Pick<
 		AgentPanelRefs,
 		| "activeConversationRef"
@@ -506,6 +515,8 @@ export type AgentHistory = {
 };
 
 export function useAgentHistory({
+	transport,
+	onContextUsage,
 	refs: {
 		activeConversationRef,
 		activeTabRef,
@@ -538,7 +549,7 @@ export function useAgentHistory({
 
 	const runTitleHydration = useCallback(
 		(items: AgentSessionRecord[], generation: number) => {
-			if (!selectedAgentId || items.length === 0) return;
+			if (!selectedAgentId || items.length === 0 || transport) return;
 			void hydrateSessionTitles(items, {
 				generation,
 				historyGenRef,
@@ -547,7 +558,7 @@ export function useAgentHistory({
 				setSessionHistory,
 			});
 		},
-		[historyGenRef, selectedAgentId, setSessionHistory, vaultPath],
+		[historyGenRef, selectedAgentId, setSessionHistory, vaultPath, transport],
 	);
 
 	const loadAgentHistory = useCallback(async () => {
@@ -564,10 +575,12 @@ export function useAgentHistory({
 		const generation = ++historyGenRef.current;
 		setHistoryLoaded(false);
 		try {
-			const result = await listSessions({
-				agentId: selectedAgentId,
-				vaultPath: vaultPath ?? undefined,
-			});
+			const result = transport
+				? await transport.listSessions()
+				: await listSessions({
+						agentId: selectedAgentId,
+						vaultPath: vaultPath ?? undefined,
+					});
 			if (generation !== historyGenRef.current) return;
 			setSupportsResume(result.supported);
 			if (!result.supported) return;
@@ -615,6 +628,7 @@ export function useAgentHistory({
 		sessionStore,
 		historyGenRef,
 		runTitleHydration,
+		transport,
 	]);
 
 	useEffect(() => {
@@ -623,6 +637,10 @@ export function useAgentHistory({
 			historyGenRef.current += 1;
 		};
 	}, [loadAgentHistory, historyGenRef]);
+
+	useEffect(() => {
+		if (transport && historyOpen) void loadAgentHistory();
+	}, [transport, historyOpen, loadAgentHistory]);
 
 	// Opening the drawer: finish any titles still missing so the user does not
 	// have to click into a row just to learn what it was about (#484).
@@ -694,11 +712,13 @@ export function useAgentHistory({
 		);
 		void (async () => {
 			try {
-				const history = await loadSession({
-					agentId: requestAgentId,
-					sessionId: providerSessionId,
-					vaultPath: requestVaultPath ?? undefined,
-				});
+				const history = transport
+					? await transport.loadSession(providerSessionId)
+					: await loadSession({
+							agentId: requestAgentId,
+							sessionId: providerSessionId,
+							vaultPath: requestVaultPath ?? undefined,
+						});
 				if (
 					hydrationGeneration !== historyHydrationGenRef.current ||
 					selectedAgentIdRef.current !== requestAgentId ||
@@ -797,6 +817,8 @@ export function useAgentHistory({
 				activeConversationRef.current = providerSessionId;
 				activateComposerSession(item.id);
 				activeTabRef.current = item.id;
+				if (history.contextUsage)
+					onContextUsage?.(item.id, history.contextUsage);
 				hydrateAndActivateSession(item, nextLines, titleFromBody);
 			} catch (error) {
 				if (
@@ -832,6 +854,7 @@ export function useAgentHistory({
 				item,
 				vaultPathRef.current,
 				sessionStore,
+				transport,
 			);
 			if (active) {
 				activeTabRef.current = "draft";
@@ -845,6 +868,7 @@ export function useAgentHistory({
 			activeTabRef,
 			clearMessageQueue,
 			sessionStore,
+			transport,
 			vaultPathRef,
 		],
 	);

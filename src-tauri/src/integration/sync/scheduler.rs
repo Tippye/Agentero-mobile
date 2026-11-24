@@ -414,7 +414,9 @@ fn is_ignored_path(path: &Path) -> bool {
     path.components()
         .any(|component| super::snapshot::is_ignored_name(&component.as_os_str().to_string_lossy()))
 }
-#[cfg(any(mobile, test))]
+// Mobile local-change triggers use these; on desktop only the unix alias test
+// exercises them, so other desktop targets must not flag them as dead code.
+#[cfg(any(mobile, all(test, unix)))]
 fn relevant_to_vault(vault: &Path, path: &Path) -> bool {
     // Match filesystem identity (/var and /private/var on iOS), while retaining
     // the original configuration key for the credential namespace and run lease.
@@ -427,7 +429,7 @@ fn relevant_to_vault(vault: &Path, path: &Path) -> bool {
     relevant_canonical_paths(&vault, &path)
 }
 
-#[cfg(any(mobile, test))]
+#[cfg(any(mobile, all(test, unix)))]
 fn canonical_changed_path(path: &Path) -> Option<PathBuf> {
     let mut cursor = path;
     let mut missing = Vec::new();

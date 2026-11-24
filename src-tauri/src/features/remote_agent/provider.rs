@@ -57,6 +57,19 @@ pub trait RemoteAgentProvider: Send + Sync {
         Err(unsupported(Capability::ReadSession))
     }
 
+    async fn session_models(
+        &self,
+        _session: &SessionRef,
+    ) -> Result<Option<RemoteSessionModels>, AppError> {
+        Ok(None)
+    }
+
+    /// Host-global model catalog for the model picker before a first send.
+    /// `None` means the Host does not expose a catalog on this route.
+    async fn host_models(&self, _host: &HostRef) -> Result<Option<RemoteSessionModels>, AppError> {
+        Ok(None)
+    }
+
     /// Snapshot cursor is opaque. The adapter must use official history/stream
     /// recovery and close any race between baseline and subscription. There is
     /// no assumption that the backend supports an event replay buffer.

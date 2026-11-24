@@ -6,7 +6,7 @@ use crate::{
     core::error::{map_err, ApiResult, AppError},
     features::remote_agent::*,
     integration::dsh_remote::{
-        api::{ServerApi, TokenPair},
+        api::{OAuthQrPoll, OAuthQrSession, ServerApi, TokenPair},
         crypto::DeviceIdentity,
         protocol::key,
         provider::{DshConnectionConfig, DshRemoteProvider},
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc, time::Duration};
 use tauri::{Manager, State};
+use tokio::sync::Mutex;
 
 // Deliberately neither Debug nor Serialize: credentials never enter IPC or logs.
 struct LaunchAccount {
@@ -37,6 +38,9 @@ pub struct RemoteAgentAccount {
     pub expires_at: u64,
     pub info: ConnectionInfo,
     pub persistence: RemoteCredentialPersistence,
+    /// Third-party sign-in provider ID (`github`, `google`, `zhihu`, …);
+    /// `None` for sign-ins saved before provider tracking existed.
+    pub login_provider: Option<String>,
 }
 #[derive(Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -48,14 +52,42 @@ pub struct RemoteAgentCatalog {
     pub credential_state: RemoteCredentialState,
     pub can_clear_saved_sign_in: bool,
 }
-// No Debug, and never returned. Password exists only for the explicit login call.
-#[derive(Deserialize, specta::Type)]
+/// One third-party sign-in provider advertised by the Remote server.
+#[derive(Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
-pub struct RemoteAgentLogin {
-    pub server: String,
-    pub email: String,
-    pub password: String,
+pub struct RemoteAgentOAuthProvider {
+    pub id: String,
+    pub display_name: String,
 }
+/// A browser sign-in session: authorize at `scan_url`, then poll for completion.
+#[derive(Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteAgentOAuthStart {
+    pub qr_id: String,
+    pub scan_url: String,
+    pub expires_in: u64,
+}
+#[derive(Serialize, specta::Type)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum RemoteAgentOAuthStatus {
+    Pending,
+    Expired,
+    // Boxed: the account view dwarfs the two unit variants (clippy large_enum_variant).
+    Complete { account: Box<RemoteAgentAccount> },
+}
+/// Launch-memory sign-in attempts, keyed by server-issued QR session ID.
+/// Account tokens exist only inside the completing poll call.
+#[derive(Default)]
+pub struct RemoteAgentOAuthAttempts {
+    inner: Mutex<HashMap<String, OAuthAttempt>>,
+}
+struct OAuthAttempt {
+    api: ServerApi,
+    provider_id: String,
+    expires_at_ms: u64,
+    completing: bool,
+}
+const MAX_OAUTH_ATTEMPTS: usize = 8;
 #[derive(Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteAgentHostIdentity {
@@ -191,75 +223,262 @@ pub async fn remote_agent_catalog(
     )
 }
 
+fn sign_in_gate(can_sign_in: bool) -> Result<(), AppError> {
+    if !can_sign_in {
+        return Err(AppError::domain(
+            "remote_agent_account_active",
+            "Clear the saved sign-in before changing accounts",
+        ));
+    }
+    Ok(())
+}
+
+/// Human-readable device name shown in every client's device list. The OS
+/// hostname identifies the computer; mobile falls back to a platform label.
+fn device_registration_name() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| {
+            !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
+        });
+    match host {
+        Some(name) => format!("Agentero ({name})"),
+        None => format!("Agentero {}", std::env::consts::OS),
+    }
+}
+
+/// List the third-party sign-in providers (GitHub, Google, Zhihu, …) the
+/// Remote server currently offers for browser sign-in.
 #[tauri::command]
 #[specta::specta]
-pub async fn remote_agent_login(
-    request: RemoteAgentLogin,
+pub async fn remote_agent_oauth_providers(
+    server: String,
+) -> Result<ApiResult<Vec<RemoteAgentOAuthProvider>>, String> {
+    envelope(
+        async {
+            let api = ServerApi::new(&server, Duration::from_secs(20)).map_err(remote)?;
+            let providers = api.oauth_providers().await.map_err(remote)?;
+            Ok(providers
+                .into_iter()
+                .filter(|provider| provider.qr_start_url.is_some())
+                .map(|provider| RemoteAgentOAuthProvider {
+                    id: provider.id,
+                    display_name: provider.display_name,
+                })
+                .collect())
+        }
+        .await,
+    )
+}
+
+/// Begin one browser sign-in session. The caller opens `scanUrl` in a browser
+/// (or shows it as a QR code) and polls `remote_agent_oauth_poll` until the
+/// user completes authorization. No account password ever enters this app.
+#[tauri::command]
+#[specta::specta]
+pub async fn remote_agent_oauth_start(
+    server: String,
+    provider_id: String,
+    service: State<'_, RemoteAgentService>,
+    provider: State<'_, Arc<DshRemoteProvider>>,
+    accounts: State<'_, RemoteAgentAccounts>,
+    attempts: State<'_, Arc<RemoteAgentOAuthAttempts>>,
+) -> Result<ApiResult<RemoteAgentOAuthStart>, String> {
+    envelope(
+        async {
+            accounts.ensure_restored(&service, &provider).await;
+            {
+                let current = accounts.current.lock().await;
+                sign_in_gate(current.can_sign_in(accounts.persistence()))?;
+            }
+            let api = ServerApi::new(&server, Duration::from_secs(20)).map_err(remote)?;
+            let entry = api
+                .oauth_providers()
+                .await
+                .map_err(remote)?
+                .into_iter()
+                .find(|entry| entry.id == provider_id && entry.qr_start_url.is_some())
+                .ok_or_else(|| {
+                    AppError::domain(
+                        "remote_agent_oauth_provider_unavailable",
+                        "This server does not offer that sign-in provider",
+                    )
+                })?;
+            let session: OAuthQrSession = api.start_oauth_qr(&entry).await.map_err(remote)?;
+            let now = lifecycle::now_ms()?;
+            let expires_at_ms = now.saturating_add(session.expires_in.saturating_mul(1000));
+            let mut attempts = attempts.inner.lock().await;
+            attempts.retain(|_, attempt| !attempt.completing && attempt.expires_at_ms > now);
+            if attempts.len() >= MAX_OAUTH_ATTEMPTS {
+                return Err(AppError::domain(
+                    "remote_agent_oauth_capacity",
+                    "Too many pending sign-in attempts; finish or wait for one to expire",
+                ));
+            }
+            attempts.insert(
+                session.qr_id.clone(),
+                OAuthAttempt {
+                    api,
+                    provider_id: entry.id,
+                    expires_at_ms,
+                    completing: false,
+                },
+            );
+            Ok(RemoteAgentOAuthStart {
+                qr_id: session.qr_id,
+                scan_url: session.scan_url,
+                expires_in: session.expires_in,
+            })
+        }
+        .await,
+    )
+}
+
+/// Observe one sign-in session. On completion the account token is exchanged
+/// for this device's credentials inside Rust and never crosses IPC.
+#[tauri::command]
+#[specta::specta]
+pub async fn remote_agent_oauth_poll(
+    qr_id: String,
     service: State<'_, RemoteAgentService>,
     provider: State<'_, Arc<DshRemoteProvider>>,
     accounts: State<'_, RemoteAgentAccounts>,
     monitors: State<'_, Arc<background::RemoteBackgroundMonitors>>,
-) -> Result<ApiResult<RemoteAgentAccount>, String> {
+    attempts: State<'_, Arc<RemoteAgentOAuthAttempts>>,
+) -> Result<ApiResult<RemoteAgentOAuthStatus>, String> {
     envelope(
         async {
-            accounts.ensure_restored(&service, &provider).await;
-            let mut current = accounts.current.lock().await;
-            if !current.can_sign_in(accounts.persistence()) {
-                return Err(AppError::domain(
-                    "remote_agent_account_active",
-                    "Clear the saved sign-in before changing accounts",
-                ));
-            }
-            let api = ServerApi::new(&request.server, Duration::from_secs(20)).map_err(remote)?;
-            let login = api
-                .login(&request.email, &request.password)
-                .await
-                .map_err(remote)?;
-            let identity =
-                DeviceIdentity::generate(uuid::Uuid::new_v4().to_string()).map_err(remote)?;
-            let credentials = api
-                .register(
-                    &identity,
-                    "Agentero",
-                    std::env::consts::OS,
-                    env!("CARGO_PKG_VERSION"),
-                    &login.token,
+            let (api, provider_id, server) = {
+                let mut attempts = attempts.inner.lock().await;
+                let attempt = attempts.get_mut(&qr_id).ok_or_else(|| {
+                    AppError::domain(
+                        "remote_agent_oauth_unknown_session",
+                        "This sign-in session is no longer active; start again",
+                    )
+                })?;
+                if attempt.completing {
+                    return Err(AppError::domain(
+                        "remote_agent_oauth_completing",
+                        "This sign-in session is already completing",
+                    ));
+                }
+                if attempt.expires_at_ms <= lifecycle::now_ms()? {
+                    attempts.remove(&qr_id);
+                    return Ok(RemoteAgentOAuthStatus::Expired);
+                }
+                (
+                    attempt.api.clone(),
+                    attempt.provider_id.clone(),
+                    attempt.api.origin(),
                 )
-                .await
-                .map_err(remote)?;
-            let connection = ConnectionRef {
-                provider_id: DEFAULT_PROVIDER_ID.into(),
-                connection_id: ConnectionId(uuid::Uuid::new_v4().to_string()),
             };
-            let account = LaunchAccount {
-                api,
-                identity,
-                credentials: credentials.clone(),
-                refresh_pending: false,
-                pins: HashMap::new(),
-                view: RemoteAgentAccount {
-                    account: login.account,
-                    server: request.server,
-                    expires_at: credentials.access_token_expires_at,
-                    persistence: accounts.persistence(),
-                    info: ConnectionInfo {
-                        connection,
-                        capabilities: Capabilities {
-                            operations: vec![],
-                            authentication: vec![],
-                            backends: vec![],
-                            attachments: None,
+            let token = match api.poll_oauth_qr(&qr_id).await.map_err(remote)? {
+                OAuthQrPoll::Pending => return Ok(RemoteAgentOAuthStatus::Pending),
+                OAuthQrPoll::Expired => {
+                    attempts.inner.lock().await.remove(&qr_id);
+                    return Ok(RemoteAgentOAuthStatus::Expired);
+                }
+                OAuthQrPoll::Complete(token) => token,
+            };
+            // The Server delivers the account token exactly once. Reserve the
+            // attempt before any further await so a second poll cannot race it.
+            {
+                let mut attempts = attempts.inner.lock().await;
+                match attempts.get_mut(&qr_id) {
+                    Some(attempt) if !attempt.completing => attempt.completing = true,
+                    _ => {
+                        return Err(AppError::domain(
+                            "remote_agent_oauth_completing",
+                            "This sign-in session is already completing",
+                        ))
+                    }
+                }
+            }
+            let result = async {
+                accounts.ensure_restored(&service, &provider).await;
+                let mut current = accounts.current.lock().await;
+                sign_in_gate(current.can_sign_in(accounts.persistence()))?;
+                let account_name = api.account_me(&token).await.map_err(remote)?;
+                let identity =
+                    DeviceIdentity::generate(uuid::Uuid::new_v4().to_string()).map_err(remote)?;
+                let credentials = api
+                    .register(
+                        &identity,
+                        &device_registration_name(),
+                        std::env::consts::OS,
+                        env!("CARGO_PKG_VERSION"),
+                        &token,
+                    )
+                    .await
+                    .map_err(remote)?;
+                let connection = ConnectionRef {
+                    provider_id: DEFAULT_PROVIDER_ID.into(),
+                    connection_id: ConnectionId(uuid::Uuid::new_v4().to_string()),
+                };
+                let account = LaunchAccount {
+                    api,
+                    identity,
+                    credentials: credentials.clone(),
+                    refresh_pending: false,
+                    pins: HashMap::new(),
+                    view: RemoteAgentAccount {
+                        account: account_name,
+                        server,
+                        expires_at: credentials.access_token_expires_at,
+                        persistence: accounts.persistence(),
+                        login_provider: Some(provider_id),
+                        info: ConnectionInfo {
+                            connection,
+                            capabilities: Capabilities {
+                                operations: vec![],
+                                authentication: vec![],
+                                backends: vec![],
+                                attachments: None,
+                            },
                         },
                     },
-                },
-            };
-            let result = current
-                .activate(account, accounts.store.as_ref(), &service, &provider)
-                .await;
+                };
+                current
+                    .activate(account, accounts.store.as_ref(), &service, &provider)
+                    .await
+            }
+            .await;
+            attempts.inner.lock().await.remove(&qr_id);
             if result.is_ok() {
                 monitors.resume();
             }
-            result
+            result.map(|account| RemoteAgentOAuthStatus::Complete {
+                account: Box::new(account),
+            })
+        }
+        .await,
+    )
+}
+
+/// Abandon a pending sign-in session. Local only; the server-side session
+/// expires on its own and an already-issued token is never used afterwards.
+#[tauri::command]
+#[specta::specta]
+pub async fn remote_agent_oauth_cancel(
+    qr_id: String,
+    attempts: State<'_, Arc<RemoteAgentOAuthAttempts>>,
+) -> Result<ApiResult<()>, String> {
+    envelope(
+        async {
+            let mut attempts = attempts.inner.lock().await;
+            if attempts
+                .get(&qr_id)
+                .is_some_and(|attempt| attempt.completing)
+            {
+                return Err(AppError::domain(
+                    "remote_agent_oauth_completing",
+                    "This sign-in session is already completing",
+                ));
+            }
+            attempts.remove(&qr_id);
+            Ok(())
         }
         .await,
     )
@@ -360,32 +579,21 @@ pub async fn remote_agent_trust_host(
                 account.pins.get(&host.host_id.0),
                 Some(&expected_fingerprint),
             )?;
-            // A captured observer must not reconnect the previously selected Host.
-            monitors.select_host(&host);
             current
                 .pin(
                     &host.connection,
                     host.host_id.0.clone(),
-                    identity.identity_key,
+                    identity.identity_key.clone(),
                     accounts.store.as_ref(),
                 )
                 .await?;
-            let account = account_for(&mut current.account, &host.connection)?;
-            service.disconnect(&host.connection).await?;
+            // A captured observer must not reconnect the previously selected Host.
+            monitors.select_host(&host);
             provider
-                .configure(
-                    host.connection.connection_id.0.clone(),
-                    configuration(account),
-                )
+                .select_host(&host, identity.identity_key)
                 .await
                 .map_err(remote)?;
-            service
-                .connect(&ConnectRequest {
-                    connection: host.connection.clone(),
-                    config_version: 1,
-                })
-                .await?;
-            provider.select_host(&host).await.map_err(remote)?;
+            let account = account_for(&mut current.account, &host.connection)?;
             let info = service.resume(&host.connection).await?;
             account.view.info = info.clone();
             Ok(info)
@@ -434,6 +642,33 @@ pub async fn remote_agent_read_session(
 }
 #[tauri::command]
 #[specta::specta]
+pub async fn remote_agent_session_models(
+    session: SessionRef,
+    service: State<'_, RemoteAgentService>,
+    provider: State<'_, Arc<DshRemoteProvider>>,
+    accounts: State<'_, RemoteAgentAccounts>,
+) -> Result<ApiResult<Option<RemoteSessionModels>>, String> {
+    if let Err(error) = preflight(&session.workspace.host.connection, &accounts, &provider).await {
+        return Ok(map_err(error));
+    }
+    envelope(service.session_models(&session).await)
+}
+/// Host-global model catalog for the picker before any session exists.
+#[tauri::command]
+#[specta::specta]
+pub async fn remote_agent_host_models(
+    host: HostRef,
+    service: State<'_, RemoteAgentService>,
+    provider: State<'_, Arc<DshRemoteProvider>>,
+    accounts: State<'_, RemoteAgentAccounts>,
+) -> Result<ApiResult<Option<RemoteSessionModels>>, String> {
+    if let Err(error) = preflight(&host.connection, &accounts, &provider).await {
+        return Ok(map_err(error));
+    }
+    envelope(service.host_models(&host).await)
+}
+#[tauri::command]
+#[specta::specta]
 pub async fn remote_agent_execute(
     request: OperationRequest,
     service: State<'_, RemoteAgentService>,
@@ -442,13 +677,7 @@ pub async fn remote_agent_execute(
     background: State<'_, Arc<crate::features::mobile_background::MobileBackgroundService>>,
     monitors: State<'_, Arc<background::RemoteBackgroundMonitors>>,
 ) -> Result<ApiResult<OperationOutcome>, String> {
-    if let Err(error) = preflight(
-        &request.mutation.workspace().host.connection,
-        &accounts,
-        &provider,
-    )
-    .await
-    {
+    if let Err(error) = preflight(&request.mutation.host().connection, &accounts, &provider).await {
         return Ok(map_err(error));
     }
     if matches!(request.mutation, Mutation::UploadAttachment { .. }) {
@@ -650,5 +879,60 @@ mod tests {
             fingerprint(&public).unwrap(),
             format!("SHA256:{}", hex::encode(Sha256::digest([0; 32])))
         );
+    }
+    #[test]
+    fn sign_in_gate_refuses_replacing_an_active_or_saved_account() {
+        assert!(sign_in_gate(true).is_ok());
+        let error = sign_in_gate(false).unwrap_err();
+        assert_eq!(error.code(), "remote_agent_account_active");
+    }
+    #[test]
+    fn device_registration_name_is_visible_text_within_server_limits() {
+        let name = device_registration_name();
+        assert!(name.starts_with("Agentero"));
+        assert!(name.len() <= 128);
+        assert!(!name.trim().is_empty());
+        assert!(!name.chars().any(char::is_control));
+    }
+    #[tokio::test]
+    async fn oauth_attempts_are_bounded_and_completing_sessions_cannot_be_cancelled() {
+        let attempts = RemoteAgentOAuthAttempts::default();
+        let api = ServerApi::new("https://remote.example", Duration::from_secs(1)).unwrap();
+        let now = lifecycle::now_ms().unwrap();
+        {
+            let mut inner = attempts.inner.lock().await;
+            for index in 0..MAX_OAUTH_ATTEMPTS {
+                inner.insert(
+                    format!("session-{index}"),
+                    OAuthAttempt {
+                        api: api.clone(),
+                        provider_id: "github".into(),
+                        expires_at_ms: now + 300_000,
+                        completing: false,
+                    },
+                );
+            }
+            // Expired entries are pruned before the capacity check.
+            inner.insert(
+                "expired".into(),
+                OAuthAttempt {
+                    api: api.clone(),
+                    provider_id: "github".into(),
+                    expires_at_ms: now.saturating_sub(1),
+                    completing: false,
+                },
+            );
+            inner.retain(|_, attempt| !attempt.completing && attempt.expires_at_ms > now);
+            assert_eq!(inner.len(), MAX_OAUTH_ATTEMPTS);
+            inner.get_mut("session-0").unwrap().completing = true;
+        }
+        // A completing session is reserved: cancel must refuse, not drop it.
+        {
+            let mut inner = attempts.inner.lock().await;
+            assert!(inner.get("session-0").is_some_and(|a| a.completing));
+            assert!(inner.get("session-1").is_some());
+            inner.remove("session-1");
+            assert!(inner.get("session-1").is_none());
+        }
     }
 }

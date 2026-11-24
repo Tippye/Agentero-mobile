@@ -2,7 +2,7 @@
  * Composer pieces that read the `usePromptInputAttachments` context — they must
  * stay rendered inside the `PromptInput` provider subtree.
  */
-import { ImageIcon, X } from "lucide-react";
+import { ImageIcon, Paperclip, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -44,7 +44,9 @@ export function ComposerImageAttachments({
 		>
 			{attachments.files.map((file) => {
 				const label = file.filename?.trim() || t("composer.attachedImage");
-				const thumb = file.url || null;
+				const thumb = file.mediaType.startsWith("image/")
+					? file.url || null
+					: null;
 				return (
 					<Attachment
 						key={file.id}
@@ -92,15 +94,25 @@ export function ComposerImageAttachments({
 
 export function ComposerAttachImageButton({
 	disabled,
+	allowFiles = false,
 }: {
 	disabled?: boolean;
+	allowFiles?: boolean;
 }) {
 	const { t } = useTranslation("agent");
 	const attachments = usePromptInputAttachments();
+	const { t: tMobile } = useTranslation("mobile");
+	const label = allowFiles
+		? tMobile("remote.uploadPrivate")
+		: t("composer.attachImage");
 	const [picking, setPicking] = useState(false);
 
 	const onAttachClick = async () => {
 		if (disabled || picking) return;
+		if (allowFiles) {
+			attachments.openFileDialog();
+			return;
+		}
 		const remaining = Math.max(
 			0,
 			COMPOSER_IMAGE_MAX_FILES - attachments.files.length,
@@ -154,10 +166,14 @@ export function ComposerAttachImageButton({
 			className="size-7 text-foreground"
 			disabled={disabled || picking}
 			onClick={() => void onAttachClick()}
-			tooltip={t("composer.attachImage")}
-			aria-label={t("composer.attachImage")}
+			tooltip={label}
+			aria-label={label}
 		>
-			<ImageIcon className="size-3.5" />
+			{allowFiles ? (
+				<Paperclip className="size-3.5" />
+			) : (
+				<ImageIcon className="size-3.5" />
+			)}
 		</PromptInputButton>
 	);
 }

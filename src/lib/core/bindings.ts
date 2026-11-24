@@ -10,19 +10,42 @@ export const commands = {
 	/**  Remove one file with the same permissions and mutation lane as text saves. */
 	vaultRemoveFile: (path: string) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("vault_remove_file", { path })),
 	remoteAgentCatalog: () => typedError<ApiResult<RemoteAgentCatalog>, string>(__TAURI_INVOKE("remote_agent_catalog")),
-	remoteAgentLogin: (request: RemoteAgentLogin) => typedError<ApiResult<RemoteAgentAccount>, string>(__TAURI_INVOKE("remote_agent_login", { request })),
+	/**
+	 *  List the third-party sign-in providers (GitHub, Google, Zhihu, …) the
+	 *  Remote server currently offers for browser sign-in.
+	 */
+	remoteAgentOauthProviders: (server: string) => typedError<ApiResult<RemoteAgentOAuthProvider[]>, string>(__TAURI_INVOKE("remote_agent_oauth_providers", { server })),
+	/**
+	 *  Begin one browser sign-in session. The caller opens `scanUrl` in a browser
+	 *  (or shows it as a QR code) and polls `remote_agent_oauth_poll` until the
+	 *  user completes authorization. No account password ever enters this app.
+	 */
+	remoteAgentOauthStart: (server: string, providerId: string) => typedError<ApiResult<RemoteAgentOAuthStart>, string>(__TAURI_INVOKE("remote_agent_oauth_start", { server, providerId })),
+	/**
+	 *  Observe one sign-in session. On completion the account token is exchanged
+	 *  for this device's credentials inside Rust and never crosses IPC.
+	 */
+	remoteAgentOauthPoll: (qrId: string) => typedError<ApiResult<RemoteAgentOAuthStatus>, string>(__TAURI_INVOKE("remote_agent_oauth_poll", { qrId })),
+	/**
+	 *  Abandon a pending sign-in session. Local only; the server-side session
+	 *  expires on its own and an already-issued token is never used afterwards.
+	 */
+	remoteAgentOauthCancel: (qrId: string) => typedError<ApiResult<null>, string>(__TAURI_INVOKE("remote_agent_oauth_cancel", { qrId })),
 	remoteAgentLogout: () => typedError<ApiResult<null>, string>(__TAURI_INVOKE("remote_agent_logout")),
-	remoteAgentHosts: (connection: ConnectionRef) => typedError<ApiResult<HostInfo[]>, string>(__TAURI_INVOKE("remote_agent_hosts", { connection })),
+	remoteAgentHosts: (connection: ConnectionRef) => typedError<ApiResult<HostInfo_Serialize[]>, string>(__TAURI_INVOKE("remote_agent_hosts", { connection })),
 	remoteAgentHostIdentity: (host: HostRef) => typedError<ApiResult<RemoteAgentHostIdentity>, string>(__TAURI_INVOKE("remote_agent_host_identity", { host })),
 	remoteAgentTrustHost: (host: HostRef, expectedFingerprint: string) => typedError<ApiResult<ConnectionInfo>, string>(__TAURI_INVOKE("remote_agent_trust_host", { host, expectedFingerprint })),
-	remoteAgentWorkspaces: (host: HostRef) => typedError<ApiResult<WorkspaceInfo[]>, string>(__TAURI_INVOKE("remote_agent_workspaces", { host })),
+	remoteAgentWorkspaces: (host: HostRef) => typedError<ApiResult<WorkspaceInfo_Serialize[]>, string>(__TAURI_INVOKE("remote_agent_workspaces", { host })),
 	remoteAgentSessions: (workspace: WorkspaceRef) => typedError<ApiResult<SessionInfo[]>, string>(__TAURI_INVOKE("remote_agent_sessions", { workspace })),
-	remoteAgentReadSession: (session: SessionRef) => typedError<ApiResult<SessionSnapshot>, string>(__TAURI_INVOKE("remote_agent_read_session", { session })),
-	remoteAgentExecute: (request: OperationRequest) => typedError<ApiResult<OperationOutcome>, string>(__TAURI_INVOKE("remote_agent_execute", { request })),
-	remoteAgentReceipt: (connection: ConnectionRef, operationId: OperationId) => typedError<ApiResult<ReceiptLookup>, string>(__TAURI_INVOKE("remote_agent_receipt", { connection, operationId })),
+	remoteAgentReadSession: (session: SessionRef) => typedError<ApiResult<SessionSnapshot_Serialize>, string>(__TAURI_INVOKE("remote_agent_read_session", { session })),
+	remoteAgentSessionModels: (session: SessionRef) => typedError<ApiResult<RemoteSessionModels_Serialize | null>, string>(__TAURI_INVOKE("remote_agent_session_models", { session })),
+	/**  Host-global model catalog for the picker before any session exists. */
+	remoteAgentHostModels: (host: HostRef) => typedError<ApiResult<RemoteSessionModels_Serialize | null>, string>(__TAURI_INVOKE("remote_agent_host_models", { host })),
+	remoteAgentExecute: (request: OperationRequest_Deserialize) => typedError<ApiResult<OperationOutcome_Serialize>, string>(__TAURI_INVOKE("remote_agent_execute", { request })),
+	remoteAgentReceipt: (connection: ConnectionRef, operationId: OperationId) => typedError<ApiResult<ReceiptLookup_Serialize>, string>(__TAURI_INVOKE("remote_agent_receipt", { connection, operationId })),
 	/**  Read this device's journal without refreshing credentials or contacting a Host. */
-	remoteAgentLocalOperations: (connection: ConnectionRef) => typedError<ApiResult<JournalEntry[]>, string>(__TAURI_INVOKE("remote_agent_local_operations", { connection })),
-	remoteAgentUpload: (session: SessionRef, path: string, operationId: OperationId) => typedError<ApiResult<OperationOutcome>, string>(__TAURI_INVOKE("remote_agent_upload", { session, path, operationId })),
+	remoteAgentLocalOperations: (connection: ConnectionRef) => typedError<ApiResult<JournalEntry_Serialize[]>, string>(__TAURI_INVOKE("remote_agent_local_operations", { connection })),
+	remoteAgentUpload: (session: SessionRef, path: string, operationId: OperationId) => typedError<ApiResult<OperationOutcome_Serialize>, string>(__TAURI_INVOKE("remote_agent_upload", { session, path, operationId })),
 	/**  Read OS background capabilities and observations without requesting permission. */
 	mobileBackgroundGetState: () => typedError<ApiResult<BackgroundState>, string>(__TAURI_INVOKE("mobile_background_get_state")),
 	/**  Change the user's Android background preference; unsupported platforms refuse enabling. */
@@ -2561,7 +2584,7 @@ export type Capabilities = {
 	attachments: AttachmentLimits | null,
 };
 
-export type Capability = "listHosts" | "listWorkspaces" | "listSessions" | "createSession" | "readSession" | "sendMessage" | "cancel" | "subscribe" | "respondPermission" | "respondQuestion" | "uploadAttachment" | "operationReceipts" | "resume";
+export type Capability = "listHosts" | "listWorkspaces" | "listSessions" | "createSession" | "readSession" | "selectModel" | "sendMessage" | "cancel" | "subscribe" | "respondPermission" | "respondQuestion" | "uploadAttachment" | "operationReceipts" | "resume";
 
 /**  Status for a common agent row in Settings. */
 export type CatalogAcpStatus =
@@ -3240,6 +3263,15 @@ export type ContextRequest_Serialize = {
 /**  Where the turn started. Quick Chat and the sidebar share one resolver. */
 export type ContextSurface = "quick_chat" | "sidebar";
 
+/**
+ *  Host-reported context pressure for the current session, in tokens.
+ *  Absence means the Host did not project usage; never guess a window size.
+ */
+export type ContextUsage = {
+	used: number,
+	size: number,
+};
+
 export type CoolPapersImportArgs = {
 	vaultPath: string,
 	/**  Vault-relative destination, e.g. `papers` or `papers/nlp`. */
@@ -3668,7 +3700,39 @@ export type EventCursor = {
 	value: string,
 };
 
-export type EventPayload = { type: "message"; role: string; text: string } | { type: "taskStatus"; status: TaskStatus } | { type: "permissionRequest"; requestId: string; description: string; options: string[] } | { type: "questionRequest"; requestId: string; questions: Question[] } | { type: "connectionStatus"; status: ConnectionStatus };
+export type EventPayload = EventPayload_Serialize | EventPayload_Deserialize;
+
+export type EventPayload_Deserialize = ({ type: "message"; role: string; text: string;
+/**  Model reasoning attached to this reply; rendered as a disclosure. */
+reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoningDelta?: never; requestId?: never; state?: never; status?: never; textDelta?: never } |
+/**
+ *  One native tool invocation. `call` and `result` share the same source ID
+ *  so clients fold them into a single activity row.
+ */
+({ type: "tool"; callId: string; name: string;
+/**  `running`, `finished` or `failed`. */
+state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; status?: never; text?: never; textDelta?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } |
+/**
+ *  One live assistant streaming row. Deltas concatenate onto the current
+ *  assistant turn; the final durable message replaces the streamed text.
+ */
+({ type: "assistantChunk"; textDelta?: string | null; reasoningDelta?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never };
+
+export type EventPayload_Serialize = ({ type: "message"; role: string; text: string;
+/**  Model reasoning attached to this reply; rendered as a disclosure. */
+reasoning?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoningDelta?: never; requestId?: never; state?: never; status?: never; textDelta?: never } |
+/**
+ *  One native tool invocation. `call` and `result` share the same source ID
+ *  so clients fold them into a single activity row.
+ */
+({ type: "tool"; callId: string; name: string;
+/**  `running`, `finished` or `failed`. */
+state: string; arguments?: string | null; output?: string | null }) & { description?: never; options?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; status?: never; text?: never; textDelta?: never } | ({ type: "taskStatus"; status: TaskStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never } | ({ type: "permissionRequest"; requestId: string; description: string; options: string[] }) & { arguments?: never; callId?: never; name?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } | ({ type: "questionRequest"; requestId: string; questions: Question[] }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; reasoning?: never; reasoningDelta?: never; role?: never; state?: never; status?: never; text?: never; textDelta?: never } |
+/**
+ *  One live assistant streaming row. Deltas concatenate onto the current
+ *  assistant turn; the final durable message replaces the streamed text.
+ */
+({ type: "assistantChunk"; textDelta?: string | null; reasoningDelta?: string | null }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; requestId?: never; role?: never; state?: never; status?: never; text?: never } | ({ type: "connectionStatus"; status: ConnectionStatus }) & { arguments?: never; callId?: never; description?: never; name?: never; options?: never; output?: never; questions?: never; reasoning?: never; reasoningDelta?: never; requestId?: never; role?: never; state?: never; text?: never; textDelta?: never };
 
 /**
  *  Where a job's business logic executes: in a Rust runner ([`ExecHost::Host`])
@@ -3852,10 +3916,34 @@ export type HostDoctorReport_Serialize = {
 
 export type HostId = string;
 
-export type HostInfo = {
+export type HostInfo = HostInfo_Serialize | HostInfo_Deserialize;
+
+export type HostInfo_Deserialize = {
 	host: HostRef,
 	name: string,
-	online: boolean,
+	/**
+	 *  `None` when the Server did not report presence and the descriptor lookup
+	 *  failed; absence is not an offline verdict.
+	 */
+	online: boolean | null,
+	/**  This device has already approved and pinned the Host's current identity. */
+	pinned?: boolean,
+	/**  Host home directory from the native ready frame, once connected. */
+	home?: string | null,
+};
+
+export type HostInfo_Serialize = {
+	host: HostRef,
+	name: string,
+	/**
+	 *  `None` when the Server did not report presence and the descriptor lookup
+	 *  failed; absence is not an offline verdict.
+	 */
+	online: boolean | null,
+	/**  This device has already approved and pinned the Host's current identity. */
+	pinned: boolean,
+	/**  Host home directory from the native ready frame, once connected. */
+	home?: string | null,
 };
 
 export type HostRef = {
@@ -4378,7 +4466,13 @@ export type JobVaultScopeEnqueueArgs = {
  *  A private journal record and the safe local restore DTO. No prompt, title,
  *  selected answer, attachment content, local file path or provider error text.
  */
-export type JournalEntry = {
+export type JournalEntry = JournalEntry_Serialize | JournalEntry_Deserialize;
+
+/**
+ *  A private journal record and the safe local restore DTO. No prompt, title,
+ *  selected answer, attachment content, local file path or provider error text.
+ */
+export type JournalEntry_Deserialize = {
 	version: number,
 	connection: ConnectionRef,
 	operationId: OperationId,
@@ -4388,7 +4482,24 @@ export type JournalEntry = {
 	 */
 	requestDigest: string | null,
 	context: OperationContext | null,
-	outcome: OperationOutcome,
+	outcome: OperationOutcome_Deserialize,
+};
+
+/**
+ *  A private journal record and the safe local restore DTO. No prompt, title,
+ *  selected answer, attachment content, local file path or provider error text.
+ */
+export type JournalEntry_Serialize = {
+	version: number,
+	connection: ConnectionRef,
+	operationId: OperationId,
+	/**
+	 *  None means a retained ID imported without its original request. It can
+	 *  be inspected, but can never authorize dispatch or confirm changed args.
+	 */
+	requestDigest: string | null,
+	context: OperationContext | null,
+	outcome: OperationOutcome_Serialize,
 };
 
 /**  TypeScript-side representation of arbitrary JSON values. */
@@ -4916,7 +5027,21 @@ export type MobileWindowRoute = {
 	pdf: MobilePdfPosition | null,
 };
 
-export type Mutation = { type: "createSession"; workspace: WorkspaceRef; title: string | null } | { type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] } | { type: "cancel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string; optionId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] } | { type: "uploadAttachment"; upload: AttachmentUpload };
+export type Mutation = Mutation_Serialize | Mutation_Deserialize;
+
+export type Mutation_Deserialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } |
+/**
+ *  Open (or reuse) the Host workspace for an absolute directory before
+ *  creating a session in it. Reuse is read-only; creation is journaled.
+ */
+({ type: "ensureWorkspace"; host: HostRef; path: string }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Deserialize }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; host?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; host?: never; optionId?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
+
+export type Mutation_Serialize = ({ type: "createSession"; workspace: WorkspaceRef; title: string | null }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; upload?: never } |
+/**
+ *  Open (or reuse) the Host workspace for an absolute directory before
+ *  creating a session in it. Reuse is read-only; creation is journaled.
+ */
+({ type: "ensureWorkspace"; host: HostRef; path: string }) & { answers?: never; attachments?: never; optionId?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "sendMessage"; session: SessionRef; text: string; attachments: RemoteAttachment[] }) & { answers?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; title?: never; upload?: never; workspace?: never } | ({ type: "cancel"; session: SessionRef }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "selectModel"; session: SessionRef; selection: RemoteModelSelection_Serialize }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondPermission"; session: SessionRef; requestId: string; optionId: string }) & { answers?: never; attachments?: never; host?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "respondQuestion"; session: SessionRef; requestId: string; answers: QuestionAnswer[] }) & { attachments?: never; host?: never; optionId?: never; path?: never; selection?: never; text?: never; title?: never; upload?: never; workspace?: never } | ({ type: "uploadAttachment"; upload: AttachmentUpload }) & { answers?: never; attachments?: never; host?: never; optionId?: never; path?: never; requestId?: never; selection?: never; session?: never; text?: never; title?: never; workspace?: never };
 
 export type NetworkDoctorReport = NetworkDoctorReport_Serialize | NetworkDoctorReport_Deserialize;
 
@@ -5012,22 +5137,45 @@ export type OpenWithApp = {
 /**  Menu grouping/fallback-glyph hint for one entry. */
 export type OpenWithKind = "fileManager" | "editor" | "terminal";
 
-export type OperationContext = { type: "createSession"; workspace: WorkspaceRef } | { type: "sendMessage"; session: SessionRef } | { type: "cancel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string } | { type: "uploadAttachment"; session: SessionRef };
+export type OperationContext = { type: "createSession"; workspace: WorkspaceRef } | { type: "ensureWorkspace"; host: HostRef; path: string } | { type: "sendMessage"; session: SessionRef } | { type: "cancel"; session: SessionRef } | { type: "selectModel"; session: SessionRef } | { type: "respondPermission"; session: SessionRef; requestId: string } | { type: "respondQuestion"; session: SessionRef; requestId: string } | { type: "uploadAttachment"; session: SessionRef };
 
 export type OperationId = string;
 
-export type OperationOutcome =
-/**  Queued/accepted does not establish completion of the remote task. */
-{ status: "accepted" } | { status: "succeeded"; result: OperationResult } | { status: "rejected"; code: string; message: string } |
-/**  May already have executed. Inspect the receipt/history; never resend. */
-{ status: "unknown"; reason: string };
+export type OperationOutcome = OperationOutcome_Serialize | OperationOutcome_Deserialize;
 
-export type OperationRequest = {
+export type OperationOutcome_Deserialize =
+/**  Queued/accepted does not establish completion of the remote task. */
+({ status: "accepted" }) & { code?: never; message?: never; reason?: never; result?: never } | ({ status: "succeeded"; result: OperationResult_Deserialize }) & { code?: never; message?: never; reason?: never } | ({ status: "rejected"; code: string; message: string }) & { reason?: never; result?: never } |
+/**  May already have executed. Inspect the receipt/history; never resend. */
+({ status: "unknown"; reason: string }) & { code?: never; message?: never; result?: never };
+
+export type OperationOutcome_Serialize =
+/**  Queued/accepted does not establish completion of the remote task. */
+({ status: "accepted" }) & { code?: never; message?: never; reason?: never; result?: never } | ({ status: "succeeded"; result: OperationResult_Serialize }) & { code?: never; message?: never; reason?: never } | ({ status: "rejected"; code: string; message: string }) & { reason?: never; result?: never } |
+/**  May already have executed. Inspect the receipt/history; never resend. */
+({ status: "unknown"; reason: string }) & { code?: never; message?: never; result?: never };
+
+export type OperationRequest = OperationRequest_Serialize | OperationRequest_Deserialize;
+
+export type OperationRequest_Deserialize = {
 	operationId: OperationId,
-	mutation: Mutation,
+	mutation: Mutation_Deserialize,
 };
 
-export type OperationResult = { type: "sessionCreated"; session: SessionRef } | { type: "attachmentUploaded"; attachment: RemoteAttachment } | { type: "acknowledged" };
+export type OperationRequest_Serialize = {
+	operationId: OperationId,
+	mutation: Mutation_Serialize,
+};
+
+export type OperationResult = OperationResult_Serialize | OperationResult_Deserialize;
+
+export type OperationResult_Deserialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never; workspace?: never } |
+/**  The Host workspace for the requested directory exists (reused or created). */
+({ type: "workspaceEnsured"; workspace: WorkspaceRef }) & { attachment?: never; selected?: never; session?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never; workspace?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Deserialize }) & { attachment?: never; workspace?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never; workspace?: never };
+
+export type OperationResult_Serialize = ({ type: "sessionCreated"; session: SessionRef }) & { attachment?: never; selected?: never; workspace?: never } |
+/**  The Host workspace for the requested directory exists (reused or created). */
+({ type: "workspaceEnsured"; workspace: WorkspaceRef }) & { attachment?: never; selected?: never; session?: never } | ({ type: "attachmentUploaded"; attachment: RemoteAttachment }) & { selected?: never; session?: never; workspace?: never } | ({ type: "modelSelected"; session: SessionRef; selected: RemoteModelSelection_Serialize }) & { attachment?: never; workspace?: never } | ({ type: "acknowledged" }) & { attachment?: never; selected?: never; session?: never; workspace?: never };
 
 /**
  *  Which side wins a manual overwrite. `RemoteToLocal` mirrors the remote
@@ -5807,9 +5955,15 @@ export type RebuildResult = {
 	nodes: number,
 };
 
-export type ReceiptLookup = { status: "found"; outcome: OperationOutcome } |
+export type ReceiptLookup = ReceiptLookup_Serialize | ReceiptLookup_Deserialize;
+
+export type ReceiptLookup_Deserialize = { status: "found"; outcome: OperationOutcome_Deserialize } |
 /**  Missing/expired receipts do not establish that an operation did not run. */
-{ status: "notFound" };
+({ status: "notFound" }) & { outcome?: never };
+
+export type ReceiptLookup_Serialize = { status: "found"; outcome: OperationOutcome_Serialize } |
+/**  Missing/expired receipts do not establish that an operation did not run. */
+({ status: "notFound" }) & { outcome?: never };
 
 export type RecommendArxivArgs = {
 	vaultPath: string,
@@ -5854,6 +6008,11 @@ export type RemoteAgentAccount = {
 	expiresAt: number,
 	info: ConnectionInfo,
 	persistence: RemoteCredentialPersistence,
+	/**
+	 *  Third-party sign-in provider ID (`github`, `google`, `zhihu`, …);
+	 *  `None` for sign-ins saved before provider tracking existed.
+	 */
+	loginProvider: string | null,
 };
 
 export type RemoteAgentCatalog = {
@@ -5877,11 +6036,20 @@ export type RemoteAgentInstallArgs = {
 	templateId: string,
 };
 
-export type RemoteAgentLogin = {
-	server: string,
-	email: string,
-	password: string,
+/**  One third-party sign-in provider advertised by the Remote server. */
+export type RemoteAgentOAuthProvider = {
+	id: string,
+	displayName: string,
 };
+
+/**  A browser sign-in session: authorize at `scan_url`, then poll for completion. */
+export type RemoteAgentOAuthStart = {
+	qrId: string,
+	scanUrl: string,
+	expiresIn: number,
+};
+
+export type RemoteAgentOAuthStatus = { status: "pending" } | { status: "expired" } | { status: "complete"; account: RemoteAgentAccount };
 
 export type RemoteAgentProbeArgs = {
 	sessionId: string,
@@ -5947,12 +6115,74 @@ export type RemoteCredentialState = "notChecked" | "launchOnly" | "missing" | "r
  *  Source IDs must identify immutable events and survive history/stream replay.
  *  Stream ID separates source epochs where a backend may reuse event IDs.
  */
-export type RemoteEvent = {
+export type RemoteEvent = RemoteEvent_Serialize | RemoteEvent_Deserialize;
+
+/**
+ *  Source IDs must identify immutable events and survive history/stream replay.
+ *  Stream ID separates source epochs where a backend may reuse event IDs.
+ */
+export type RemoteEvent_Deserialize = {
 	session: SessionRef,
 	sourceStreamId: string,
 	sourceId: string,
 	cursor: EventCursor | null,
-	payload: EventPayload,
+	payload: EventPayload_Deserialize,
+};
+
+/**
+ *  Source IDs must identify immutable events and survive history/stream replay.
+ *  Stream ID separates source epochs where a backend may reuse event IDs.
+ */
+export type RemoteEvent_Serialize = {
+	session: SessionRef,
+	sourceStreamId: string,
+	sourceId: string,
+	cursor: EventCursor | null,
+	payload: EventPayload_Serialize,
+};
+
+export type RemoteModelOption = {
+	id: string,
+	name: string,
+	description: string | null,
+	reasoning: RemoteModelReasoning | null,
+};
+
+export type RemoteModelProviderFailure = {
+	id: string,
+	name: string,
+	message: string,
+};
+
+export type RemoteModelProviderGroup = {
+	id: string,
+	name: string,
+	models: RemoteModelOption[],
+};
+
+export type RemoteModelReasoning = {
+	efforts: RemoteModelReasoningEffort[],
+	defaultEffort: string | null,
+};
+
+export type RemoteModelReasoningEffort = {
+	id: string,
+	name: string,
+	description: string | null,
+};
+
+export type RemoteModelSelection = RemoteModelSelection_Serialize | RemoteModelSelection_Deserialize;
+
+export type RemoteModelSelection_Deserialize = {
+	provider: string,
+	model: string,
+	reasoningEffort?: string | null,
+};
+
+export type RemoteModelSelection_Serialize = {
+	provider: string,
+	model: string,
+	reasoningEffort?: string | null,
 };
 
 export type RemotePaperGetArgs = {
@@ -6002,6 +6232,22 @@ export type RemoteSessionInfo = {
 	caps: FsCaps,
 	/**  Pseudo vault path for frontend: `remote:<sessionId>` */
 	vaultHandle: string,
+};
+
+export type RemoteSessionModels = RemoteSessionModels_Serialize | RemoteSessionModels_Deserialize;
+
+export type RemoteSessionModels_Deserialize = {
+	current: RemoteModelSelection_Deserialize,
+	routable: boolean,
+	groups: RemoteModelProviderGroup[],
+	failures: RemoteModelProviderFailure[],
+};
+
+export type RemoteSessionModels_Serialize = {
+	current: RemoteModelSelection_Serialize,
+	routable: boolean,
+	groups: RemoteModelProviderGroup[],
+	failures: RemoteModelProviderFailure[],
 };
 
 export type RemoteWriteBytesArgs = {
@@ -6322,14 +6568,30 @@ export type SessionRef = {
 	sessionId: SessionId,
 };
 
-export type SessionSnapshot = {
+export type SessionSnapshot = SessionSnapshot_Serialize | SessionSnapshot_Deserialize;
+
+export type SessionSnapshot_Deserialize = {
 	info: SessionInfo,
-	events: RemoteEvent[],
+	events: RemoteEvent_Deserialize[],
 	/**
 	 *  A subscription opened with this token must cover changes after this
 	 *  baseline. Adapters implement this using their official history/streams.
 	 */
 	cursor: EventCursor | null,
+	/**  Latest projected context usage from the official snapshot, if any. */
+	contextUsage?: ContextUsage | null,
+};
+
+export type SessionSnapshot_Serialize = {
+	info: SessionInfo,
+	events: RemoteEvent_Serialize[],
+	/**
+	 *  A subscription opened with this token must cover changes after this
+	 *  baseline. Adapters implement this using their official history/streams.
+	 */
+	cursor: EventCursor | null,
+	/**  Latest projected context usage from the official snapshot, if any. */
+	contextUsage?: ContextUsage | null,
 };
 
 export type SettingsChangedEvent = SettingsChangedEvent_Serialize | SettingsChangedEvent_Deserialize;
@@ -7879,9 +8141,20 @@ export type WorkspaceCliRequestEvent = WorkspaceRequest;
 
 export type WorkspaceId = string;
 
-export type WorkspaceInfo = {
+export type WorkspaceInfo = WorkspaceInfo_Serialize | WorkspaceInfo_Deserialize;
+
+export type WorkspaceInfo_Deserialize = {
 	workspace: WorkspaceRef,
 	name: string,
+	/**  Absolute Host-side directory when the official baseline reports one. */
+	path?: string | null,
+};
+
+export type WorkspaceInfo_Serialize = {
+	workspace: WorkspaceRef,
+	name: string,
+	/**  Absolute Host-side directory when the official baseline reports one. */
+	path?: string | null,
 };
 
 /**  Backend is part of identity: Harness, ACP and Codex IDs never alias. */

@@ -21,6 +21,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import agenteroLogo from "@/assets/agentero-logo.svg";
+import { AgentPanel } from "@/components/agent/agent-panel";
 import { useBridgeStatus } from "@/components/mobile/hooks/use-bridge-status";
 import { useMobileAgents } from "@/components/mobile/hooks/use-mobile-agents";
 import { useMobileBackLayer } from "@/components/mobile/hooks/use-mobile-back-layer";
@@ -56,10 +57,10 @@ import { MobileReaderPage } from "@/components/mobile/mobile-reader-page";
 import { MobileSettingsPage } from "@/components/mobile/mobile-settings-page";
 import { MobileSidebar } from "@/components/mobile/mobile-sidebar";
 import { MobileTaskIndicator } from "@/components/mobile/mobile-task-indicator";
-import { MobileRemoteAgentPage } from "@/components/mobile/remote/mobile-remote-agent-page";
 import type { MobileReaderMode } from "@/components/mobile/types";
 import { SyncConflictDialog } from "@/components/settings/panes/sync-conflict-dialog";
 import { useSyncConflictReview } from "@/components/settings/panes/use-sync-conflict-review";
+import { PaneHeader } from "@/components/shell/pane-header";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -69,7 +70,6 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { SessionRef } from "@/lib/core/bindings";
 import { errorText } from "@/lib/core/error";
 import { notifyError } from "@/lib/core/notify";
 import { cn } from "@/lib/core/utils";
@@ -83,7 +83,10 @@ import {
 	openMobilePlazaUrl,
 } from "@/lib/mobile/navigation";
 import type { MobilePaperRegionContext } from "@/lib/mobile/paper-context";
-import { mobilePaperPaths } from "@/lib/mobile/paper-files";
+import {
+	loadMobilePaperPdfAttachment,
+	mobilePaperPaths,
+} from "@/lib/mobile/paper-files";
 import { useMobilePdfProcessingRuntime } from "@/lib/mobile/pdf-processing";
 import type { MobileWindowRoute } from "@/lib/mobile/route";
 import {
@@ -143,7 +146,6 @@ export default function MobileApp() {
 	const [agentSessionId, setAgentSessionId] = useState<string | null>(null);
 	const [historyOpen, setHistoryOpen] = useState(false);
 	const [agentProvider, setAgentProvider] = useState("ds-harness-remote");
-	const [remoteSession, setRemoteSession] = useState<SessionRef | null>(null);
 	const [regionContext, setRegionContext] =
 		useState<MobilePaperRegionContext | null>(null);
 	const regionContextRef = useRef<MobilePaperRegionContext | null>(null);
@@ -632,6 +634,18 @@ export default function MobileApp() {
 	);
 
 	const inReader = tab === "library" && selectedPaper !== null;
+	const fetchMissingPaper = paperSync.fetchMissing;
+	const remotePaperSource = useMemo(() => {
+		if (!vaultPath || !selectedPaper) return null;
+		return {
+			key: JSON.stringify([vaultPath, selectedPaper.id, selectedPaper.path]),
+			paper: selectedPaper,
+			loadPdf: (maxBytes: number) =>
+				loadMobilePaperPdfAttachment(vaultPath, selectedPaper, maxBytes, () =>
+					fetchMissingPaper(selectedPaper),
+				),
+		};
+	}, [vaultPath, selectedPaper, fetchMissingPaper]);
 
 	return (
 		<div
@@ -995,32 +1009,6 @@ export default function MobileApp() {
 								weight: 1.7,
 								content: (
 									<div className="flex h-full min-h-0 flex-col">
-										<div className="flex shrink-0 flex-wrap items-center gap-2 border-b p-3">
-											<select
-												aria-label={t("remote.provider")}
-												className="h-11 min-w-0 max-w-full rounded-md border bg-background px-2 text-base"
-												value={agentProvider}
-												onChange={(event) =>
-													setAgentProvider(event.target.value)
-												}
-											>
-												<option value="ds-harness-remote">
-													{t("remote.dshProvider")}
-												</option>
-												<option value="agentero-bridge">
-													{t("remote.bridgeProvider")}
-												</option>
-											</select>
-											{agentProvider === "agentero-bridge" ? (
-												<MobileAgentToolbar
-													agents={agents}
-													loading={agentsLoading}
-													selectedAgentId={selectedAgentId}
-													onSelectAgent={handleSelectAgent}
-													onOpenHistory={() => setHistoryOpen(true)}
-												/>
-											) : null}
-										</div>
 										<div
 											hidden={agentProvider !== "ds-harness-remote"}
 											style={{
@@ -1031,7 +1019,29 @@ export default function MobileApp() {
 											}}
 											className="min-h-0 flex-1"
 										>
-											<MobileRemoteAgentPage
+											<AgentPanel
+												remoteOnly
+												vaultPath={vaultPath}
+												remotePaperSource={remotePaperSource}
+												backendControl={
+													<MobileAgentToolbar
+														agents={agents}
+														loading={agentsLoading}
+														selectedAgentId={selectedAgentId}
+														remoteSelected
+														onSelectRemote={() =>
+															setAgentProvider("ds-harness-remote")
+														}
+														onSelectBridge={() =>
+															setAgentProvider("agentero-bridge")
+														}
+														onSelectAgent={(id) => {
+															setAgentProvider("agentero-bridge");
+															handleSelectAgent(id);
+														}}
+														onOpenHistory={() => setHistoryOpen(true)}
+													/>
+												}
 												active={
 													layout.agent &&
 													agentProvider === "ds-harness-remote" &&
@@ -1041,8 +1051,6 @@ export default function MobileApp() {
 													!paperImportOpen &&
 													!paperInfoOpen
 												}
-												selection={remoteSession}
-												onSelectionChange={setRemoteSession}
 												regionContext={regionContext}
 												onRegionContextHandled={handleRegionContext}
 											/>
@@ -1057,49 +1065,71 @@ export default function MobileApp() {
 											}}
 											className="min-h-0 flex-1"
 										>
-											{connected ? (
-												<MobileAgentPage
-													active={
-														layout.agent &&
-														agentProvider === "agentero-bridge" &&
-														!pairingRequested &&
-														!settingsOpen &&
-														!sidebarOpen &&
-														!paperImportOpen &&
-														!paperInfoOpen
-													}
-													key={selectedAgentId ?? "default"}
-													selectedAgentId={selectedAgentId}
-													sessionId={agentSessionId}
-													onSessionId={setAgentSessionId}
-													historyOpen={historyOpen}
-													onHistoryOpenChange={setHistoryOpen}
-												/>
-											) : (
-												<div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
-													<p className="max-w-sm text-muted-foreground text-sm">
-														{t("agent.connectionRequired")}
-													</p>
-													{paired ? (
-														<Button
-															variant="outline"
-															className="min-h-12"
-															onClick={() => void resume()}
-														>
-															{t("local.retry")}
-														</Button>
-													) : null}
-													{resetAvailable ? (
-														<MobileBridgeReset onStatus={setStatus} />
-													) : null}
-													<Button
-														className="min-h-12"
-														onClick={() => setPairingRequested(true)}
-													>
-														{t("connect.title")}
-													</Button>
+											<div className="flex h-full min-h-0 flex-col">
+												<PaneHeader className="h-12">
+													<MobileAgentToolbar
+														agents={agents}
+														loading={agentsLoading}
+														selectedAgentId={selectedAgentId}
+														remoteSelected={false}
+														onSelectRemote={() => {
+															setHistoryOpen(false);
+															setAgentProvider("ds-harness-remote");
+														}}
+														onSelectBridge={() =>
+															setAgentProvider("agentero-bridge")
+														}
+														onSelectAgent={handleSelectAgent}
+														onOpenHistory={() => setHistoryOpen(true)}
+													/>
+												</PaneHeader>
+												<div className="min-h-0 flex-1">
+													{connected ? (
+														<MobileAgentPage
+															active={
+																layout.agent &&
+																agentProvider === "agentero-bridge" &&
+																!pairingRequested &&
+																!settingsOpen &&
+																!sidebarOpen &&
+																!paperImportOpen &&
+																!paperInfoOpen
+															}
+															key={selectedAgentId ?? "default"}
+															paperPath={selectedPaper?.path ?? undefined}
+															selectedAgentId={selectedAgentId}
+															sessionId={agentSessionId}
+															onSessionId={setAgentSessionId}
+															historyOpen={historyOpen}
+															onHistoryOpenChange={setHistoryOpen}
+														/>
+													) : (
+														<div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+															<p className="max-w-sm text-muted-foreground text-sm">
+																{t("agent.connectionRequired")}
+															</p>
+															{paired ? (
+																<Button
+																	variant="outline"
+																	className="min-h-12"
+																	onClick={() => void resume()}
+																>
+																	{t("local.retry")}
+																</Button>
+															) : null}
+															{resetAvailable ? (
+																<MobileBridgeReset onStatus={setStatus} />
+															) : null}
+															<Button
+																className="min-h-12"
+																onClick={() => setPairingRequested(true)}
+															>
+																{t("connect.title")}
+															</Button>
+														</div>
+													)}
 												</div>
-											)}
+											</div>
 										</div>
 									</div>
 								),

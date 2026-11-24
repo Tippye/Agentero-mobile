@@ -236,8 +236,9 @@ vi.mock("@/components/mobile/mobile-notes-editor", () => ({
 		});
 	},
 }));
-vi.mock("@/components/mobile/remote/mobile-remote-agent-page", () => ({
-	MobileRemoteAgentPage: (props: {
+vi.mock("@/components/agent/agent-panel", () => ({
+	AgentPanel: (props: {
+		backendControl?: ReactNode;
 		regionContext?: MobilePaperRegionContext | null;
 		onRegionContextHandled?: (id: string) => void;
 	}) => {
@@ -251,6 +252,7 @@ vi.mock("@/components/mobile/remote/mobile-remote-agent-page", () => ({
 		return createElement(
 			"section",
 			{ "data-agent-document": true },
+			props.backendControl,
 			createElement("textarea", {
 				"aria-label": "test-agent",
 				value: draft,
@@ -427,6 +429,25 @@ async function click(label: string) {
 	await act(async () => {
 		for (const notify of [...observers]) notify();
 	});
+}
+async function selectBridgeBackend() {
+	const trigger = [
+		...document.querySelectorAll<HTMLButtonElement>("button"),
+	].find(
+		(button) =>
+			!button.closest("[hidden]") && button.textContent === "dsh-remote",
+	);
+	expect(trigger).toBeDefined();
+	await act(() =>
+		trigger?.dispatchEvent(
+			new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+		),
+	);
+	const item = [
+		...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+	].find((row) => row.textContent === "remote.bridgeProvider");
+	expect(item).toBeDefined();
+	await act(() => item?.click());
 }
 async function fill(label: string, value: string) {
 	const field = container.querySelector<HTMLTextAreaElement>(
@@ -925,14 +946,8 @@ describe("stable tablet workspace DOM", () => {
 		await click("Paper first");
 		await ready();
 		expect(state.pdf?.onRegionPrompt).toBeDefined();
-		const select = container.querySelector<HTMLSelectElement>(
-			'[aria-label="remote.provider"]',
-		);
-		expect(select).not.toBeNull();
-		await act(() => {
-			if (select) select.value = "agentero-bridge";
-			select?.dispatchEvent(new Event("change", { bubbles: true }));
-		});
+		await click("tabs.agent");
+		await selectBridgeBackend();
 		expect(state.pdf?.onRegionPrompt).toBeUndefined();
 	});
 
@@ -1025,15 +1040,7 @@ describe("stable tablet workspace DOM", () => {
 		expect(container.querySelector("[data-settings-page]")).toBeNull();
 		expect(state.settings?.open).toBe(false);
 		await click("workspace.discuss");
-		const provider = container.querySelector<HTMLSelectElement>(
-			'[aria-label="remote.provider"]',
-		);
-		await act(() => {
-			if (provider) {
-				provider.value = "agentero-bridge";
-				provider.dispatchEvent(new Event("change", { bubbles: true }));
-			}
-		});
+		await selectBridgeBackend();
 		await click("connect.title");
 		await click("cancel-pairing");
 		expect(container.querySelector("[data-pdf-document]")).toBe(pdf);
