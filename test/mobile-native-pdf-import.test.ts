@@ -159,9 +159,8 @@ vi.mock("@/components/mobile/mobile-reader-page", () => ({
 		);
 	},
 }));
-vi.mock("@/components/mobile/remote/mobile-remote-agent-page", () => ({
-	MobileRemoteAgentPage: () =>
-		h("textarea", { "aria-label": "retained-agent" }),
+vi.mock("@/components/agent/agent-panel", () => ({
+	AgentPanel: () => h("textarea", { "aria-label": "retained-agent" }),
 }));
 vi.mock("@/components/mobile/mobile-agent-page", () => ({
 	MobileAgentPage: () => null,
@@ -279,6 +278,7 @@ it("opens the real settings page from the real Sidebar while keeping runtime own
 	const navButtons = [...page.querySelectorAll("nav button")];
 	expect(navButtons.map((item) => item.textContent)).toEqual([
 		"settings:nav.appearance",
+		"settings:nav.agent",
 		"settings:nav.translate",
 		"settings:nav.layout",
 		"settings:nav.sync",

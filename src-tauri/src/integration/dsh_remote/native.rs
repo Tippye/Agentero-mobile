@@ -106,6 +106,8 @@ struct Interactions {
 pub(crate) struct NativeHost {
     pub wire: Arc<dyn WireRpc>,
     pub capabilities: HashSet<String>,
+    /// Host home directory advertised by the official ready frame, if any.
+    pub home: Option<String>,
     interactions: Arc<Mutex<Interactions>>,
     interaction_events: broadcast::Sender<(String, String)>,
     grants: Arc<UploadGrants>,
@@ -133,10 +135,16 @@ impl NativeHost {
             ));
         }
         let client_id = string(&ready, "clientId")?.to_owned();
+        let home = ready
+            .pointer("/host/home")
+            .and_then(Value::as_str)
+            .filter(|home| !home.is_empty())
+            .map(str::to_owned);
         let (interaction_events, _) = broadcast::channel(256);
         let host = Arc::new(Self {
             wire,
             capabilities,
+            home,
             interactions: Arc::new(Mutex::new(Interactions {
                 client_id: Some(client_id),
                 ..Default::default()
@@ -332,11 +340,57 @@ impl NativeHost {
         closed?;
         Ok(rows)
     }
+    /// The exact trusted Papers directory for unassigned sessions, derived
+    /// only from the Host's own ready-frame home. v3 hosts only.
+    pub fn papers_cwd(&self) -> Option<String> {
+        if !self.capabilities.contains("harness.remote.v3") {
+            return None;
+        }
+        let home = self.home.as_deref()?;
+        let separator = if home.contains('\\') && !home.contains('/') {
+            '\\'
+        } else {
+            '/'
+        };
+        let trimmed = home.trim_end_matches(['/', '\\']);
+        Some(format!("{trimmed}{separator}Agentero{separator}Papers"))
+    }
+    async fn session_list(&self) -> Result<Vec<model::SessionRow>> {
+        model::session_rows(
+            call(
+                &self.wire,
+                &id(),
+                "session/list",
+                json!({"_request":{}}),
+                CallSemantics::ReadOnly,
+            )
+            .await?,
+        )
+    }
     pub async fn catalog(&self, workspace: &WorkspaceRef) -> Result<Vec<model::SessionRow>> {
         model::ensure_backend(workspace)?;
-        let row = self
-            .workspace_rows()
-            .await?
+        let rows = self.workspace_rows().await?;
+        if workspace.workspace_id.0 == model::UNASSIGNED_WORKSPACE_ID {
+            // Virtual unassigned scope: root sessions at the exact trusted
+            // Papers cwd that no official workspace claims. Never listed for
+            // v1 hosts or without a known home.
+            let papers = self.papers_cwd().ok_or_else(|| {
+                RemoteError::new(
+                    "FEATURE_NOT_SUPPORTED",
+                    "Unassigned sessions require a v3 Host with a known home",
+                )
+            })?;
+            let owned: HashSet<String> = rows
+                .iter()
+                .flat_map(|row| row.session_ids.iter().cloned())
+                .collect();
+            return Ok(model::unassigned_sessions(
+                self.session_list().await?,
+                &owned,
+                &papers,
+            ));
+        }
+        let row = rows
             .into_iter()
             .find(|row| row.workspace_id == workspace.workspace_id.0)
             .ok_or_else(|| {
@@ -374,6 +428,22 @@ impl NativeHost {
         session: &SessionRef,
     ) -> Result<Option<RemoteSessionModels>> {
         let row = self.require_session(session).await?;
+        match self.model_catalog().await? {
+            Some(value) => model::session_models(&row, value).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Host-global catalog: no session row exists yet, so the current
+    /// selection is the Host default (official sessionModels cache miss).
+    pub async fn session_model_catalog(&self) -> Result<Option<RemoteSessionModels>> {
+        match self.model_catalog().await? {
+            Some(value) => model::host_models(value).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn model_catalog(&self) -> Result<Option<Value>> {
         match call(
             &self.wire,
             &id(),
@@ -383,7 +453,7 @@ impl NativeHost {
         )
         .await
         {
-            Ok(value) => model::session_models(&row, value).map(Some),
+            Ok(value) => Ok(Some(value)),
             Err(error)
                 if matches!(
                     error.code.as_str(),
@@ -397,6 +467,53 @@ impl NativeHost {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Reuse the Host workspace whose official baseline path matches, or
+    /// create it via `workspace/create` (official openRemoteWorkspace). The
+    /// caller's journaled operation ID rides on the create call so replay
+    /// deduplicates; reuse performs no write at all.
+    pub async fn ensure_workspace(
+        &self,
+        operation: &str,
+        host: &HostRef,
+        path: &str,
+    ) -> Result<WorkspaceRef> {
+        if !model::valid_workspace_path(path) {
+            return Err(RemoteError::invalid("Invalid native workspace path"));
+        }
+        if let Some(row) = self
+            .workspace_rows()
+            .await?
+            .into_iter()
+            .find(|row| row.path.as_deref() == Some(path))
+        {
+            return Ok(WorkspaceRef {
+                host: host.clone(),
+                backend_id: model::BACKEND.into(),
+                workspace_id: WorkspaceId(row.workspace_id),
+            });
+        }
+        let value = call(
+            &self.wire,
+            operation,
+            "workspace/create",
+            json!({"request":{"path":path}}),
+            CallSemantics::Mutation,
+        )
+        .await?;
+        let workspace_id = value
+            .pointer("/workspace/workspaceId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                RemoteError::invalid("Invalid native workspace create result").unknown()
+            })?;
+        Ok(WorkspaceRef {
+            host: host.clone(),
+            backend_id: model::BACKEND.into(),
+            workspace_id: WorkspaceId(workspace_id.to_owned()),
+        })
     }
 
     pub async fn select_model(
@@ -447,10 +564,16 @@ impl NativeHost {
         session: &SessionRef,
         after: Option<i64>,
     ) -> Result<(GatewayStream, Value, Vec<Value>)> {
+        let mut request = json!({"address":model::address(session),"maxMessages":200});
+        if self.capabilities.contains("harness.remote.v3") {
+            // Official v3 clients opt into live assistant streaming; the Host
+            // then ships snapshot.assistantStream and assistant-stream frames.
+            request["assistantStream"] = json!(true);
+        }
         let mut stream = GatewayStream::open(
             self.wire.clone(),
             "session/follow",
-            json!({"request":{"address":model::address(session),"maxMessages":200}}),
+            json!({"request":request}),
         )
         .await?;
         let snapshot = stream.first().await?;
@@ -598,6 +721,8 @@ impl NativeHost {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        // Durable history first, then the in-flight attempt's streamed suffix.
+        events.extend(model::stream_events(session, &snapshot)?);
         events.extend(self.pending_events(session).await?);
         let mut status = model::status(&row, &records, snapshot.get("projections"))?;
         if events
@@ -619,6 +744,7 @@ impl NativeHost {
             },
             events,
             cursor: Some(model::cursor(session, model::through(&snapshot)?)),
+            context_usage: model::context_usage(&snapshot),
         })
     }
     pub async fn subscribe(
@@ -642,6 +768,9 @@ impl NativeHost {
                 queue.extend(model::events(session, &record["event"])?);
             }
         }
+        // The active attempt always sits after the durable cursor; replay its
+        // streamed suffix so a mid-run join shows the partial reply at once.
+        queue.extend(model::stream_events(session, &snapshot)?);
         queue.extend(self.pending_events(session).await?);
         let status = model::status(&row, &records, snapshot.get("projections"))?;
         let seq = model::through(&snapshot)?;
@@ -652,6 +781,14 @@ impl NativeHost {
             cursor: Some(model::cursor(session, seq)),
             payload: EventPayload::TaskStatus { status },
         });
+        let assistant = snapshot
+            .pointer("/assistantStream/activeAttempt")
+            .and_then(|attempt| {
+                Some(ActiveAttempt {
+                    attempt_id: attempt.get("attemptId")?.as_str()?.to_owned(),
+                    next_index: attempt.get("nextIndex")?.as_u64()?,
+                })
+            });
         Ok(Box::new(NativeSubscription {
             host: self.clone(),
             session: session.clone(),
@@ -659,6 +796,7 @@ impl NativeHost {
             interactions,
             queue,
             through: seq,
+            assistant,
             cancelled: false,
         }))
     }
@@ -947,6 +1085,12 @@ fn valid_file_name(name: &str) -> bool {
             && (stem.starts_with("com") || stem.starts_with("lpt"))
             && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
+/// The in-flight assistant attempt tracked from `assistant-stream` frames.
+/// Live chunks are transient: they never advance the durable cursor.
+struct ActiveAttempt {
+    attempt_id: String,
+    next_index: u64,
+}
 struct NativeSubscription {
     host: Arc<NativeHost>,
     session: SessionRef,
@@ -954,6 +1098,7 @@ struct NativeSubscription {
     interactions: broadcast::Receiver<(String, String)>,
     queue: VecDeque<RemoteEvent>,
     through: i64,
+    assistant: Option<ActiveAttempt>,
     cancelled: bool,
 }
 #[async_trait]
@@ -978,6 +1123,41 @@ impl RemoteAgentSubscription for NativeSubscription {
                                 let event = &value["event"]; let seq = integer(event, "seq")? as i64;
                                 if seq <= self.through { continue; } self.through = seq;
                                 self.queue.extend(model::events(&self.session, event)?);
+                            }
+                            Some("assistant-stream") => {
+                                // Official pumpSessionFollow: start/chunk/end frames
+                                // carry transient deltas; durable gating is untouched.
+                                let Some(frame) = value.get("frame").filter(|f| f.is_object()) else { continue; };
+                                match frame.get("type").and_then(Value::as_str) {
+                                    Some("start") => {
+                                        if let Some(attempt_id) = frame.get("attemptId").and_then(Value::as_str) {
+                                            self.assistant = Some(ActiveAttempt {
+                                                attempt_id: attempt_id.to_owned(),
+                                                next_index: frame.get("nextIndex").and_then(Value::as_u64).unwrap_or(0),
+                                            });
+                                        }
+                                    }
+                                    Some("chunk") => {
+                                        let matches_attempt = self.assistant.as_ref().is_some_and(|attempt| {
+                                            frame.get("attemptId").and_then(Value::as_str) == Some(attempt.attempt_id.as_str())
+                                        });
+                                        if !matches_attempt { continue; }
+                                        let next_index = self.assistant.as_ref().map_or(0, |attempt| attempt.next_index);
+                                        let index = frame.get("index").and_then(Value::as_u64).unwrap_or(next_index);
+                                        if index < next_index { continue; }
+                                        let event = frame.get("chunk").and_then(|chunk| {
+                                            model::live_chunk_event(&self.session, &self.assistant.as_ref()?.attempt_id, index, chunk)
+                                        });
+                                        if let Some(attempt) = self.assistant.as_mut() { attempt.next_index = index + 1; }
+                                        if let Some(event) = event { self.queue.push_back(event); }
+                                    }
+                                    Some("end") if self.assistant.as_ref().is_some_and(|attempt| {
+                                        frame.get("attemptId").and_then(Value::as_str) == Some(attempt.attempt_id.as_str())
+                                    }) => {
+                                        self.assistant = None;
+                                    }
+                                    _ => {}
+                                }
                             }
                             Some("projection") => {
                                 if value.get("key").and_then(Value::as_str) == Some("userQuestions") {

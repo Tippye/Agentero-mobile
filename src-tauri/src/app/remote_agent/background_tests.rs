@@ -841,6 +841,7 @@ fn observation_rejects_wrong_session_and_does_not_retain_history_bodies() {
         },
         events: vec![],
         cursor: None,
+        context_usage: None,
     };
     assert!(matches!(
         Observation::snapshot(&expected, snapshot),

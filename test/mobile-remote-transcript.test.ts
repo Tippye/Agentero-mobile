@@ -1,14 +1,33 @@
-import { describe, expect, it } from "vitest";
+import { emitTo } from "@tauri-apps/api/event";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
 	EventPayload,
 	RemoteEvent,
 	SessionRef,
 } from "@/lib/core/bindings";
+import { RemoteAgentTransport } from "@/lib/remote-agent/agent-transport";
+import { remoteAgent } from "@/lib/remote-agent/service";
 import {
 	buildRemoteTranscript,
 	parseToolArguments,
+	RemoteAssistantText,
+	remoteHistoryLines,
 } from "@/lib/remote-agent/transcript";
+
+vi.mock("@tauri-apps/api/event", () => ({ emitTo: vi.fn() }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+	getCurrentWebviewWindow: () => ({ label: "main" }),
+}));
+vi.mock("@/lib/remote-agent/service", () => ({
+	remoteAgent: {
+		workspaces: vi.fn(),
+		sessions: vi.fn(),
+		read: vi.fn(),
+		localOperations: vi.fn(),
+		execute: vi.fn(),
+	},
+}));
 
 const session: SessionRef = {
 	workspace: {
@@ -177,6 +196,153 @@ describe("remote transcript folding", () => {
 		if (part.kind !== "tool") throw new Error("expected tool");
 		expect(part.state).toBe("finished");
 		expect(part.output).toBe("ok");
+	});
+
+	it("accumulates live deltas into one streaming turn and finalizes without duplication", () => {
+		const rows = buildRemoteTranscript(
+			[
+				event({ type: "message", role: "user", text: "hi" }),
+				event({ type: "assistantChunk", reasoningDelta: "think " }, "chunk:5"),
+				event({ type: "assistantChunk", reasoningDelta: "hard" }, "chunk:6"),
+				event({ type: "assistantChunk", textDelta: "Hel" }, "chunk:7"),
+				event({ type: "assistantChunk", textDelta: "lo" }, "chunk:8"),
+			],
+			true,
+		);
+		expect(rows.map((row) => row.kind)).toEqual(["user", "assistant"]);
+		const live = rows[1];
+		if (live.kind !== "assistant") throw new Error("expected assistant");
+		expect(live.text).toBe("Hello");
+		expect(live.streaming).toBe(true);
+		expect(live.parts).toHaveLength(1);
+		const reasoning = live.parts[0];
+		if (reasoning.kind !== "reasoning") throw new Error("expected reasoning");
+		expect(reasoning.text).toBe("think hard");
+
+		const finalized = buildRemoteTranscript(
+			[
+				event({ type: "message", role: "user", text: "hi" }),
+				event(
+					{ type: "assistantChunk", reasoningDelta: "think hard" },
+					"chunk:5",
+				),
+				event({ type: "assistantChunk", textDelta: "Hello" }, "chunk:7"),
+				event({
+					type: "message",
+					role: "assistant",
+					text: "Hello",
+					reasoning: "think hard",
+				}),
+			],
+			false,
+		);
+		expect(finalized).toHaveLength(2);
+		const done = finalized[1];
+		if (done.kind !== "assistant") throw new Error("expected assistant");
+		expect(done.text).toBe("Hello");
+		expect(done.streaming).toBe(false);
+		expect(done.parts).toHaveLength(1);
+		const finalReasoning = done.parts[0];
+		if (finalReasoning.kind !== "reasoning")
+			throw new Error("expected reasoning");
+		expect(finalReasoning.text).toBe("think hard");
+	});
+
+	it("folds active deltas and archived chunks into the durable assistant message", () => {
+		const answer = new RemoteAssistantText();
+		const thought = new RemoteAssistantText();
+		expect(answer.chunk("stream:one:0", "Hel")).toBe("Hel");
+		expect(thought.chunk("stream:one:1", "Think")).toBe("Think");
+		expect(answer.chunk("chunk:2", "Hello")).toBe("lo");
+		expect(thought.chunk("chunk:3", "Thinking")).toBe("ing");
+		expect(answer.message("Hello!")).toBe("!");
+		expect(thought.message("Thinking")).toBe("");
+		expect(answer.chunk("stream:one:4", "stale attempt")).toBe("");
+		expect(answer.content).toBe("Hello!");
+		const lines = remoteHistoryLines([
+			event({ type: "assistantChunk", reasoningDelta: "Thinking" }, "chunk:3"),
+			event({ type: "assistantChunk", textDelta: "Hello" }, "chunk:4"),
+			event({
+				type: "message",
+				role: "assistant",
+				text: "Hello!",
+				reasoning: "Thinking",
+			}),
+			event(
+				{ type: "assistantChunk", textDelta: " A second step" },
+				"stream:two:0",
+			),
+		]);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatchObject({
+			text: "Hello! A second step",
+			reasoning: "Thinking",
+			parts: [
+				{ type: "reasoning", text: "Thinking" },
+				{ type: "text", text: "Hello!" },
+				{ type: "text", text: " A second step" },
+			],
+		});
+	});
+
+	it("emits scoped completion for a turn cancelled before assistant output", async () => {
+		const host = {
+			host: session.workspace.host,
+			home: "/home/test",
+			name: "Host",
+			online: true,
+		};
+		const transport = new RemoteAgentTransport(host, {
+			connection: host.host.connection,
+			capabilities: {
+				operations: ["listSessions", "sendMessage", "readSession"],
+				authentication: [],
+				backends: ["harness"],
+				attachments: null,
+			},
+		});
+		vi.mocked(remoteAgent.workspaces).mockResolvedValue([
+			{
+				workspace: session.workspace,
+				name: "Papers",
+				path: "/home/test/Agentero/Papers",
+			},
+		]);
+		vi.mocked(remoteAgent.sessions).mockResolvedValue([
+			{ session, title: "Papers", status: "cancelled" },
+		]);
+		const oldCancel = event({ type: "taskStatus", status: "cancelled" });
+		const newCancel = event({ type: "taskStatus", status: "cancelled" });
+		const baseline = {
+			info: { session, title: "Papers", status: "cancelled" as const },
+			events: [oldCancel],
+			cursor: null,
+		};
+		vi.mocked(remoteAgent.read)
+			.mockResolvedValueOnce(baseline)
+			.mockResolvedValueOnce({ ...baseline, events: [oldCancel, newCancel] });
+		vi.mocked(remoteAgent.localOperations).mockResolvedValue([]);
+		vi.mocked(remoteAgent.execute).mockResolvedValue({ status: "accepted" });
+		const { sessions } = await transport.listSessions();
+		const accepted = await transport.run(
+			{ sessionId: sessions[0].sessionId, prompt: "Try again" },
+			"runtime",
+		);
+		expect(emitTo).not.toHaveBeenCalled();
+		accepted.follow();
+		await vi.waitFor(() => {
+			expect(emitTo).toHaveBeenCalledExactlyOnceWith(
+				{ kind: "WebviewWindow", label: "main" },
+				"agent:completed",
+				expect.objectContaining({
+					sessionId: "runtime",
+					providerSessionId: sessions[0].sessionId,
+					stopReason: "cancelled",
+					content: "",
+					reasoning: "",
+				}),
+			);
+		});
 	});
 
 	it("parses bounded JSON arguments and falls back to raw text", () => {

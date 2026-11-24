@@ -231,7 +231,7 @@
 		"message": "Send a task to the remote Agent",
 		"send": "Send",
 		"cancel": "Cancel remote execution",
-		"uploadPrivate": "Upload a file already imported into app-private storage",
+		"uploadPrivate": "Attach a file",
 		"permission": "Approval required",
 		"allowOnce": "Allow once",
 		"reject": "Reject",
@@ -239,6 +239,7 @@
 		"answer": "Submit answers",
 		"skipQuestion": "Skip this question",
 		"inspectReceipt": "Check receipt",
+		"receiptFound": "Receipt checked. Review the conversation history before continuing.",
 		"unknownOutcome": "This operation may already have executed. Check its receipt and history before starting another task. The original operation will not be sent again automatically.",
 		"continueNewTask": "History reviewed — continue with a new task",
 		"status": {

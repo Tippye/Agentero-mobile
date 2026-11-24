@@ -664,6 +664,20 @@ pub async fn remote_agent_session_models(
     }
     envelope(service.session_models(&session).await)
 }
+/// Host-global model catalog for the picker before any session exists.
+#[tauri::command]
+#[specta::specta]
+pub async fn remote_agent_host_models(
+    host: HostRef,
+    service: State<'_, RemoteAgentService>,
+    provider: State<'_, Arc<DshRemoteProvider>>,
+    accounts: State<'_, RemoteAgentAccounts>,
+) -> Result<ApiResult<Option<RemoteSessionModels>>, String> {
+    if let Err(error) = preflight(&host.connection, &accounts, &provider).await {
+        return Ok(map_err(error));
+    }
+    envelope(service.host_models(&host).await)
+}
 #[tauri::command]
 #[specta::specta]
 pub async fn remote_agent_execute(
@@ -674,13 +688,7 @@ pub async fn remote_agent_execute(
     background: State<'_, Arc<crate::features::mobile_background::MobileBackgroundService>>,
     monitors: State<'_, Arc<background::RemoteBackgroundMonitors>>,
 ) -> Result<ApiResult<OperationOutcome>, String> {
-    if let Err(error) = preflight(
-        &request.mutation.workspace().host.connection,
-        &accounts,
-        &provider,
-    )
-    .await
-    {
+    if let Err(error) = preflight(&request.mutation.host().connection, &accounts, &provider).await {
         return Ok(map_err(error));
     }
     if matches!(request.mutation, Mutation::UploadAttachment { .. }) {
