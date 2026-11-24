@@ -1,10 +1,11 @@
 import type { TFunction } from "i18next";
-import { LoaderCircle, Trash2 } from "lucide-react";
+import { ChevronDown, LoaderCircle, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
 	PromptInput,
 	PromptInputBody,
+	PromptInputFooter,
 	PromptInputSubmit,
 	PromptInputTextarea,
 } from "@/components/agent/composer/prompt-input";
@@ -14,6 +15,7 @@ import {
 	ConversationEmptyState,
 	ConversationScrollButton,
 } from "@/components/agent/conversation";
+import { Suggestion } from "@/components/agent/elements/suggestion";
 import {
 	Message,
 	MessageContent,
@@ -38,10 +40,20 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuRadioGroup,
+	DropdownMenuRadioItem,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
 	MessageScrollerContent,
 	MessageScrollerItem,
 } from "@/components/ui/message-scroller";
 import { Shimmer } from "@/components/ui/shimmer";
+import type { AgentModelsEvent, WarmResult } from "@/lib/agent/api";
+import { SUGGESTION_KEYS, SUGGESTION_WORKFLOW } from "@/lib/agent/chat-state";
 import { displayHistoryTitle } from "@/lib/agent/prompt-display";
 import { bridgeRpc } from "@/lib/bridge/client";
 import { errorText } from "@/lib/core/error";
@@ -71,6 +83,7 @@ function phaseStatusLabel(
 export function MobileAgentPage({
 	active = true,
 	selectedAgentId,
+	paperPath,
 	sessionId,
 	onSessionId,
 	historyOpen,
@@ -79,12 +92,14 @@ export function MobileAgentPage({
 	/** Hidden mounted readers retain their session, but must not own global dialogs. */
 	active?: boolean;
 	selectedAgentId: string | null;
+	paperPath?: string;
 	sessionId: string | null;
 	onSessionId: (sessionId: string | null) => void;
 	historyOpen: boolean;
 	onHistoryOpenChange: (open: boolean) => void;
 }) {
-	const { t } = useTranslation("mobile");
+	const { t } = useTranslation(["mobile", "agent", "common"]);
+	const [modelId, setModelId] = useState<string>();
 	const {
 		lines,
 		sending,
@@ -104,13 +119,19 @@ export function MobileAgentPage({
 		.reverse()
 		.find((line) => line.role === "assistant" && line.streaming);
 	const pendingLabel = phaseStatusLabel(phase, t);
+	const composerDisabled = sending || restoring;
+	const suggestions = paperPath
+		? SUGGESTION_KEYS
+		: SUGGESTION_KEYS.filter(
+				(key) => key === "askLibrary" || key === "draftRelatedWork",
+			);
 
 	return (
 		<>
 			<section className="flex h-full min-h-0 flex-col">
 				<Conversation className="min-h-0 flex-1">
-					<ConversationContent className="gap-5 px-4 py-5 md:px-6">
-						<MessageScrollerContent className="gap-5">
+					<ConversationContent className="mx-auto w-full max-w-3xl gap-3 px-4 py-3 md:px-6">
+						<MessageScrollerContent className="gap-3">
 							{restoring ? (
 								<MessageScrollerItem messageId="restoring">
 									<p className="mb-3 flex items-center gap-2 text-muted-foreground text-sm">
@@ -121,10 +142,29 @@ export function MobileAgentPage({
 							) : null}
 							{lines.length === 0 && !restoring ? (
 								<MessageScrollerItem messageId="empty">
-									<ConversationEmptyState
-										className="min-h-0 flex-1 p-4 text-base"
-										title={t("agent.empty")}
-									/>
+									<ConversationEmptyState className="min-h-0 flex-1 px-0 py-5">
+										<h3 className="font-medium text-sm">{t("agent.empty")}</h3>
+										<div className="flex w-full max-w-sm flex-col gap-1.5">
+											{suggestions.map((key) => (
+												<Suggestion
+													key={key}
+													suggestion={t(`agent:suggestions.${key}`)}
+													className="h-auto min-h-11 w-full justify-start whitespace-normal rounded-lg px-3 py-2 text-left"
+													disabled={composerDisabled}
+													onClick={(value) =>
+														void send(value, {
+															modelId,
+															workflow: SUGGESTION_WORKFLOW[key],
+															target:
+																key === "summarizePaper" || key === "listClaims"
+																	? paperPath
+																	: undefined,
+														})
+													}
+												/>
+											))}
+										</div>
+									</ConversationEmptyState>
 								</MessageScrollerItem>
 							) : (
 								<>
@@ -141,7 +181,7 @@ export function MobileAgentPage({
 									{sending && !streamingAssistant ? (
 										<MessageScrollerItem messageId="pending">
 											<Message from="assistant" className="max-w-full">
-												<MessageContent className="text-base leading-6">
+												<MessageContent className="text-sm leading-relaxed">
 													<Shimmer className="text-sm">
 														{pendingLabel ?? t("agent.thinking")}
 													</Shimmer>
@@ -156,25 +196,33 @@ export function MobileAgentPage({
 					<ConversationScrollButton className="bottom-3 size-8 shadow-raised" />
 				</Conversation>
 				<PromptInput
-					className="shrink-0 rounded-none border-0 border-t bg-muted/10 p-3.5 shadow-none md:px-6"
-					inputGroupClassName="overflow-visible"
-					onSubmit={({ text: value }) => void send(value)}
+					className="mx-auto max-w-3xl shrink-0 px-3 pt-1 pb-2 md:px-6"
+					inputGroupClassName="rounded-xl bg-background shadow-raised"
+					onSubmit={({ text: value }) => void send(value, { modelId })}
 				>
 					<PromptInputBody>
-						<div className="flex w-full items-center gap-1 rounded-xl border bg-background px-1.5 py-0.5">
-							<PromptInputTextarea
-								placeholder={t("agent.placeholder")}
-								disabled={sending}
-								rows={1}
-								className="min-h-10 max-h-32 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-base shadow-none focus-visible:ring-0 md:text-base"
-							/>
-							<PromptInputSubmit
-								status={sending ? "submitted" : "ready"}
-								disabled={sending}
-								className="shrink-0"
-							/>
-						</div>
+						<PromptInputTextarea
+							aria-label={t("agent.placeholder")}
+							placeholder={t("agent.placeholder")}
+							disabled={composerDisabled}
+							rows={1}
+							className="min-h-10 max-h-32 resize-none px-3 pt-2.5 pb-1 text-base"
+						/>
 					</PromptInputBody>
+					<PromptInputFooter className="px-1.5 py-0">
+						<MobileBridgeModelMenu
+							active={active}
+							agentId={selectedAgentId}
+							disabled={composerDisabled}
+							modelId={modelId}
+							onModelChange={setModelId}
+						/>
+						<PromptInputSubmit
+							status={sending ? "submitted" : "ready"}
+							disabled={composerDisabled}
+							className="size-11 shrink-0 touch-manipulation"
+						/>
+					</PromptInputFooter>
 				</PromptInput>
 			</section>
 			<MobilePermissionDialog
@@ -198,6 +246,115 @@ export function MobileAgentPage({
 	);
 }
 
+function MobileBridgeModelMenu({
+	active,
+	agentId,
+	disabled,
+	modelId,
+	onModelChange,
+}: {
+	active: boolean;
+	agentId: string | null;
+	disabled: boolean;
+	modelId: string | undefined;
+	onModelChange: (modelId: string) => void;
+}) {
+	const { t } = useTranslation(["agent", "common"]);
+	const [open, setOpen] = useState(false);
+	const [catalog, setCatalog] = useState<AgentModelsEvent | null>();
+	const [loading, setLoading] = useState(false);
+	const [failed, setFailed] = useState(false);
+	const loadInFlight = useRef(false);
+	const currentId = modelId ?? catalog?.currentId;
+	const selectedModel = catalog?.models.find((model) => model.id === currentId);
+
+	useEffect(() => {
+		if (!active) setOpen(false);
+	}, [active]);
+
+	const loadModels = async () => {
+		if (loadInFlight.current || catalog !== undefined) return;
+		loadInFlight.current = true;
+		setLoading(true);
+		setFailed(false);
+		try {
+			const result = await bridgeRpc<WarmResult>("agent_warm", {
+				agentId: agentId ?? undefined,
+			});
+			if (!result.ok)
+				throw new Error(result.error ?? t("common:somethingWrong"));
+			setCatalog(result.models ?? null);
+		} catch (error) {
+			setFailed(true);
+			notifyError(errorText(error) || t("common:somethingWrong"));
+		} finally {
+			loadInFlight.current = false;
+			setLoading(false);
+		}
+	};
+
+	return (
+		<DropdownMenu
+			open={active && open}
+			onOpenChange={(next) => {
+				setOpen(next);
+				if (next) void loadModels();
+			}}
+		>
+			<DropdownMenuTrigger asChild disabled={disabled}>
+				<Button
+					type="button"
+					variant="ghost"
+					size="sm"
+					className="h-11 min-w-0 max-w-[calc(100%-3.25rem)] gap-1.5 rounded-lg px-2.5"
+					title={t("models.selectTooltip")}
+				>
+					<span className="truncate">
+						{selectedModel?.name ?? t("models.button")}
+					</span>
+					<ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+				</Button>
+			</DropdownMenuTrigger>
+			<DropdownMenuContent side="top" className="w-64 max-w-[calc(100vw-2rem)]">
+				{loading ? (
+					<DropdownMenuItem disabled className="min-h-11">
+						{t("models.loading")}
+					</DropdownMenuItem>
+				) : failed ? (
+					<DropdownMenuItem
+						className="min-h-11"
+						onSelect={(event) => {
+							event.preventDefault();
+							void loadModels();
+						}}
+					>
+						{t("common:tryAgain")}
+					</DropdownMenuItem>
+				) : catalog?.models.length ? (
+					<DropdownMenuRadioGroup
+						value={currentId}
+						onValueChange={onModelChange}
+					>
+						{catalog.models.map((model) => (
+							<DropdownMenuRadioItem
+								key={model.id}
+								value={model.id}
+								className="min-h-11"
+							>
+								<span className="min-w-0 wrap-break-word">{model.name}</span>
+							</DropdownMenuRadioItem>
+						))}
+					</DropdownMenuRadioGroup>
+				) : (
+					<DropdownMenuItem disabled className="min-h-11">
+						{t("models.emptyCatalog")}
+					</DropdownMenuItem>
+				)}
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
 function MobileChatLine({
 	line,
 	label = null,
@@ -216,8 +373,8 @@ function MobileChatLine({
 		>
 			<MessageContent
 				className={cn(
-					"text-base leading-6",
-					line.role === "user" && "rounded-lg bg-muted px-3 py-2.5",
+					"text-sm leading-relaxed",
+					line.role === "user" && "rounded-lg bg-muted px-3 py-2",
 					line.role === "assistant" && "w-full max-w-full",
 				)}
 			>
