@@ -267,7 +267,7 @@ export async function translatePaperLayoutHeadless(opts: {
 				items: seedItems,
 				regions: rawRegions,
 			},
-			{ writesEnabled: () => loadSettings().translate.cacheReflowIr },
+			{ writesEnabled: () => true },
 		);
 		return prepareReflowItems(
 			engine,
@@ -353,11 +353,7 @@ export async function translatePaperLayoutHeadless(opts: {
 		total,
 	});
 
-	if (
-		!signal?.aborted &&
-		loadSettings().translate.cacheReflowFinal &&
-		translated > 0
-	) {
+	if (!signal?.aborted && translated > 0) {
 		await withDocument((engine, doc) =>
 			buildFinalCache({
 				engine,
@@ -367,6 +363,7 @@ export async function translatePaperLayoutHeadless(opts: {
 				pdfBytes,
 				paperKey: opts.paperKey,
 				paperAbsPath: opts.paperAbsPath,
+				identity: cacheKey,
 				signal,
 				report,
 			}),
@@ -412,6 +409,7 @@ async function buildFinalCache(opts: {
 	pdfBytes: ArrayBuffer;
 	paperKey: string | null;
 	paperAbsPath: string;
+	identity: LayoutTranslateCacheKey;
 	signal?: AbortSignal;
 	report: (args: TaskReportArgs) => void;
 }): Promise<void> {
@@ -431,8 +429,10 @@ async function buildFinalCache(opts: {
 				paperKey: opts.paperKey,
 				paperAbsPath: opts.paperAbsPath,
 				pdfBytes: opts.pdfBytes,
+				localOnly: !loadSettings().translate.cacheTranslationSync,
+				identity: () => opts.identity,
 			},
-			{ writesEnabled: () => loadSettings().translate.cacheReflowFinal },
+			{ writesEnabled: () => true },
 		);
 		const cached = await cache.readFinal(ir, translations, fonts);
 		opts.signal?.throwIfAborted();

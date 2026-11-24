@@ -690,7 +690,11 @@
 			"final": {
 				"label": "缓存译文 PDF"
 			},
-			"tip": "关闭开关只停止写入新文件，已有缓存仍会复用。",
+			"translation": {
+				"label": "翻译缓存",
+				"help": "默认开启：译文 sidecar 与译文 PDF 随知识库同步；版面解析结果始终同步。关闭时译文缓存只保存在本机，删除论文或应用时一并清理。"
+			},
+			"tip": "关闭后译文缓存不再上传，但仍在本机生成和复用。",
 			"reset": "还原默认",
 			"dictionary": {
 				"label": "查词缓存",
@@ -1303,8 +1307,6 @@
 		"scopePdf": "PDF 文件",
 		"scopeSource": "LaTeX 源码",
 		"scopeAttachments": "支撑材料",
-		"scopeTranslated": "翻译版 PDF",
-		"scopeTranslatedHint": "完整译文 PDF 保存在论文目录的 translated/ 中，仅在「设置 → 翻译 → 缓存 → 缓存译文 PDF」开启时生成；此开关控制是否上传。",
 		"scopeInk": "手写笔迹"
 	},
 	"cloudSync": {

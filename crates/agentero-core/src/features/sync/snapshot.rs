@@ -121,11 +121,14 @@ impl SyncScope {
 pub fn scope_category(rel: &str) -> Option<&'static str> {
     let rest = rel.strip_prefix("papers/")?;
     let (_, tail) = rest.split_once('/')?;
-    // Reading layout and completed translations are shared metadata, not
-    // re-downloadable TeX assets. Translations also gate cross-device reuse of
-    // the finished translated PDF, so they must travel with `source` disabled.
-    if tail == "source/layout.json" || tail == "source/layout-translate.json" {
+    // Reading layout (raw + sidebar index) is required for figures, citations and
+    // deferred-paper availability, so it always travels. The translation sidecar
+    // belongs to the translation cache and follows the switch.
+    if tail == "source/layout.json" || tail == "source/layout-index.json" {
         return None;
+    }
+    if tail == "source/layout-translate.json" {
+        return Some("translated");
     }
     if tail == "translated" || tail.starts_with("translated/") {
         return Some("translated");
@@ -376,7 +379,6 @@ mod tests {
                 "loose.pdf",
                 "papers/x/NOTES.md",
                 "papers/x/attachments/supp.pdf",
-                "papers/x/source/layout-translate.json",
                 "papers/x/source/layout.json"
             ]
         );
@@ -417,7 +419,7 @@ mod tests {
         assert_eq!(scope_category("papers/x/source/layout.json"), None);
         assert_eq!(
             scope_category("papers/x/source/layout-translate.json"),
-            None
+            Some("translated")
         );
         assert_eq!(scope_category("papers/x/source"), Some("source"));
         assert_eq!(
