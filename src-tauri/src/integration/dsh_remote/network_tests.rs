@@ -92,6 +92,33 @@ async fn configured(
 }
 
 #[tokio::test]
+async fn reselecting_the_active_trusted_host_does_not_dial_again() {
+    let provider = DshRemoteProvider::default();
+    let (rpc, _) = RpcClient::pending_test_client();
+    let state = configured(&provider, "configured", true, rpc.clone()).await;
+    let host = HostRef {
+        connection: ConnectionRef {
+            provider_id: DEFAULT_PROVIDER_ID.into(),
+            connection_id: "configured".into(),
+        },
+        host_id: "selected-host".into(),
+    };
+    provider
+        .select_host(&host, "unchanged-pin".into())
+        .await
+        .unwrap();
+    provider.resume(&host.connection).await.unwrap();
+    assert!(!rpc.is_closed());
+    assert!(
+        state.lock().await.hosts["selected-host"]
+            .native
+            .is_healthy()
+            .await
+    );
+    rpc.close().await;
+}
+
+#[tokio::test]
 async fn network_hint_closes_only_live_rpcs_preserves_authority_and_unknown_receipts() {
     let provider = DshRemoteProvider::default();
     let (active_rpc, admitted) = RpcClient::pending_test_client();

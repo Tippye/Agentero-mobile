@@ -579,32 +579,21 @@ pub async fn remote_agent_trust_host(
                 account.pins.get(&host.host_id.0),
                 Some(&expected_fingerprint),
             )?;
-            // A captured observer must not reconnect the previously selected Host.
-            monitors.select_host(&host);
             current
                 .pin(
                     &host.connection,
                     host.host_id.0.clone(),
-                    identity.identity_key,
+                    identity.identity_key.clone(),
                     accounts.store.as_ref(),
                 )
                 .await?;
-            let account = account_for(&mut current.account, &host.connection)?;
-            service.disconnect(&host.connection).await?;
+            // A captured observer must not reconnect the previously selected Host.
+            monitors.select_host(&host);
             provider
-                .configure(
-                    host.connection.connection_id.0.clone(),
-                    configuration(account),
-                )
+                .select_host(&host, identity.identity_key)
                 .await
                 .map_err(remote)?;
-            service
-                .connect(&ConnectRequest {
-                    connection: host.connection.clone(),
-                    config_version: 1,
-                })
-                .await?;
-            provider.select_host(&host).await.map_err(remote)?;
+            let account = account_for(&mut current.account, &host.connection)?;
             let info = service.resume(&host.connection).await?;
             account.view.info = info.clone();
             Ok(info)
