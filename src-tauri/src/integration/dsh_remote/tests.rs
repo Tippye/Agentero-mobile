@@ -303,6 +303,124 @@ async fn send_remote(
 }
 
 #[tokio::test]
+async fn offline_saved_host_keeps_account_catalog_and_explicit_selection_available() {
+    use super::provider::{DshConnectionConfig, DshRemoteProvider};
+    use crate::features::remote_agent::{
+        ConnectRequest, ConnectionRef, HostRef, RemoteAgentService, DEFAULT_PROVIDER_ID,
+    };
+    use std::{collections::HashMap, sync::Arc};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let offline = DeviceIdentity::generate("a-offline".into()).unwrap();
+    let chosen = DeviceIdentity::generate("z-selected".into()).unwrap();
+    let client = DeviceIdentity::generate("client".into()).unwrap();
+    let row = |device: &DeviceIdentity| {
+        json!({"deviceId":device.device_id,"name":device.device_id,"role":"host",
+               "platform":"test","membershipId":"member","identityKey":device.public_key})
+    };
+    let offline_row = row(&offline);
+    let chosen_row = row(&chosen);
+    let server = tokio::spawn(async move {
+        let list = json!({"items":[offline_row.clone(),chosen_row.clone()]});
+        let replies = [
+            ("/api/v1/devices?limit=50", list.clone()),
+            ("/api/v1/devices/a-offline", offline_row.clone()),
+            (
+                "/api/v1/devices/a-offline/presence",
+                json!({"deviceId":"a-offline","online":false}),
+            ),
+            ("/api/v1/devices/z-selected", chosen_row.clone()),
+            (
+                "/api/v1/devices/z-selected/presence",
+                json!({"deviceId":"z-selected","online":true}),
+            ),
+        ];
+        for (path, reply) in replies {
+            let (socket, _) = listener.accept().await.unwrap();
+            assert!(http_reply(socket, reply)
+                .await
+                .starts_with(&format!("GET {path} ")));
+        }
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(socket).await.unwrap();
+        assert_eq!(read_ws(&mut socket).await.kind, "hello");
+        write_ws(&mut socket, "hello.ack", json!({"protocol":1,"serverVersion":"fixture","connectionSessionId":"control-session","heartbeatIntervalMs":1000,"maxControlFrameBytes":MAX_CONTROL_BYTES,"maxRelayFrameBytes":MAX_RELAY_BYTES,"capabilities":["transport.relay"]})).await;
+        let selection = read_ws(&mut socket).await;
+        assert_eq!(selection.kind, "connect.request");
+        assert_eq!(selection.payload["hostDeviceId"], "z-selected");
+        write_ws(&mut socket, "error", json!({"code":"HOST_OFFLINE"})).await;
+
+        // A failure on the relay still allows an account-scoped Host refresh.
+        for (path, reply) in [
+            ("/api/v1/devices?limit=50", list),
+            ("/api/v1/devices/a-offline", offline_row),
+            (
+                "/api/v1/devices/a-offline/presence",
+                json!({"deviceId":"a-offline","online":false}),
+            ),
+            ("/api/v1/devices/z-selected", chosen_row),
+            (
+                "/api/v1/devices/z-selected/presence",
+                json!({"deviceId":"z-selected","online":true}),
+            ),
+        ] {
+            let (socket, _) = listener.accept().await.unwrap();
+            assert!(http_reply(socket, reply)
+                .await
+                .starts_with(&format!("GET {path} ")));
+        }
+    });
+    let service = RemoteAgentService::default();
+    let provider = Arc::new(DshRemoteProvider::default());
+    service.register(provider.clone()).unwrap();
+    let connection = ConnectionRef {
+        provider_id: DEFAULT_PROVIDER_ID.into(),
+        connection_id: "fixture".into(),
+    };
+    provider
+        .configure(
+            connection.connection_id.0.clone(),
+            DshConnectionConfig {
+                api: ServerApi::new(&origin, Duration::from_secs(2)).unwrap(),
+                identity: client,
+                access_token: "fixture-device-access-token".into(),
+                pinned_hosts: HashMap::from([(
+                    offline.device_id.clone(),
+                    offline.public_key.clone(),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .connect(&ConnectRequest {
+            connection: connection.clone(),
+            config_version: 1,
+        })
+        .await
+        .unwrap();
+    let host = HostRef {
+        connection: connection.clone(),
+        host_id: chosen.device_id.as_str().into(),
+    };
+    let error = provider
+        .select_host(&host, chosen.public_key.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "HOST_OFFLINE");
+    let rows = service.list_hosts(&connection).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].online, Some(false));
+    assert_eq!(rows[1].online, Some(true));
+    assert!(rows[1].pinned);
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn real_rest_noise_relay_rpc_timeout_never_replays_mutation() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());

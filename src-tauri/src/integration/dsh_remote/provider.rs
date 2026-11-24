@@ -163,6 +163,13 @@ impl DshRemoteProvider {
     pub async fn connect_host(&self, host: &HostRef) -> Result<RpcClient> {
         let state = self.connection(&host.connection).await?;
         let mut state = state.lock().await;
+        Self::connect_host_locked(&mut state, host, false).await
+    }
+    async fn connect_host_locked(
+        state: &mut Connection,
+        host: &HostRef,
+        allow_switch: bool,
+    ) -> Result<RpcClient> {
         if !state.connected {
             return Err(RemoteError::new(
                 "AUTH_REQUIRED",
@@ -174,10 +181,11 @@ impl DshRemoteProvider {
                 return Ok(runtime.rpc.clone());
             }
         }
-        if state
-            .hosts
-            .iter()
-            .any(|(id, active)| id != &host.host_id.0 && !active.rpc.is_closed())
+        if !allow_switch
+            && state
+                .hosts
+                .iter()
+                .any(|(id, active)| id != &host.host_id.0 && !active.rpc.is_closed())
         {
             return Err(RemoteError::new("CONNECTION_IN_USE", "This client identity already controls another Host; select_host must explicitly switch it"));
         }
@@ -223,27 +231,17 @@ impl DshRemoteProvider {
         );
         Ok(rpc)
     }
-    /// Explicitly switch the single active Host for this registered client.
-    /// The caller must refresh shared-service capabilities through resume after
-    /// selection; no pending operation or interaction answer is replayed.
-    pub async fn select_host(&self, host: &HostRef) -> Result<ConnectionInfo> {
+    /// Apply the persisted pin and open only the explicitly selected Host.
+    /// The caller refreshes shared-service capabilities through resume.
+    pub async fn select_host(&self, host: &HostRef, pinned_key: String) -> Result<()> {
         let state = self.connection(&host.connection).await?;
-        {
-            let mut state = state.lock().await;
-            if !state.connected {
-                return Err(RemoteError::new(
-                    "AUTH_REQUIRED",
-                    "Connect the account before selecting a Host",
-                ));
-            }
-            let previous = std::mem::take(&mut state.hosts);
-            for runtime in previous.into_values() {
-                runtime.rpc.close().await;
-            }
-        }
-        self.connect_host(host).await?;
-        let state = state.lock().await;
-        Ok(info(&host.connection, &state))
+        let mut state = state.lock().await;
+        state
+            .config
+            .pinned_hosts
+            .insert(host.host_id.0.clone(), pinned_key);
+        Self::connect_host_locked(&mut state, host, true).await?;
+        Ok(())
     }
     async fn mutate(&self, request: &OperationRequest) -> Result<OperationOutcome> {
         let host_ref = request.mutation.host();
@@ -473,6 +471,9 @@ impl RemoteAgentProvider for DshRemoteProvider {
             .map_err(app_error)?;
         let hosts = {
             let mut state = state.lock().await;
+            if state.connected && state.hosts.values().any(|runtime| !runtime.rpc.is_closed()) {
+                return Ok(info(&request.connection, &state));
+            }
             let hosts = state
                 .config
                 .api
@@ -480,32 +481,32 @@ impl RemoteAgentProvider for DshRemoteProvider {
                 .await
                 .map_err(app_error)?;
             state.connected = true;
-            if state.hosts.values().any(|runtime| !runtime.rpc.is_closed()) {
-                vec![]
-            } else {
-                let mut candidates = hosts
-                    .into_iter()
-                    .filter(|host| {
-                        // Absent presence is not an offline verdict; the pinned
-                        // descriptor check in connect_host still fails closed.
-                        host.online != Some(false)
-                            && state.config.pinned_hosts.contains_key(&host.device_id)
-                    })
-                    .collect::<Vec<_>>();
-                candidates.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-                candidates.into_iter().take(1).collect::<Vec<_>>()
-            }
-        };
-        for host in hosts {
-            if let Err(error) = self
-                .connect_host(&HostRef {
-                    connection: request.connection.clone(),
-                    host_id: HostId(host.device_id),
+            hosts
+                .into_iter()
+                .filter(|host| {
+                    // Presence can be omitted; connect_host checks the descriptor.
+                    host.online != Some(false)
+                        && state.config.pinned_hosts.contains_key(&host.device_id)
                 })
-                .await
-            {
-                let _ = self.disconnect(&request.connection).await;
-                return Err(app_error(error));
+                .min_by(|left, right| left.device_id.cmp(&right.device_id))
+        };
+        if let Some(host) = hosts {
+            let host = HostRef {
+                connection: request.connection.clone(),
+                host_id: HostId(host.device_id),
+            };
+            if let Err(error) = self.connect_host(&host).await {
+                // REST already authenticated the account. Its Host picker must
+                // remain available if the previously trusted Host is unreachable.
+                log::warn!(
+                    target: "agentero::dsh_remote",
+                    "Automatic Remote Host connection failed ({})",
+                    match error.code.as_str() {
+                        "HOST_OFFLINE" => "Host offline",
+                        "PEER_IDENTITY_MISMATCH" => "Host identity mismatch",
+                        _ => "Host setup failed",
+                    }
+                );
             }
         }
         let state = state.lock().await;

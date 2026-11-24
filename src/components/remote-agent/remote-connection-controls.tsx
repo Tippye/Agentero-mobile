@@ -47,7 +47,10 @@ function sameConnection(left?: ConnectionRef, right?: ConnectionRef) {
 	);
 }
 
-export function useRemoteConnection(enabled: boolean): {
+export function useRemoteConnection(
+	enabled: boolean,
+	active = enabled,
+): {
 	controls: ReactNode;
 	setup: ReactNode;
 	host: HostInfo | null;
@@ -143,8 +146,13 @@ export function useRemoteConnection(enabled: boolean): {
 	);
 
 	useEffect(() => {
-		if (enabled) void run(reload);
-	}, [enabled, reload, run]);
+		if (!enabled || !active) return;
+		const refresh = () => void run(reload);
+		refresh();
+		// Settings and the Agent panel share the native account across windows.
+		window.addEventListener("focus", refresh);
+		return () => window.removeEventListener("focus", refresh);
+	}, [enabled, active, reload, run]);
 
 	function signInCatalog(value: RemoteAgentCatalog) {
 		adoptCatalog(value);

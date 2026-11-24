@@ -70,8 +70,10 @@ export const AgentPanel = memo(function AgentPanel(props: AgentPanelProps) {
 	useEffect(() => {
 		if (remoteActive) setRemoteOpened(true);
 	}, [remoteActive]);
-	const { controls, setup, host, connection } =
-		useRemoteConnection(remoteOpened);
+	const { controls, setup, host, connection } = useRemoteConnection(
+		remoteOpened,
+		remoteActive,
+	);
 	const scopeId = `dsh-remote:${useId()}`;
 	const transport = useMemo(
 		() =>
