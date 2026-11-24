@@ -293,7 +293,7 @@ it("opens the real settings page from the real Sidebar while keeping runtime own
 	const translate = settingsPage();
 	expect(translate?.textContent).toContain("translate.title");
 	expect(translate?.textContent).not.toContain("appearance.title");
-	expect(document.querySelector("#translate-cache-ir")).not.toBeNull();
+	expect(document.querySelector("#translate-cache-translation")).not.toBeNull();
 	await clickLabel("settings:nav.layout");
 	const layout = settingsPage();
 	expect(layout?.textContent).toContain("layout.title");
