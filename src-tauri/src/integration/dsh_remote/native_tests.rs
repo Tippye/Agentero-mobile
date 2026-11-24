@@ -201,12 +201,14 @@ async fn official_native_catalog_history_and_workspace_ownership() {
     assert!(snapshot.events.iter().any(|event| event.payload
         == EventPayload::Message {
             role: "user".into(),
-            text: "Native prompt".into()
+            text: "Native prompt".into(),
+            reasoning: None,
         }));
     assert!(snapshot.events.iter().any(|event| event.payload
         == EventPayload::Message {
             role: "assistant".into(),
-            text: "Native response".into()
+            text: "Native response".into(),
+            reasoning: None,
         }));
     assert_eq!(snapshot.cursor.unwrap(), model::cursor(&session, 4));
     assert_call(&wire, "session/page", "page");
@@ -652,4 +654,58 @@ async fn subscription_bridges_official_snapshot_and_preserves_event_cursor_ident
         value: "4".into(),
     };
     assert!(host.subscribe(&session, Some(&bad)).await.is_err());
+}
+
+#[tokio::test]
+async fn native_projection_keeps_human_messages_reasoning_and_tool_rows() {
+    let session = session();
+    // Injected model-facing context is not a human turn and must not render.
+    let injected = json!({"type":"user/message","seq":10,"data":{"message":{"id":"ctx","role":"user","source":{"kind":"plugin"},"content":[{"type":"text","text":"Current runtime context…"}]}}});
+    assert!(model::events(&session, &injected).unwrap().is_empty());
+    // Assistant reasoning rides along with the reply instead of a raw bubble.
+    let reply = json!({"type":"assistant/message","seq":11,"data":{"message":{"id":"a1","role":"assistant","content":[{"type":"reasoning","text":"Thinking it through"},{"type":"text","text":"The answer"}]}}});
+    let events = model::events(&session, &reply).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].payload,
+        EventPayload::Message {
+            role: "assistant".into(),
+            text: "The answer".into(),
+            reasoning: Some("Thinking it through".into()),
+        }
+    );
+    // Call and result share one correlation ID so the UI folds them together.
+    let call = json!({"type":"tool/call","seq":12,"data":{"callId":"call-1","name":"terminal","arguments":"{\"command\":\"ls\"}"}});
+    let result = json!({"type":"tool/result","seq":13,"data":{"message":{"source":{"callId":"call-1"},"content":[{"type":"tool-result","content":[{"type":"text","text":"file-a\nfile-b"}]}]}}});
+    let call_events = model::events(&session, &call).unwrap();
+    let result_events = model::events(&session, &result).unwrap();
+    assert_eq!(call_events[0].source_id, "tool:call-1");
+    assert_eq!(result_events[0].source_id, "tool:call-1");
+    assert_eq!(
+        call_events[0].payload,
+        EventPayload::Tool {
+            call_id: "call-1".into(),
+            name: "terminal".into(),
+            state: "running".into(),
+            arguments: Some("{\"command\":\"ls\"}".into()),
+            output: None,
+        }
+    );
+    assert_eq!(
+        result_events[0].payload,
+        EventPayload::Tool {
+            call_id: "call-1".into(),
+            name: "Tool".into(),
+            state: "finished".into(),
+            arguments: None,
+            output: Some("file-a\nfile-b".into()),
+        }
+    );
+    // An errored result is a failed row, never a silent success.
+    let failed = json!({"type":"tool/result","seq":14,"data":{"callId":"call-2","name":"edit","isError":true,"message":{"content":[{"type":"text","text":"denied"}]}}});
+    let failed_events = model::events(&session, &failed).unwrap();
+    assert!(matches!(
+        &failed_events[0].payload,
+        EventPayload::Tool { state, .. } if state == "failed"
+    ));
 }

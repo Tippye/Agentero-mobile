@@ -54,6 +54,7 @@ fn event(session: &SessionRef, stream: &str, id: &str) -> RemoteEvent {
         payload: EventPayload::Message {
             role: "assistant".into(),
             text: id.into(),
+            reasoning: None,
         },
     }
 }

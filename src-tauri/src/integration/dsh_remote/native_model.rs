@@ -162,36 +162,91 @@ pub(crate) fn records(page: &Value, through: i64) -> Result<Vec<Value>> {
     }
     Ok(rows.clone())
 }
-pub(crate) fn event(session: &SessionRef, native: &Value) -> Result<Option<RemoteEvent>> {
+/// Project one native event into zero or more shared events. Tool calls and
+/// results keep the native correlation ID so clients fold them into one row;
+/// reasoning blocks ride along with their assistant message.
+pub(crate) fn events(session: &SessionRef, native: &Value) -> Result<Vec<RemoteEvent>> {
     let seq = integer(native, "seq")?;
     let kind = string(native, "type")?;
     let data = native.get("data").unwrap_or(&Value::Null);
+    let make = |source_id: String, payload: EventPayload| RemoteEvent {
+        session: session.clone(),
+        source_stream_id: source_stream(session),
+        source_id,
+        cursor: Some(cursor(session, seq as i64)),
+        payload,
+    };
     let payload = match kind {
-        "user/message" | "assistant/message" => {
-            let content = data
-                .pointer("/message/content")
-                .or_else(|| data.get("content"))
-                .and_then(Value::as_array)
-                .ok_or_else(|| RemoteError::invalid("Missing native message content"))?;
-            let text = content
-                .iter()
-                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-                .map(|part| {
-                    part.get("text")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| RemoteError::invalid("Invalid native text content"))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .join("\n");
-            EventPayload::Message {
-                role: if kind == "user/message" {
-                    "user"
-                } else {
-                    "assistant"
-                }
-                .into(),
-                text,
+        "user/message" => {
+            // Harness also records model-facing injected context (runtime
+            // snapshots, skill bodies, notices) as user/message. Only the
+            // explicit human source belongs in the conversation transcript.
+            if data.pointer("/message/source/kind").and_then(Value::as_str) != Some("user") {
+                return Ok(Vec::new());
             }
+            let content = message_content(data)?;
+            let text = content_text(content, "text")?;
+            if text.is_empty() {
+                return Ok(Vec::new());
+            }
+            EventPayload::Message {
+                role: "user".into(),
+                text,
+                reasoning: None,
+            }
+        }
+        "assistant/message" => {
+            let content = message_content(data)?;
+            let text = content_text(content, "text")?;
+            let reasoning = content_text(content, "reasoning")?;
+            if text.is_empty() && reasoning.is_empty() {
+                return Ok(Vec::new());
+            }
+            EventPayload::Message {
+                role: "assistant".into(),
+                text,
+                reasoning: (!reasoning.is_empty()).then_some(reasoning),
+            }
+        }
+        "tool/call" | "tool/result" => {
+            let call_id = data
+                .pointer("/message/source/callId")
+                .and_then(Value::as_str)
+                .or_else(|| data.get("callId").and_then(Value::as_str))
+                .or_else(|| data.get("id").and_then(Value::as_str))
+                .ok_or_else(|| RemoteError::invalid("Missing native tool call ID"))?
+                .to_owned();
+            let name = data
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| data.get("toolName").and_then(Value::as_str))
+                .unwrap_or("Tool")
+                .to_owned();
+            let finished = kind == "tool/result";
+            let failed = finished && tool_result_failed(data);
+            let arguments = data
+                .get("arguments")
+                .and_then(Value::as_str)
+                .or_else(|| data.get("argumentsDelta").and_then(Value::as_str))
+                .map(bounded_text);
+            let output = finished.then(|| tool_output_text(data)).flatten();
+            return Ok(vec![make(
+                format!("tool:{call_id}"),
+                EventPayload::Tool {
+                    call_id,
+                    name,
+                    state: if failed {
+                        "failed"
+                    } else if finished {
+                        "finished"
+                    } else {
+                        "running"
+                    }
+                    .into(),
+                    arguments,
+                    output,
+                },
+            )]);
         }
         "turn/start" => EventPayload::TaskStatus {
             status: TaskStatus::Running,
@@ -207,17 +262,75 @@ pub(crate) fn event(session: &SessionRef, native: &Value) -> Result<Option<Remot
                 _ => TaskStatus::Idle,
             },
         },
-        // Chunk, tool, and replacement surfaces have no faithful equivalent in
-        // the shared text-event contract. Final native messages remain intact.
-        _ => return Ok(None),
+        // Streaming chunks and replacement surfaces have no faithful equivalent
+        // in the shared snapshot contract; final native messages remain intact.
+        _ => return Ok(Vec::new()),
     };
-    Ok(Some(RemoteEvent {
-        session: session.clone(),
-        source_stream_id: source_stream(session),
-        source_id: format!("seq:{seq}"),
-        cursor: Some(cursor(session, seq as i64)),
-        payload,
-    }))
+    Ok(vec![make(format!("seq:{seq}"), payload)])
+}
+fn message_content(data: &Value) -> Result<&Vec<Value>> {
+    data.pointer("/message/content")
+        .or_else(|| data.get("content"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| RemoteError::invalid("Missing native message content"))
+}
+fn content_text(content: &[Value], block_type: &str) -> Result<String> {
+    content
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some(block_type))
+        .map(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RemoteError::invalid("Invalid native text content"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join("\n"))
+}
+/// Tool output may live in message.content text blocks or nested tool-result
+/// blocks; join whichever the Host persisted, bounded for the snapshot surface.
+fn tool_output_text(data: &Value) -> Option<String> {
+    let content = data
+        .pointer("/message/content")
+        .or_else(|| data.get("content"))
+        .and_then(Value::as_array)?;
+    let mut parts = Vec::new();
+    for block in content {
+        let block_type = block.get("type").and_then(Value::as_str);
+        if block_type == Some("tool-result") {
+            if let Some(nested) = block.get("content").and_then(Value::as_array) {
+                for inner in nested {
+                    if inner.get("type").and_then(Value::as_str) == Some("text") {
+                        if let Some(text) = inner.get("text").and_then(Value::as_str) {
+                            parts.push(text);
+                        }
+                    }
+                }
+            }
+        } else if block_type == Some("text") {
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                parts.push(text);
+            }
+        }
+    }
+    let joined = parts.join("\n");
+    (!joined.is_empty()).then(|| bounded_text(&joined))
+}
+fn tool_result_failed(data: &Value) -> bool {
+    data.get("isError").and_then(Value::as_bool) == Some(true)
+        || data.get("error").is_some_and(|error| !error.is_null())
+        || data.pointer("/message/isError").and_then(Value::as_bool) == Some(true)
+}
+/// Keep individual tool payloads bounded like the official clients (64 KB).
+fn bounded_text(text: &str) -> String {
+    const LIMIT: usize = 64 * 1024;
+    if text.len() <= LIMIT {
+        return text.to_owned();
+    }
+    let mut end = LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…", &text[..end])
 }
 pub(crate) fn status(
     row: &SessionRow,
