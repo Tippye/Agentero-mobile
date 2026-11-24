@@ -561,6 +561,30 @@ async fn upload_requires_native_grant_and_uses_dedicated_bounded_protocol() {
     assert_eq!(result.path, "./paper.pdf");
     assert_eq!(result.size_bytes, 7);
     assert_eq!(&*wire.uploaded.lock().unwrap(), b"payload");
+    assert_eq!(
+        DshRemoteProvider::mutate_on_host(
+            &host,
+            &operation(
+                "operation-paper-prompt",
+                Mutation::SendMessage {
+                    session: upload.session.clone(),
+                    text: "Summarize the attached paper.".into(),
+                    attachments: vec![result],
+                },
+            ),
+        )
+        .await
+        .unwrap(),
+        OperationOutcome::Accepted
+    );
+    let prompt = wire.calls("session/prompt").pop().unwrap();
+    assert_eq!(
+        prompt.params["payload"]["args"]["request"]["content"],
+        json!([{
+            "type": "text",
+            "text": "Summarize the attached paper.\n\nAttached files in this session's workspace:\n- ./paper.pdf\n"
+        }])
+    );
     {
         let calls = wire.requests.lock().unwrap();
         let opened = calls

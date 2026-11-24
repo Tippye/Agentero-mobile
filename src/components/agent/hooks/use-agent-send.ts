@@ -22,7 +22,10 @@ import type {
 	AgentPanelT,
 } from "@/components/agent/hooks/use-agent-panel-context";
 import type { AgentSessionRuntime } from "@/components/agent/hooks/use-agent-session-runtime";
-import type { QueuedPrompt } from "@/components/agent/types";
+import type {
+	QueuedPrompt,
+	RemotePaperContext,
+} from "@/components/agent/types";
 import type { SessionComposerStateApi } from "@/hooks/use-session-composer-state";
 import i18n, { formatLocaleTimestamp } from "@/i18n";
 import {
@@ -127,6 +130,8 @@ export type SendOptions = {
 	images?: PromptImage[];
 	files?: File[];
 	contextNote?: string;
+	remotePaper?: RemotePaperContext | null;
+	paperFile?: File;
 	/**
 	 * Explicit pin binding for follow-ups (pin modal continue). Preferred
 	 * over reading sessionHistoryRef which may lag store upserts.
@@ -167,6 +172,7 @@ export type AgentTurnConfig = {
 
 export type UseAgentSendOptions = {
 	transport?: RemoteAgentTransport | null;
+	remotePaper?: RemotePaperContext | null;
 	agentListenersReady?: boolean;
 	refs: Pick<
 		AgentPanelRefs,
@@ -240,6 +246,7 @@ export type AgentSend = {
 
 export function useAgentSend({
 	transport,
+	remotePaper = null,
 	agentListenersReady,
 	refs: {
 		activeConversationRef,
@@ -466,6 +473,13 @@ export function useAgentSend({
 			: workflowVaultTarget;
 	};
 
+	const loadRemotePaper = async (paper: RemotePaperContext | null) => {
+		if (!transport || !paper?.includePdf) return undefined;
+		if (!transport.canUpload)
+			throw new Error(t("composer.remotePaperPdfUnsupported"));
+		return paper.source.loadPdf(transport.attachmentLimit);
+	};
+
 	/** Assemble and dispatch the runOnce request for a resolved turn. */
 	const cancelRun = (id: string) =>
 		transport ? transport.cancel(id) : cancelAgentRun(id);
@@ -485,6 +499,7 @@ export function useAgentSend({
 		resumeTranscript?: string;
 		historyTitle: string;
 		files?: File[];
+		paperFile?: File;
 		contextNote?: string;
 	}): Promise<
 		RunOnceAccepted & {
@@ -514,6 +529,7 @@ export function useAgentSend({
 						.join("\n\n"),
 					images: turn.images,
 					files: turn.files,
+					paperFile: turn.paperFile,
 					modelId: turn.resumeSessionId ? undefined : turn.modelId,
 					title: turn.historyTitle,
 				},
@@ -813,9 +829,21 @@ export function useAgentSend({
 				Boolean(transport) ||
 				isChatOnlyAgentTemplate(agentTemplateById(registry, agent.agentId));
 			const turnContextPaths = chatOnly ? [] : resolvedContextPaths;
-			// Chat-only agents get the focused paper's public metadata (never a
-			// local path) so they can answer about "this paper".
-			const turnPaper = chatOnly ? (selectedPaperMeta ?? null) : null;
+			const submittedPaper = options?.remotePaper ?? null;
+			// The paper's catalog metadata gives context without disclosing its Vault path.
+			const turnPaper = chatOnly
+				? (submittedPaper?.source.paper ?? selectedPaperMeta)
+				: null;
+			const paperFile =
+				transport && !isAcpCommand && submittedPaper?.includePdf
+					? (options?.paperFile ?? (await loadRemotePaper(submittedPaper)))
+					: undefined;
+			if (
+				transport &&
+				(sessionContextGeneration !== sessionContextGenRef.current ||
+					requestVaultPath !== vaultPathRef.current)
+			)
+				return false;
 			const plazaScratchByPath = await preparePlazaScratchFor(
 				turnContextPaths,
 				isAcpCommand,
@@ -909,7 +937,16 @@ export function useAgentSend({
 				resumeTranscript,
 				historyTitle,
 				files,
-				contextNote,
+				paperFile,
+				contextNote:
+					transport && submittedPaper && !submittedPaper.includePdf
+						? [
+								contextNote,
+								"The current paper context is catalog metadata. Its reader PDF is not attached to this turn.",
+							]
+								.filter(Boolean)
+								.join("\n\n")
+						: contextNote,
 			});
 			if (
 				sessionContextGeneration !== sessionContextGenRef.current ||
@@ -1012,10 +1049,22 @@ export function useAgentSend({
 	const enqueueMessage = useCallback(
 		(
 			textRaw: string,
-			workflow?: string,
-			images?: PromptImage[],
-			files?: File[],
-			contextNote?: string,
+			{
+				workflow,
+				images,
+				files,
+				contextNote,
+				remotePaper = null,
+				paperFile,
+			}: Pick<
+				SendOptions,
+				| "workflow"
+				| "images"
+				| "files"
+				| "contextNote"
+				| "remotePaper"
+				| "paperFile"
+			> = {},
 		): boolean => {
 			const text = stripInlineTokens(textRaw).trim();
 			const draftSessionKey = activeVisualDraftSessionKey();
@@ -1065,6 +1114,8 @@ export function useAgentSend({
 				...(attached.length ? { images: attached } : {}),
 				files,
 				contextNote,
+				remotePaper,
+				paperFile,
 			};
 			setMessageQueue((prev) => [...prev, item]);
 			// Mirror post-submit composer cleanup for the queued turn.
@@ -1103,10 +1154,26 @@ export function useAgentSend({
 	): Promise<boolean> => {
 		if (switchingRef.current || submittingRef.current) return false;
 		resetPromptHistoryBrowse();
-		if (activeTabIsRunning) {
-			return enqueueMessage(textRaw, workflow, images, files, contextNote);
+		const options = { workflow, images, files, contextNote, remotePaper };
+		if (!activeTabIsRunning) return send(textRaw, options);
+		if (!remotePaper?.includePdf) return enqueueMessage(textRaw, options);
+
+		// Check the PDF before accepting a queued draft. A loading failure leaves
+		// the draft and picked attachments in the composer.
+		const generation = ++submissionGenRef.current;
+		const contextGeneration = sessionContextGenRef.current;
+		setSubmittingFlag(true);
+		try {
+			const paperFile = await loadRemotePaper(remotePaper);
+			if (contextGeneration !== sessionContextGenRef.current) return false;
+			return enqueueMessage(textRaw, { ...options, paperFile });
+		} catch (error) {
+			if (contextGeneration === sessionContextGenRef.current)
+				notifyError(errorText(error));
+			return false;
+		} finally {
+			if (generation === submissionGenRef.current) setSubmittingFlag(false);
 		}
-		return send(textRaw, { workflow, images, files, contextNote });
 	};
 
 	/**
@@ -1403,6 +1470,8 @@ export function useAgentSend({
 					images: head.images,
 					files: head.files,
 					contextNote: head.contextNote,
+					remotePaper: head.remotePaper,
+					paperFile: head.paperFile,
 					fromQueue: true,
 				});
 			} finally {

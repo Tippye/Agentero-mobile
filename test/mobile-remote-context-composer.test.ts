@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
 	ConnectionInfo,
@@ -228,6 +229,71 @@ describe("shared Remote Agent region attachment transport", () => {
 			text: prompt,
 			attachments: [{ session, path: "uploads/image.png", sizeBytes: 3 }],
 		});
+	});
+
+	it("uses an actual uploaded paper alongside manual files and regions and reuses it only within the same session", async () => {
+		const [id, otherId] = await sessionIds();
+		const bytes = Uint8Array.from(
+			await readFile(new URL("./fixtures/rotate90.pdf", import.meta.url)),
+		);
+		const paperFile = new File([bytes], "Fixture article.pdf", {
+			type: "application/pdf",
+		});
+		const manual = new File(["abc"], "Notes.txt", { type: "text/plain" });
+		io.upload.mockImplementation(async (target: SessionRef, path: string) => {
+			const data = io.write.mock.calls.find(
+				([filePath]) => filePath === path,
+			)?.[1] as Uint8Array;
+			return {
+				status: "succeeded",
+				result: {
+					type: "attachmentUploaded",
+					attachment: {
+						session: target,
+						path: `./${path.split("/").at(-1)}`,
+						sizeBytes: data.byteLength,
+					},
+				},
+			};
+		});
+
+		const first = await transport.run(
+			{ sessionId: id, prompt, paperFile, images: [image], files: [manual] },
+			"paper-first",
+		);
+		first.abandon();
+		expect(io.write.mock.calls[0]?.[1]).toEqual(bytes);
+		const firstRequest: OperationRequest = io.execute.mock.calls[0][0];
+		expect(firstRequest.mutation).toMatchObject({
+			type: "sendMessage",
+			text: expect.stringContaining(
+				'"./Fixture article.pdf" is the uploaded copy',
+			),
+			attachments: [
+				{ session, path: "./Fixture article.pdf", sizeBytes: bytes.byteLength },
+				{ session, sizeBytes: 3 },
+				{ session, path: "./Notes.txt", sizeBytes: 3 },
+			],
+		});
+		expect(firstRequest.mutation.text).not.toContain("/private/cache");
+
+		const second = await transport.run(
+			{ sessionId: id, prompt: "What about Figure 1?", paperFile },
+			"paper-followup",
+		);
+		second.abandon();
+		expect(io.upload).toHaveBeenCalledTimes(3);
+		expect(io.execute.mock.calls[1][0].mutation.attachments).toEqual([
+			{ session, path: "./Fixture article.pdf", sizeBytes: bytes.byteLength },
+		]);
+
+		const other = await transport.run(
+			{ sessionId: otherId, prompt, paperFile },
+			"paper-other",
+		);
+		other.abandon();
+		expect(io.upload).toHaveBeenCalledTimes(4);
+		expect(io.upload.mock.calls[3][0]).toEqual(otherSession);
 	});
 
 	it("does not send when the upload receipt belongs to another session", async () => {

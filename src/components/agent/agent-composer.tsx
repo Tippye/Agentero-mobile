@@ -1,4 +1,4 @@
-import { ImageIcon } from "lucide-react";
+import { ImageIcon, Paperclip, X } from "lucide-react";
 import {
 	type KeyboardEvent,
 	type DragEvent as ReactDragEvent,
@@ -40,7 +40,10 @@ import {
 	usePromptInputAttachments,
 } from "@/components/agent/composer/prompt-input";
 import { useComposerFileDrag } from "@/components/agent/hooks/use-composer-file-drag";
-import type { QueuedPrompt } from "@/components/agent/types";
+import type {
+	QueuedPrompt,
+	RemotePaperContext,
+} from "@/components/agent/types";
 import { RemoteRegionContextPreview } from "@/components/mobile/remote/remote-region-context-preview";
 import { Popover, PopoverAnchor } from "@/components/ui/popover";
 import type { AgentSkill, PromptImage } from "@/lib/agent";
@@ -111,6 +114,8 @@ function SeedHandoffImages() {
 }
 
 export type AgentComposerProps = {
+	remotePaper?: RemotePaperContext | null;
+	onRemotePaperPdfChange?: (include: boolean) => void;
 	regionContext?: MobilePaperRegionContext | null;
 	onRegionContextHandled?: (id: string) => void;
 	showCompactToolbar?: boolean;
@@ -206,6 +211,7 @@ export function AgentComposer(props: AgentComposerProps) {
 	} = props;
 	const { t } = useTranslation("agent");
 	const { t: tMobile } = useTranslation("mobile");
+	const { remotePaper, onRemotePaperPdfChange } = props;
 	const region = props.regionContext;
 	const [regionWithoutImage, setRegionWithoutImage] = useState<string | null>(
 		null,
@@ -376,6 +382,29 @@ export function AgentComposer(props: AgentComposerProps) {
 						/>
 					</div>
 				) : null}
+				{remotePaper && (
+					<button
+						type="button"
+						aria-label={t("composer.remotePaperPdf")}
+						aria-pressed={remotePaper.includePdf}
+						title={t("composer.remotePaperPdf")}
+						disabled={submitting || switching}
+						onClick={() => onRemotePaperPdfChange?.(!remotePaper.includePdf)}
+						className={cn(
+							"flex min-h-8 max-w-full shrink-0 items-center gap-1.5 self-start rounded-full border px-2 text-xs hover:bg-muted",
+							remotePaper.includePdf
+								? "bg-muted/40"
+								: "border-dashed text-muted-foreground",
+						)}
+					>
+						<Paperclip className="size-3.5 shrink-0" aria-hidden />
+						<span className="shrink-0">PDF</span>
+						<span className="truncate">{remotePaper.source.paper.title}</span>
+						{remotePaper.includePdf && (
+							<X className="size-3 shrink-0" aria-hidden />
+						)}
+					</button>
+				)}
 				{visualHover && hoveredVisual ? (
 					<VisualReferenceCard
 						draft={hoveredVisual}

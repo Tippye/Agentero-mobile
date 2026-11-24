@@ -170,12 +170,24 @@ function AgentPanelContent({
 	onSelectRemote,
 	onSelectLocal,
 	localSelectionRef,
+	remotePaperSource,
 	regionContext,
 	onRegionContextHandled,
 }: AgentPanelContentProps) {
 	const remoteSelected = transport !== undefined;
 	const remoteReady = !remoteSelected || transport !== null;
 	const { t } = useTranslation("agent");
+	const [excludedPaperKey, setExcludedPaperKey] = useState<string | null>(null);
+	const remotePaper =
+		remoteSelected &&
+		active &&
+		remotePaperSource &&
+		(!regionContext || regionContext.paperId === remotePaperSource.paper.id)
+			? {
+					source: remotePaperSource,
+					includePdf: excludedPaperKey !== remotePaperSource.key,
+				}
+			: null;
 	const panel = useAgentPanel({
 		vaultPath,
 		selectedPath,
@@ -187,6 +199,7 @@ function AgentPanelContent({
 		paperTreeLabelMode,
 		initialAgentId: transport?.agentId ?? initialAgentId,
 		transport,
+		remotePaper,
 		includeLocalOptions: backendControl === undefined,
 		onAgentChange,
 		openHistoryItem,
@@ -618,6 +631,12 @@ function AgentPanelContent({
 
 									<AgentComposer
 										wide={wide}
+										remotePaper={remotePaper}
+										onRemotePaperPdfChange={(include) =>
+											setExcludedPaperKey(
+												include ? null : (remotePaper?.source.key ?? null),
+											)
+										}
 										regionContext={active ? regionContext : null}
 										onRegionContextHandled={onRegionContextHandled}
 										showCompactToolbar={remoteSelected}

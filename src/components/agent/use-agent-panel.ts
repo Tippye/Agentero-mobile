@@ -22,7 +22,10 @@ import { useAgentPanelContext } from "@/components/agent/hooks/use-agent-panel-c
 import { useAgentPermissionSurfaces } from "@/components/agent/hooks/use-agent-permission-surfaces";
 import { useAgentSend } from "@/components/agent/hooks/use-agent-send";
 import { useAgentSessionRuntime } from "@/components/agent/hooks/use-agent-session-runtime";
-import type { AgentPanelProps } from "@/components/agent/types";
+import type {
+	AgentPanelProps,
+	RemotePaperContext,
+} from "@/components/agent/types";
 import { useSessionComposerState } from "@/hooks/use-session-composer-state";
 import {
 	cancelAgentRun,
@@ -94,6 +97,7 @@ export type UseAgentPanelArgs = Pick<
 	/** Skip the per-panel ACP session import (Zen rail owns the history list). */
 	suppressHistoryImport?: boolean;
 	transport?: RemoteAgentTransport | null;
+	remotePaper?: RemotePaperContext | null;
 	includeLocalOptions?: boolean;
 };
 
@@ -112,6 +116,7 @@ export function useAgentPanel({
 	onOpenHistoryHandled,
 	suppressHistoryImport = false,
 	transport,
+	remotePaper,
 	includeLocalOptions = true,
 }: UseAgentPanelArgs) {
 	const { t, i18n } = useTranslation("agent");
@@ -480,6 +485,7 @@ export function useAgentPanel({
 		turnConfig,
 		runtime,
 		transport,
+		remotePaper,
 		agentListenersReady,
 	});
 
