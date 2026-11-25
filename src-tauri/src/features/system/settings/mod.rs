@@ -170,6 +170,21 @@ pub struct AppSettings {
     /// Enable single-key Vim navigation on PDF reading surfaces.
     #[serde(default = "default_true")]
     pub pdf_vim_keys: bool,
+    /// Temporary tuning: pen width responsiveness to pressure (0..1).
+    #[serde(default = "default_pdf_ink_thinning")]
+    pub pdf_ink_thinning: f64,
+    /// Temporary tuning: render-layer pressure floor for light dots/hooks.
+    #[serde(default = "default_pdf_ink_pressure_floor")]
+    pub pdf_ink_pressure_floor: f64,
+    /// Temporary tuning: position streamline of the committed outline.
+    #[serde(default = "default_pdf_ink_streamline")]
+    pub pdf_ink_streamline: f64,
+    /// Temporary tuning: pressure smoothing of the committed outline.
+    #[serde(default = "default_pdf_ink_smoothing")]
+    pub pdf_ink_smoothing: f64,
+    /// Temporary tuning: synthesize pressure from velocity when absent.
+    #[serde(default)]
+    pub pdf_ink_simulate_pressure: bool,
     /// Master switch for Vim-style single-key navigation (PDF + list surfaces).
     /// Off keeps plain typing and arrow keys only.
     #[serde(default = "default_true")]
@@ -629,6 +644,11 @@ impl Default for AppSettings {
             terminal_app: String::new(),
             pdf_scroll_strategy: default_pdf_scroll_strategy(),
             pdf_vim_keys: true,
+            pdf_ink_thinning: default_pdf_ink_thinning(),
+            pdf_ink_pressure_floor: default_pdf_ink_pressure_floor(),
+            pdf_ink_streamline: default_pdf_ink_streamline(),
+            pdf_ink_smoothing: default_pdf_ink_smoothing(),
+            pdf_ink_simulate_pressure: false,
             vim_mode: false,
             hint_mode_enabled: true,
             sound_enabled: true,
@@ -733,6 +753,18 @@ fn default_auto_update_internal_links() -> String {
 }
 fn default_pdf_scroll_strategy() -> String {
     "vertical".into()
+}
+fn default_pdf_ink_thinning() -> f64 {
+    0.5
+}
+fn default_pdf_ink_pressure_floor() -> f64 {
+    0.25
+}
+fn default_pdf_ink_streamline() -> f64 {
+    0.15
+}
+fn default_pdf_ink_smoothing() -> f64 {
+    0.5
 }
 fn default_pdf_spread_mode() -> String {
     "none".into()

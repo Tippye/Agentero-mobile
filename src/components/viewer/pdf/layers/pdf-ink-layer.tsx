@@ -1,27 +1,34 @@
-import { memo, useEffect, useSyncExternalStore } from "react";
+import { memo, useEffect, useMemo, useSyncExternalStore } from "react";
 import { InkLiveCanvas } from "@/components/viewer/pdf/layers/ink-live-canvas";
+import { useSettings } from "@/hooks/use-app-stores";
 import type { InkEditor } from "@/lib/pdf/ink/editor";
 import {
+	DEFAULT_INK_FEEL,
+	type InkFeelTuning,
 	type InkShape,
 	inkBounds,
 	inkOutline,
 	inkSvgPath,
 } from "@/lib/pdf/ink/geometry";
 
-const outlines = new WeakMap<InkShape, string>();
+const outlines = new WeakMap<InkShape, { key: string; d: string }>();
 const InkPath = memo(function InkPath({
 	stroke,
 	complete = true,
 	dim = false,
+	tuning = DEFAULT_INK_FEEL,
 }: {
 	stroke: InkShape;
 	complete?: boolean;
 	dim?: boolean;
+	tuning?: InkFeelTuning;
 }) {
-	let d = complete ? outlines.get(stroke) : undefined;
+	const key = `${tuning.thinning}|${tuning.pressureFloor}|${tuning.streamline}|${tuning.smoothing}|${tuning.simulatePressure}`;
+	const cached = complete ? outlines.get(stroke) : undefined;
+	let d = cached?.key === key ? cached.d : undefined;
 	if (d === undefined) {
-		d = inkSvgPath(inkOutline(stroke, complete));
-		if (complete) outlines.set(stroke, d);
+		d = inkSvgPath(inkOutline(stroke, complete, tuning));
+		if (complete) outlines.set(stroke, { key, d });
 	}
 	const [r, g, b, a] = stroke.color;
 	return (
@@ -52,6 +59,21 @@ export const PdfInkLayer = memo(function PdfInkLayer({
 		editor.controller.getPage(page),
 	);
 	const tools = useSyncExternalStore(editor.subscribe, editor.getState);
+	const thinning = useSettings((s) => s.pdfInkThinning);
+	const pressureFloor = useSettings((s) => s.pdfInkPressureFloor);
+	const streamline = useSettings((s) => s.pdfInkStreamline);
+	const smoothing = useSettings((s) => s.pdfInkSmoothing);
+	const simulatePressure = useSettings((s) => s.pdfInkSimulatePressure);
+	const tuning = useMemo(
+		() => ({
+			thinning,
+			pressureFloor,
+			streamline,
+			smoothing,
+			simulatePressure,
+		}),
+		[thinning, pressureFloor, streamline, smoothing, simulatePressure],
+	);
 	useEffect(() => {
 		void editor.controller.load(page);
 	}, [editor, page]);
@@ -92,9 +114,12 @@ export const PdfInkLayer = memo(function PdfInkLayer({
 						key={stroke.id}
 						stroke={stroke}
 						dim={erasedIds.has(stroke.id)}
+						tuning={tuning}
 					/>
 				))}
-				{draft?.snapped === true && <InkPath stroke={draft.stroke} complete />}
+				{draft?.snapped === true && (
+					<InkPath stroke={draft.stroke} complete tuning={tuning} />
+				)}
 				{selection && (
 					<rect
 						{...selection}
@@ -129,6 +154,7 @@ export const PdfInkLayer = memo(function PdfInkLayer({
 					page={page}
 					width={width}
 					height={height}
+					tuning={tuning}
 				/>
 			)}
 		</>

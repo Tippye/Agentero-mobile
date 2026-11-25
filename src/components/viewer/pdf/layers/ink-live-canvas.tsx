@@ -1,16 +1,21 @@
 import { memo, useEffect, useRef } from "react";
 import type { InkEditor } from "@/lib/pdf/ink/editor";
 import {
-	INK_PEN_THINNING,
+	DEFAULT_INK_FEEL,
+	type InkFeelTuning,
 	type InkPosition,
 	type InkSample,
 	type InkShape,
 	inkEffectivePressure,
 } from "@/lib/pdf/ink/geometry";
 
-function liveWidth(stroke: InkShape, point: InkSample): number {
-	const thinning = stroke.tool === "highlighter" ? 0 : INK_PEN_THINNING;
-	const pressure = inkEffectivePressure(point.pressure);
+function liveWidth(
+	stroke: InkShape,
+	point: InkSample,
+	tuning: InkFeelTuning,
+): number {
+	const thinning = stroke.tool === "highlighter" ? 0 : tuning.thinning;
+	const pressure = inkEffectivePressure(point.pressure, tuning.pressureFloor);
 	// perfect-freehand radius = size * (0.5 - thinning * (0.5 - pressure));
 	// the live segment width is the matching diameter.
 	return Math.max(
@@ -36,11 +41,13 @@ export const InkLiveCanvas = memo(function InkLiveCanvas({
 	page,
 	width,
 	height,
+	tuning = DEFAULT_INK_FEEL,
 }: {
 	editor: InkEditor;
 	page: number;
 	width: number;
 	height: number;
+	tuning?: InkFeelTuning;
 }) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	useEffect(() => {
@@ -71,7 +78,7 @@ export const InkLiveCanvas = memo(function InkLiveCanvas({
 						maskCtx.arc(
 							points[0].x,
 							points[0].y,
-							liveWidth(stroke, points[0]) / 2,
+							liveWidth(stroke, points[0], tuning) / 2,
 							0,
 							Math.PI * 2,
 						);
@@ -81,7 +88,7 @@ export const InkLiveCanvas = memo(function InkLiveCanvas({
 				} else {
 					if (!hasMid) {
 						const m = midpoint(points[0], points[1]);
-						maskCtx.lineWidth = liveWidth(stroke, points[0]);
+						maskCtx.lineWidth = liveWidth(stroke, points[0], tuning);
 						maskCtx.beginPath();
 						maskCtx.moveTo(points[0].x, points[0].y);
 						maskCtx.lineTo(m.x, m.y);
@@ -95,7 +102,7 @@ export const InkLiveCanvas = memo(function InkLiveCanvas({
 			for (; cursor < points.length; cursor++) {
 				const control = points[cursor - 1];
 				const end = midpoint(control, points[cursor]);
-				maskCtx.lineWidth = liveWidth(stroke, control);
+				maskCtx.lineWidth = liveWidth(stroke, control, tuning);
 				maskCtx.beginPath();
 				maskCtx.moveTo(lastMid.x, lastMid.y);
 				maskCtx.quadraticCurveTo(control.x, control.y, end.x, end.y);
@@ -139,7 +146,7 @@ export const InkLiveCanvas = memo(function InkLiveCanvas({
 			mask.width = 0;
 			mask.height = 0;
 		};
-	}, [editor, page, width, height]);
+	}, [editor, page, width, height, tuning]);
 	return (
 		<canvas
 			ref={ref}

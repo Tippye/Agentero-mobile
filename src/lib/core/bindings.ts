@@ -907,7 +907,7 @@ export const commands = {
 	 *  inline-decodable image (Location `.jpg`/`.png`/… or Content-Type), allowlist
 	 *  that host and return the direct URL for the proxy `<img>` path. TIFF/PDF
 	 *  and unknown targets return `null` so the card stays on the URL tip.
-	 * 
+	 *
 	 *  Page JS cannot do this: PLOS has no CORS and opaque-redirects hide Location.
 	 *  The proxy also refuses un-allowlisted redirect hops, so the card must point
 	 *  at the corpus URL after this command allowlists it (same idea as eLife's
@@ -2062,6 +2062,16 @@ export type AppSettings_Deserialize = {
 	pdfScrollStrategy?: string,
 	/**  Enable single-key Vim navigation on PDF reading surfaces. */
 	pdfVimKeys?: boolean,
+	/**  Temporary tuning: pen width responsiveness to pressure (0..1). */
+	pdfInkThinning?: number | null,
+	/**  Temporary tuning: render-layer pressure floor for light dots/hooks. */
+	pdfInkPressureFloor?: number | null,
+	/**  Temporary tuning: position streamline of the committed outline. */
+	pdfInkStreamline?: number | null,
+	/**  Temporary tuning: pressure smoothing of the committed outline. */
+	pdfInkSmoothing?: number | null,
+	/**  Temporary tuning: synthesize pressure from velocity when absent. */
+	pdfInkSimulatePressure?: boolean,
 	/**
 	 *  Master switch for Vim-style single-key navigation (PDF + list surfaces).
 	 *  Off keeps plain typing and arrow keys only.
@@ -2246,6 +2256,16 @@ export type AppSettings_Serialize = {
 	pdfScrollStrategy: string,
 	/**  Enable single-key Vim navigation on PDF reading surfaces. */
 	pdfVimKeys: boolean,
+	/**  Temporary tuning: pen width responsiveness to pressure (0..1). */
+	pdfInkThinning: number | null,
+	/**  Temporary tuning: render-layer pressure floor for light dots/hooks. */
+	pdfInkPressureFloor: number | null,
+	/**  Temporary tuning: position streamline of the committed outline. */
+	pdfInkStreamline: number | null,
+	/**  Temporary tuning: pressure smoothing of the committed outline. */
+	pdfInkSmoothing: number | null,
+	/**  Temporary tuning: synthesize pressure from velocity when absent. */
+	pdfInkSimulatePressure: boolean,
 	/**
 	 *  Master switch for Vim-style single-key navigation (PDF + list surfaces).
 	 *  Off keeps plain typing and arrow keys only.

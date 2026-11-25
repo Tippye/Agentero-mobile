@@ -9,6 +9,7 @@ import {
 	LayoutTemplate,
 	LoaderCircle,
 	Paintbrush,
+	PenLine,
 	Star,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
@@ -23,6 +24,7 @@ import { LayoutPane } from "@/components/settings/panes/layout-pane";
 import { TranslatePane } from "@/components/settings/panes/translate-pane";
 import { PageTitle } from "@/components/settings/settings-layout";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { errorMessage, notifyError } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import type { MobileSettingsSection } from "@/lib/mobile/settings";
@@ -32,6 +34,7 @@ import {
 	saveSettingsAsync,
 	subscribeSettings,
 } from "@/lib/settings";
+import { DEFAULT_SETTINGS } from "@/lib/settings/defaults";
 import { isRemoteVaultHandle } from "@/lib/vault/remote/remote-vault";
 
 // The sync pane pulls in the full storage configuration surface; load it on
@@ -46,6 +49,7 @@ const GITHUB_REPO_URL = "https://github.com/poco-ai/Agentero";
 
 type MobileSettingsLabel =
 	| "settings:nav.appearance"
+	| "mobile:readingFeel.title"
 	| "settings:nav.agent"
 	| "settings:nav.translate"
 	| "settings:general.easyScholar.section"
@@ -60,6 +64,7 @@ const NAV: {
 	label: MobileSettingsLabel;
 }[] = [
 	{ id: "appearance", icon: Paintbrush, label: "settings:nav.appearance" },
+	{ id: "reading", icon: PenLine, label: "mobile:readingFeel.title" },
 	{ id: "agent", icon: Bot, label: "settings:nav.agent" },
 	{ id: "translate", icon: Languages, label: "settings:nav.translate" },
 	{
@@ -104,6 +109,28 @@ export function MobileSettingsPage({
 		() => setEasyScholarKeyDraft(settings.easyScholarKey),
 		[settings.easyScholarKey],
 	);
+	const [inkDraft, setInkDraft] = useState({
+		thinning: settings.pdfInkThinning,
+		pressureFloor: settings.pdfInkPressureFloor,
+		streamline: settings.pdfInkStreamline,
+		smoothing: settings.pdfInkSmoothing,
+		simulatePressure: settings.pdfInkSimulatePressure,
+	});
+	useEffect(() => {
+		setInkDraft({
+			thinning: settings.pdfInkThinning,
+			pressureFloor: settings.pdfInkPressureFloor,
+			streamline: settings.pdfInkStreamline,
+			smoothing: settings.pdfInkSmoothing,
+			simulatePressure: settings.pdfInkSimulatePressure,
+		});
+	}, [
+		settings.pdfInkThinning,
+		settings.pdfInkPressureFloor,
+		settings.pdfInkStreamline,
+		settings.pdfInkSmoothing,
+		settings.pdfInkSimulatePressure,
+	]);
 	useEffect(() => {
 		if (!open) return;
 		let active = true;
@@ -190,6 +217,118 @@ export function MobileSettingsPage({
 								vimMode={settings.vimMode}
 								patch={patch}
 							/>
+						) : section === "reading" ? (
+							<div className="space-y-6">
+								<PageTitle title={t("mobile:readingFeel.title")} />
+								<p className="text-muted-foreground text-sm">
+									{t("mobile:readingFeel.description")}
+								</p>
+								{(
+									[
+										{
+											key: "thinning",
+											label: t("mobile:readingFeel.thinning"),
+											min: 0,
+											max: 0.9,
+											step: 0.05,
+										},
+										{
+											key: "pressureFloor",
+											label: t("mobile:readingFeel.pressureFloor"),
+											min: 0,
+											max: 0.8,
+											step: 0.05,
+										},
+										{
+											key: "streamline",
+											label: t("mobile:readingFeel.streamline"),
+											min: 0,
+											max: 0.6,
+											step: 0.05,
+										},
+										{
+											key: "smoothing",
+											label: t("mobile:readingFeel.smoothing"),
+											min: 0,
+											max: 1,
+											step: 0.05,
+										},
+									] as const
+								).map((field) => (
+									<label key={field.key} className="block space-y-2">
+										<span className="flex items-center justify-between gap-3 text-sm">
+											<span>{field.label}</span>
+											<span className="text-muted-foreground tabular-nums">
+												{inkDraft[field.key].toFixed(2)}
+											</span>
+										</span>
+										<input
+											type="range"
+											min={field.min}
+											max={field.max}
+											step={field.step}
+											value={inkDraft[field.key]}
+											className="w-full accent-primary"
+											onChange={(event) =>
+												setInkDraft((value) => ({
+													...value,
+													[field.key]: Number(event.target.value),
+												}))
+											}
+										/>
+									</label>
+								))}
+								<label
+									htmlFor="ink-simulate-pressure"
+									className="flex items-center justify-between gap-3 text-sm"
+								>
+									<span>{t("mobile:readingFeel.simulatePressure")}</span>
+									<Switch
+										id="ink-simulate-pressure"
+										checked={inkDraft.simulatePressure}
+										onCheckedChange={(checked) =>
+											setInkDraft((value) => ({
+												...value,
+												simulatePressure: checked,
+											}))
+										}
+									/>
+								</label>
+								<div className="flex flex-wrap gap-2">
+									<Button
+										type="button"
+										variant="outline"
+										className="min-h-11"
+										onClick={() =>
+											setInkDraft({
+												thinning: DEFAULT_SETTINGS.pdfInkThinning,
+												pressureFloor: DEFAULT_SETTINGS.pdfInkPressureFloor,
+												streamline: DEFAULT_SETTINGS.pdfInkStreamline,
+												smoothing: DEFAULT_SETTINGS.pdfInkSmoothing,
+												simulatePressure:
+													DEFAULT_SETTINGS.pdfInkSimulatePressure,
+											})
+										}
+									>
+										{t("mobile:readingFeel.reset")}
+									</Button>
+									<Button
+										type="button"
+										className="min-h-11"
+										onClick={() =>
+											patch({
+												pdfInkThinning: inkDraft.thinning,
+												pdfInkPressureFloor: inkDraft.pressureFloor,
+												pdfInkStreamline: inkDraft.streamline,
+												pdfInkSmoothing: inkDraft.smoothing,
+												pdfInkSimulatePressure: inkDraft.simulatePressure,
+											})
+										}
+									>
+										{t("mobile:readingFeel.save")}
+									</Button>
+								</div>
+							</div>
 						) : section === "agent" ? (
 							<MobileAgentPane settings={settings} patch={patch} />
 						) : section === "translate" ? (

@@ -75,21 +75,47 @@ export function inkPointerSample(
 export const INK_PEN_THINNING = 0.5;
 /** Light touches (dots, hook tips) never render below this pressure. */
 export const INK_PRESSURE_FLOOR = 0.25;
+/** Feel parameters; temporary settings override these until tuned. */
+export type InkFeelTuning = {
+	thinning: number;
+	pressureFloor: number;
+	streamline: number;
+	smoothing: number;
+	simulatePressure: boolean;
+};
+export const DEFAULT_INK_FEEL: InkFeelTuning = {
+	thinning: INK_PEN_THINNING,
+	pressureFloor: INK_PRESSURE_FLOOR,
+	streamline: 0.15,
+	smoothing: 0.5,
+	simulatePressure: false,
+};
 /** Render-layer pressure: samples keep their raw value for the native model. */
-export function inkEffectivePressure(pressure: number | null): number {
-	return Math.max(INK_PRESSURE_FLOOR, pressure ?? 0.5);
+export function inkEffectivePressure(
+	pressure: number | null,
+	floor: number = INK_PRESSURE_FLOOR,
+): number {
+	return Math.max(floor, pressure ?? 0.5);
 }
 
 /** Mature pressure outline renderer; the persistent model remains the original polyline. */
-export function inkOutline(stroke: InkShape, complete = true): number[][] {
+export function inkOutline(
+	stroke: InkShape,
+	complete = true,
+	tuning: InkFeelTuning = DEFAULT_INK_FEEL,
+): number[][] {
 	return getStroke(
-		stroke.points.map((p) => [p.x, p.y, inkEffectivePressure(p.pressure)]),
+		stroke.points.map((p) => [
+			p.x,
+			p.y,
+			inkEffectivePressure(p.pressure, tuning.pressureFloor),
+		]),
 		{
 			size: stroke.baseWidth,
-			thinning: stroke.tool === "highlighter" ? 0 : INK_PEN_THINNING,
-			streamline: 0.15,
-			smoothing: 0.5,
-			simulatePressure: false,
+			thinning: stroke.tool === "highlighter" ? 0 : tuning.thinning,
+			streamline: tuning.streamline,
+			smoothing: tuning.smoothing,
+			simulatePressure: tuning.simulatePressure,
 			last: complete,
 		},
 	);

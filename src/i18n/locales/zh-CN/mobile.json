@@ -1,4 +1,15 @@
 {
+	"readingFeel": {
+		"title": "手写手感（临时）",
+		"description": "调试笔画粗细与平滑用，手感确定后这些配置会移除。保存后立即生效，无需重启。",
+		"thinning": "压感粗细幅度（越大轻重差异越明显）",
+		"pressureFloor": "最轻笔画下限（越大点和勾越粗）",
+		"streamline": "位置平滑（越大越稳但越滞后）",
+		"smoothing": "压感平滑（越大粗细过渡越柔和）",
+		"simulatePressure": "无压感时按速度模拟压感",
+		"reset": "恢复默认",
+		"save": "保存并应用"
+	},
 	"bridge": {
 		"hostFallback": "Agentero 桥接"
 	},
