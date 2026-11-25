@@ -71,13 +71,22 @@ export function inkPointerSample(
 	};
 }
 
+/** Pen width responsiveness, shared by the committed outline and live preview. */
+export const INK_PEN_THINNING = 0.5;
+/** Light touches (dots, hook tips) never render below this pressure. */
+export const INK_PRESSURE_FLOOR = 0.25;
+/** Render-layer pressure: samples keep their raw value for the native model. */
+export function inkEffectivePressure(pressure: number | null): number {
+	return Math.max(INK_PRESSURE_FLOOR, pressure ?? 0.5);
+}
+
 /** Mature pressure outline renderer; the persistent model remains the original polyline. */
 export function inkOutline(stroke: InkShape, complete = true): number[][] {
 	return getStroke(
-		stroke.points.map((p) => [p.x, p.y, p.pressure ?? 0.5]),
+		stroke.points.map((p) => [p.x, p.y, inkEffectivePressure(p.pressure)]),
 		{
 			size: stroke.baseWidth,
-			thinning: stroke.tool === "highlighter" ? 0 : 0.65,
+			thinning: stroke.tool === "highlighter" ? 0 : INK_PEN_THINNING,
 			streamline: 0.15,
 			smoothing: 0.5,
 			simulatePressure: false,

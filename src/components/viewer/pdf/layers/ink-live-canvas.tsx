@@ -1,13 +1,16 @@
 import { memo, useEffect, useRef } from "react";
 import type { InkEditor } from "@/lib/pdf/ink/editor";
-import type { InkPosition, InkSample, InkShape } from "@/lib/pdf/ink/geometry";
-
-/** Mirrors inkOutline's pen thinning so live width matches the committed look. */
-const PEN_THINNING = 0.65;
+import {
+	INK_PEN_THINNING,
+	type InkPosition,
+	type InkSample,
+	type InkShape,
+	inkEffectivePressure,
+} from "@/lib/pdf/ink/geometry";
 
 function liveWidth(stroke: InkShape, point: InkSample): number {
-	const thinning = stroke.tool === "highlighter" ? 0 : PEN_THINNING;
-	const pressure = point.pressure ?? 0.5;
+	const thinning = stroke.tool === "highlighter" ? 0 : INK_PEN_THINNING;
+	const pressure = inkEffectivePressure(point.pressure);
 	// perfect-freehand radius = size * (0.5 - thinning * (0.5 - pressure));
 	// the live segment width is the matching diameter.
 	return Math.max(
