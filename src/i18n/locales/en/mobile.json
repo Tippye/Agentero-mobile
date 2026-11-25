@@ -1,14 +1,15 @@
 {
 	"readingFeel": {
-		"title": "Ink feel (temporary)",
-		"description": "Tune stroke width and smoothing while testing. These controls will be removed once the feel is settled. Saving applies immediately, no restart needed.",
+		"title": "Ink feel",
+		"description": "Tune stroke width and smoothing. Saving applies immediately, no restart needed.",
 		"thinning": "Pressure width range (higher = more variation)",
 		"pressureFloor": "Lightest stroke floor (higher = thicker dots and hooks)",
 		"streamline": "Position smoothing (higher = steadier but laggier)",
 		"smoothing": "Pressure smoothing (higher = softer width transitions)",
 		"simulatePressure": "Simulate pressure from velocity when absent",
 		"reset": "Reset to defaults",
-		"save": "Save and apply"
+		"save": "Save and apply",
+		"saved": "Ink feel settings saved"
 	},
 	"bridge": {
 		"hostFallback": "Agentero Bridge"

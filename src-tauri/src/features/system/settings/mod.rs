@@ -170,19 +170,19 @@ pub struct AppSettings {
     /// Enable single-key Vim navigation on PDF reading surfaces.
     #[serde(default = "default_true")]
     pub pdf_vim_keys: bool,
-    /// Temporary tuning: pen width responsiveness to pressure (0..1).
+    /// Ink feel tuning: pen width responsiveness to pressure (0..1).
     #[serde(default = "default_pdf_ink_thinning")]
     pub pdf_ink_thinning: f64,
-    /// Temporary tuning: render-layer pressure floor for light dots/hooks.
+    /// Ink feel tuning: render-layer pressure floor for light dots/hooks.
     #[serde(default = "default_pdf_ink_pressure_floor")]
     pub pdf_ink_pressure_floor: f64,
-    /// Temporary tuning: position streamline of the committed outline.
+    /// Ink feel tuning: position streamline of the committed outline.
     #[serde(default = "default_pdf_ink_streamline")]
     pub pdf_ink_streamline: f64,
-    /// Temporary tuning: pressure smoothing of the committed outline.
+    /// Ink feel tuning: pressure smoothing of the committed outline.
     #[serde(default = "default_pdf_ink_smoothing")]
     pub pdf_ink_smoothing: f64,
-    /// Temporary tuning: synthesize pressure from velocity when absent.
+    /// Ink feel tuning: synthesize pressure from velocity when absent.
     #[serde(default)]
     pub pdf_ink_simulate_pressure: bool,
     /// Master switch for Vim-style single-key navigation (PDF + list surfaces).
@@ -758,10 +758,10 @@ fn default_pdf_ink_thinning() -> f64 {
     0.5
 }
 fn default_pdf_ink_pressure_floor() -> f64 {
-    0.25
+    0.2
 }
 fn default_pdf_ink_streamline() -> f64 {
-    0.15
+    0.1
 }
 fn default_pdf_ink_smoothing() -> f64 {
     0.5

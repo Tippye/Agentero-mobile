@@ -74,8 +74,8 @@ export function inkPointerSample(
 /** Pen width responsiveness, shared by the committed outline and live preview. */
 export const INK_PEN_THINNING = 0.5;
 /** Light touches (dots, hook tips) never render below this pressure. */
-export const INK_PRESSURE_FLOOR = 0.25;
-/** Feel parameters; temporary settings override these until tuned. */
+export const INK_PRESSURE_FLOOR = 0.2;
+/** Feel parameters; user settings override these defaults. */
 export type InkFeelTuning = {
 	thinning: number;
 	pressureFloor: number;
@@ -86,7 +86,7 @@ export type InkFeelTuning = {
 export const DEFAULT_INK_FEEL: InkFeelTuning = {
 	thinning: INK_PEN_THINNING,
 	pressureFloor: INK_PRESSURE_FLOOR,
-	streamline: 0.15,
+	streamline: 0.1,
 	smoothing: 0.5,
 	simulatePressure: false,
 };

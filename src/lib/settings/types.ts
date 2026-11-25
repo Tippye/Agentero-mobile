@@ -253,15 +253,15 @@ export type AppSettings = {
 	pdfScrollStrategy: PdfScrollStrategy;
 	/** Enable Vim-style single-key navigation on the PDF reading surface. */
 	pdfVimKeys: boolean;
-	/** Temporary tuning: pen width responsiveness to pressure (0..1). */
+	/** Ink feel tuning: pen width responsiveness to pressure (0..1). */
 	pdfInkThinning: number;
-	/** Temporary tuning: render-layer pressure floor for light dots/hooks. */
+	/** Ink feel tuning: render-layer pressure floor for light dots/hooks. */
 	pdfInkPressureFloor: number;
-	/** Temporary tuning: position streamline of the committed outline. */
+	/** Ink feel tuning: position streamline of the committed outline. */
 	pdfInkStreamline: number;
-	/** Temporary tuning: pressure smoothing of the committed outline. */
+	/** Ink feel tuning: pressure smoothing of the committed outline. */
 	pdfInkSmoothing: number;
-	/** Temporary tuning: synthesize pressure from velocity when absent. */
+	/** Ink feel tuning: synthesize pressure from velocity when absent. */
 	pdfInkSimulatePressure: boolean;
 	/**
 	 * Master switch for Vim-style single-key navigation: `j/k/h/l` in the

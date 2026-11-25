@@ -25,7 +25,7 @@ import { TranslatePane } from "@/components/settings/panes/translate-pane";
 import { PageTitle } from "@/components/settings/settings-layout";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage, notifyError } from "@/lib/core/notify";
+import { errorMessage, notifyError, notifySuccess } from "@/lib/core/notify";
 import { openExternalUrl } from "@/lib/core/open-external";
 import type { MobileSettingsSection } from "@/lib/mobile/settings";
 import {
@@ -131,6 +131,23 @@ export function MobileSettingsPage({
 		settings.pdfInkSmoothing,
 		settings.pdfInkSimulatePressure,
 	]);
+	const saveInk = useCallback(async () => {
+		const next = {
+			...loadSettings(),
+			pdfInkThinning: inkDraft.thinning,
+			pdfInkPressureFloor: inkDraft.pressureFloor,
+			pdfInkStreamline: inkDraft.streamline,
+			pdfInkSmoothing: inkDraft.smoothing,
+			pdfInkSimulatePressure: inkDraft.simulatePressure,
+		};
+		setSettings(next);
+		try {
+			await saveSettingsAsync(next);
+			notifySuccess(t("mobile:readingFeel.saved"));
+		} catch (error) {
+			notifyError(errorMessage(error));
+		}
+	}, [inkDraft, t]);
 	useEffect(() => {
 		if (!open) return;
 		let active = true;
@@ -315,15 +332,7 @@ export function MobileSettingsPage({
 									<Button
 										type="button"
 										className="min-h-11"
-										onClick={() =>
-											patch({
-												pdfInkThinning: inkDraft.thinning,
-												pdfInkPressureFloor: inkDraft.pressureFloor,
-												pdfInkStreamline: inkDraft.streamline,
-												pdfInkSmoothing: inkDraft.smoothing,
-												pdfInkSimulatePressure: inkDraft.simulatePressure,
-											})
-										}
+										onClick={() => void saveInk()}
 									>
 										{t("mobile:readingFeel.save")}
 									</Button>
