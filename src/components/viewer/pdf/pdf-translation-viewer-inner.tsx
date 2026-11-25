@@ -61,11 +61,9 @@ import {
 	type PdfPageMarksSlice,
 	type PdfPageModeSlice,
 } from "@/components/viewer/pdf/layers/page-layers";
-import {
-	publishLayoutSentenceCatalog,
-	publishLayoutSentencePageAnalysis,
-} from "@/components/viewer/pdf/layout-sentence-hover";
+import { publishLayoutSentenceCatalog } from "@/components/viewer/pdf/layout-sentence-hover";
 import { usePdfSentenceInteraction } from "@/components/viewer/pdf/layout-sentence-pairing";
+import { reportLayoutSourcePeekPress } from "@/components/viewer/pdf/layout-source-peek";
 import type {
 	PdfViewerInnerProps,
 	ScreenPoint,
@@ -80,6 +78,7 @@ import { PdfHistoryKeyHandler } from "@/components/viewer/pdf/viewport/pdf-histo
 import { PdfScroller } from "@/components/viewer/pdf/viewport/pdf-scroller";
 import { PdfVimKeyHandler } from "@/components/viewer/pdf/viewport/pdf-vim-key-handler";
 import { WheelZoomHandler } from "@/components/viewer/pdf/viewport/wheel-zoom-handler";
+import { useSettings } from "@/hooks/use-app-stores";
 import { pdfAskContextRequest } from "@/lib/agent/context-request";
 import { backgroundTasksStore } from "@/lib/core/background-tasks";
 import { openExternalUrl } from "@/lib/core/open-external";
@@ -188,6 +187,7 @@ export function PdfTranslationViewerInner({
 	onHandle,
 	onHighlightsChange,
 }: PdfViewerInnerProps) {
+	const pdfSentenceHover = useSettings((s) => s.pdfSentenceHover);
 	const capabilities = pdfViewerCapabilities(runtime);
 	usePdfScrollSync(docId);
 	usePdfReadingMode(docId);
@@ -263,20 +263,20 @@ export function PdfTranslationViewerInner({
 		pdfBytes: pdfCacheBytes ?? sourceBytes,
 	});
 
+	const hoverRegions = pdfSentenceHover ? layoutRawRegions : null;
 	useEffect(() => {
-		const rawRegions = layoutRawRegions ?? [];
-		publishLayoutSentencePageAnalysis(
-			docId,
-			rawRegions.map((region) => region.pageIndex),
-		);
+		if (!hoverRegions) {
+			publishLayoutSentenceCatalog(docId, []);
+			return;
+		}
 		const translated = [...layoutTranslateItemsByPage.values()]
 			.flat()
-			.filter((item) => !isInsideVisualLayoutRegion(item, rawRegions))
+			.filter((item) => !isInsideVisualLayoutRegion(item, hoverRegions))
 			.map((item) => withHoverSentences(item));
 		const translatedIds = new Set(translated.map((item) => item.id));
 		// Blocks that are not translated yet still occupy the source PDF on
 		// this pane. Publish their sentences so a hover can paint there.
-		const source = sentenceHoverTextRegions(rawRegions)
+		const source = sentenceHoverTextRegions(hoverRegions)
 			.filter((region) => !translatedIds.has(region.id))
 			.map((region) => ({
 				id: region.id,
@@ -289,14 +289,14 @@ export function PdfTranslationViewerInner({
 				})),
 			}));
 		publishLayoutSentenceCatalog(docId, [...source, ...translated]);
-	}, [docId, layoutTranslateItemsByPage, layoutRawRegions]);
+	}, [docId, layoutTranslateItemsByPage, hoverRegions]);
 	useEffect(() => {
 		return () => {
 			publishLayoutSentenceCatalog(docId, []);
-			publishLayoutSentencePageAnalysis(docId, []);
 		};
 	}, [docId]);
 	usePdfSentenceInteraction(docId, hostRef, undefined, {
+		enabled: hoverRegions !== null,
 		translatedTextHitTest: capabilities.translatedEvidenceSelection,
 	});
 	const { provides: annotationCap } = useAnnotationCapability();
@@ -895,6 +895,9 @@ export function PdfTranslationViewerInner({
 					active={isActive}
 					hostRef={hostRef}
 					allowLeftDrag={false}
+					onMiddleClick={(target, point) =>
+						reportLayoutSourcePeekPress(docId, target, point)
+					}
 				/>
 				<ZoomGestureWrapper documentId={docId} enableWheel={false}>
 					<GlobalPointerProvider documentId={docId}>

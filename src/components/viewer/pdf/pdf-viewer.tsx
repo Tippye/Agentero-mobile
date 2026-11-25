@@ -127,9 +127,9 @@ import {
 import {
 	bindLayoutSentenceGlyphs,
 	publishLayoutSentenceCatalog,
-	publishLayoutSentencePageAnalysis,
 } from "@/components/viewer/pdf/layout-sentence-hover";
 import { usePdfSentenceInteraction } from "@/components/viewer/pdf/layout-sentence-pairing";
+import { reportLayoutSourcePeekPress } from "@/components/viewer/pdf/layout-source-peek";
 import { buildMarksIndex } from "@/components/viewer/pdf/marks-index";
 import { PdfTranslationViewerInner } from "@/components/viewer/pdf/pdf-translation-viewer-inner";
 import { renderPdfRegionPromptImage } from "@/components/viewer/pdf/region-crop";
@@ -218,6 +218,7 @@ import {
 } from "@/lib/pdf/reading-position";
 import { pickPdfSearchDocumentId } from "@/lib/pdf/search-target";
 import type { ActiveSelectionCard } from "@/lib/pdf/selection";
+import { resolveSupplementFigureUrl } from "@/lib/pdf/supplement-figure-url";
 import {
 	tintedTranslateRecords,
 	translateHighlightsByPage as translateHighlightsByPageOf,
@@ -569,9 +570,12 @@ function PdfViewerInner({
 }: PdfViewerInnerProps) {
 	const capabilities = pdfViewerCapabilities(runtime);
 	const { t } = useTranslation("viewer");
-	// Writing previews own the hover affordance via SyncTeX; the reader's
-	// sentence wash (and its whole-page text fallback) stays off there.
-	const sentenceHover = syncTexScope !== "writing";
+	// Writing previews own the hover affordance via SyncTeX. The reading
+	// setting turns the sentence wash off without replacing that line hint.
+	// `readingSentenceLayer` stays on in the reader so the element layer does
+	// not start its own sentence tracking when the wash is disabled.
+	const pdfSentenceHover = useSettings((s) => s.pdfSentenceHover);
+	const readingSentenceLayer = syncTexScope !== "writing";
 	const [importBusy, setImportBusy] = useState(false);
 	// Parent often passes inline lambdas; keep latest in refs so data effects
 	// do not re-fire every parent render (was Maximum update depth exceeded).
@@ -771,21 +775,20 @@ function PdfViewerInner({
 		);
 	}, [paperMeta]);
 	/**
-	 * eLife figure supplements live on the web, not in the PDF. Their link text
-	 * still names the main figure ("Figure 5—figure supplement 1"), so resolve
-	 * the supplement to the publisher's direct image instead of cropping the
-	 * main Figure 5.
+	 * Figure supplements often live on the web, not in the PDF. Link text may
+	 * still name a main figure ("Figure 5—figure supplement 1", "Fig. S1"), so
+	 * resolve the supplement to a publisher permalink/image when the DOI maps
+	 * stably; otherwise the crossref hook suppresses the main-figure crop.
 	 */
 	const supplementFigureUrl = useMemo(() => {
 		if (!paperMeta) return undefined;
-		const articleId =
-			paperMeta.doi?.match(/^10\.7554\/e?life\.(\d+)/i)?.[1] ??
-			(paperMeta.source_url ?? paperMeta.html_url ?? "").match(
-				/elifesciences\.org\/articles\/(\d+)/i,
-			)?.[1];
-		if (!articleId) return undefined;
+		const identity = {
+			doi: paperMeta.doi,
+			source_url: paperMeta.source_url,
+			html_url: paperMeta.html_url,
+		};
 		return (figure: number, supplement: number) =>
-			`https://elifesciences.org/articles/${articleId}/figures#fig${figure}s${supplement}`;
+			resolveSupplementFigureUrl(identity, figure, supplement);
 	}, [paperMeta]);
 	/**
 	 * The supplement URL is shown through the shared external-link preview card;
@@ -1460,7 +1463,6 @@ function PdfViewerInner({
 	const {
 		layoutOverlayVisible,
 		layoutRawRegions,
-		layoutDocRegions,
 		selectableRegionsByPage,
 		rawRegionsByPage,
 		startLayoutAnalysisRef,
@@ -1508,22 +1510,22 @@ function PdfViewerInner({
 		plainViewer,
 	});
 
+	const hoverRegions =
+		readingSentenceLayer && pdfSentenceHover ? layoutRawRegions : null;
 	useEffect(() => {
-		if (!sentenceHover) {
+		if (!hoverRegions) {
 			publishLayoutSentenceCatalog(docId, []);
-			publishLayoutSentencePageAnalysis(docId, []);
 			return;
 		}
-		const rawRegions = layoutRawRegions ?? [];
 		const allTranslated = [...layoutTranslateItemsByPage.values()].flat();
 		const translatedIds = new Set(allTranslated.map((item) => item.id));
 		// The model also detects the text inside vector figures / tables as prose
 		// blocks. Those runs are part of the graphic, so they never hover as
 		// sentences; the whole element is the hover target instead.
 		const translated = allTranslated
-			.filter((item) => !isInsideVisualLayoutRegion(item, rawRegions))
+			.filter((item) => !isInsideVisualLayoutRegion(item, hoverRegions))
 			.map((item) => withHoverSentences(item));
-		const source = sentenceHoverTextRegions(rawRegions)
+		const source = sentenceHoverTextRegions(hoverRegions)
 			.filter((region) => !translatedIds.has(region.id))
 			.map((region) => ({
 				id: region.id,
@@ -1535,27 +1537,14 @@ function PdfViewerInner({
 					translated: "",
 				})),
 			}));
-		// Analysed pages keep sentence hover on their text regions only; the
-		// whole-page text fallback is reserved for pages without analysis.
-		publishLayoutSentencePageAnalysis(docId, [
-			...rawRegions.map((region) => region.pageIndex),
-			...(layoutDocRegions ?? []).map((region) => region.pageIndex),
-		]);
 		publishLayoutSentenceCatalog(docId, [...source, ...translated]);
-	}, [
-		docId,
-		layoutTranslateItemsByPage,
-		layoutRawRegions,
-		layoutDocRegions,
-		sentenceHover,
-	]);
+	}, [docId, layoutTranslateItemsByPage, hoverRegions]);
 	// Clear only when the document changes. Declared after the publish effect so
 	// its cleanup runs first and the next publish restores the new document's
 	// pairs. An items-only update must not flash an empty catalog.
 	useEffect(() => {
 		return () => {
 			publishLayoutSentenceCatalog(docId, []);
-			publishLayoutSentencePageAnalysis(docId, []);
 		};
 	}, [docId]);
 
@@ -2321,6 +2310,7 @@ function PdfViewerInner({
 	}, [docId, elementSelecting]);
 
 	usePdfSentenceInteraction(docId, hostRef, undefined, {
+		enabled: hoverRegions !== null,
 		translatedTextHitTest: capabilities.translatedEvidenceSelection,
 	});
 
@@ -2587,7 +2577,7 @@ function PdfViewerInner({
 			inkEditing: inkEditable && inkMode !== "read",
 			translationOnly,
 			plainViewer,
-			sentencePairing: sentenceHover,
+			sentencePairing: readingSentenceLayer,
 		}),
 		[
 			regionSelecting,
@@ -2599,7 +2589,7 @@ function PdfViewerInner({
 			insetCommentCards,
 			inkEditable,
 			inkMode,
-			sentenceHover,
+			readingSentenceLayer,
 		],
 	);
 
@@ -3176,6 +3166,9 @@ function PdfViewerInner({
 					active={isActive}
 					hostRef={hostRef}
 					allowLeftDrag={!translationOnly}
+					onMiddleClick={(target, point) =>
+						reportLayoutSourcePeekPress(docId, target, point)
+					}
 				/>
 				{!translationOnly && !plainViewer && !immersiveReading ? (
 					<RailPeek
