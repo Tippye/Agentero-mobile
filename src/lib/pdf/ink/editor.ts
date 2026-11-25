@@ -14,6 +14,8 @@ import {
 import { recognizeInkShape } from "./shapes";
 
 export type InkMode = "read" | "pen" | "highlighter" | "eraser" | "lasso";
+/** The in-progress freehand stroke; its points array grows in place. */
+export type InkLiveStroke = { page: number; stroke: InkShape };
 export type InkEditorState = Readonly<{
 	mode: InkMode;
 	color: string;
@@ -104,6 +106,7 @@ export class InkEditor {
 		erasing: null,
 	};
 	private listeners = new Set<() => void>();
+	private liveListeners = new Set<(live: InkLiveStroke) => void>();
 	private gesture: Gesture | null = null;
 	private previousMode: InkMode = "pen";
 	constructor(readonly controller: InkController) {}
@@ -112,6 +115,23 @@ export class InkEditor {
 		return () => {
 			this.listeners.delete(listener);
 		};
+	};
+	/**
+	 * Incremental live-stroke channel. The canvas overlay paints new segments
+	 * directly, so a writing frame never broadcasts editor state to every page
+	 * layer and the toolbar.
+	 */
+	subscribeLive = (listener: (live: InkLiveStroke) => void) => {
+		this.liveListeners.add(listener);
+		return () => {
+			this.liveListeners.delete(listener);
+		};
+	};
+	/** The freehand stroke being drawn, or null while snapped / not drawing. */
+	getLive = (): InkLiveStroke | null => {
+		const gesture = this.gesture;
+		if (!gesture?.stroke || gesture.snapped) return null;
+		return { page: gesture.page.page, stroke: gesture.stroke };
 	};
 	getState = () => this.state;
 	getSelectionBounds = (): InkBounds | null => {
@@ -221,7 +241,9 @@ export class InkEditor {
 				],
 				baseWidth:
 					mode === "highlighter" ? this.state.width * 6 : this.state.width,
-				points: [sample],
+				// Shared with gesture.samples: appends grow the live preview in
+				// place and finish() commits exactly the accumulated samples.
+				points: gesture.samples,
 			};
 			this.update({
 				draft: { page: page.page, stroke: gesture.stroke },
@@ -277,13 +299,17 @@ export class InkEditor {
 		let previous = gesture.samples.at(-1) ?? gesture.origin;
 		gesture.samples.push(...samples);
 		if (gesture.stroke) {
-			gesture.stroke = { ...gesture.stroke, points: gesture.samples.slice() };
+			// The live canvas paints new segments incrementally; a per-frame
+			// state broadcast would re-render every page layer and the toolbar.
 			// While snapped, jitter keeps accumulating for a possible restore but
 			// the preview stays the clean shape.
-			if (!gesture.snapped)
-				this.update({
-					draft: { page: gesture.page.page, stroke: gesture.stroke },
-				});
+			if (!gesture.snapped) {
+				const live: InkLiveStroke = {
+					page: gesture.page.page,
+					stroke: gesture.stroke,
+				};
+				for (const listener of this.liveListeners) listener(live);
+			}
 		} else if (gesture.tool === "eraser") {
 			let ids = this.state.erasing?.ids ?? [];
 			for (const point of samples) {
