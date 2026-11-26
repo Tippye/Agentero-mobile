@@ -21,17 +21,17 @@ import { type ApiError, callApiResult } from "@/lib/core/ipc";
 /**
  * Which optional paper assets take part in sync. Notes, metadata sidecars,
  * highlights and embedded images always sync — they are small and
- * irreplaceable. Ink and translated PDFs are device-produced artifacts and are
- * opt-in per category.
+ * irreplaceable. Translation PDFs are opt-in (upstream default off); ink is a
+ * mobile-only category that stays on by default.
  */
 export type SyncScope = {
 	pdf: boolean;
 	source: boolean;
 	attachments: boolean;
+	/** Finished translation PDFs. Missing on older configs means off. */
+	translation: boolean;
 	/** Handwritten ink sidecars (`papers/<id>/marks/ink/`); mobile-only toggle. */
 	ink: boolean;
-	/** Finished translated PDFs (`papers/<id>/translated/`). */
-	translated: boolean;
 };
 
 /** Storage backend discriminator; legacy configs without one are S3. */
@@ -80,7 +80,7 @@ export type SyncBackendConfig = {
 	/** Per-device opt-in to the degraded protocol (WebDAV stores that ignore
 	 * conditional writes). Off by default; every device must enable it. */
 	allowDegradedSync: boolean;
-	/** Sync scope for bulky paper assets (default: everything). */
+	/** Sync scope for bulky paper assets. Translations default off. */
 	scope: SyncScope;
 };
 
@@ -184,13 +184,13 @@ export const emptySyncConfig = (
 	allowDegradedSync: false,
 	// Desktop and CLI keep the historical automatic policy; mobile asks.
 	conflictPolicy: "auto",
-	// Product defaults: ink has always synced; translated PDFs are opt-in.
+	// Product defaults: ink has always synced; translation PDFs are opt-in.
 	scope: {
 		pdf: true,
 		source: true,
 		attachments: true,
+		translation: false,
 		ink: true,
-		translated: false,
 	},
 });
 
@@ -202,8 +202,8 @@ export type SyncScopeSizes = {
 	pdf: number;
 	source: number;
 	attachments: number;
+	translation: number;
 	ink: number;
-	translated: number;
 };
 
 /** Fold the generated wire status into the local all-fields-present shape. */
@@ -259,8 +259,8 @@ function configFromWire(config: SyncBackendConfigWire): SyncBackendConfig {
 			pdf: config.scope?.pdf ?? true,
 			source: config.scope?.source ?? true,
 			attachments: config.scope?.attachments ?? true,
+			translation: config.scope?.translation ?? false,
 			ink: config.scope?.ink ?? true,
-			translated: config.scope?.translated ?? false,
 		},
 	};
 }

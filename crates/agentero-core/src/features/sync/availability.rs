@@ -321,7 +321,7 @@ pub(super) fn asset(path: &str) -> Option<(&str, PaperAssetKind)> {
         "pdf" => PaperAssetKind::Pdf,
         "source" => PaperAssetKind::Source,
         "attachments" => PaperAssetKind::Attachment,
-        "translated" => PaperAssetKind::Translated,
+        "translation" => PaperAssetKind::Translated,
         _ => return None,
     };
     Some((id, kind))

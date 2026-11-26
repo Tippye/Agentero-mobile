@@ -690,8 +690,6 @@
 			"indextranslate": "Bilibili翻译-35B-A3B",
 			"indextranslate2b": "Bilibili翻译-2B",
 			"deepl": "DeepL API",
-			"azure": "微软翻译",
-			"googleCloud": "Google Cloud Translate",
 			"openaiCompatible": "OpenAI 兼容",
 			"agent": "Agent",
 			"probeIdle": "尚未检测",
@@ -735,11 +733,7 @@
 			"final": {
 				"label": "缓存译文 PDF"
 			},
-			"translation": {
-				"label": "翻译缓存",
-				"help": "默认开启：译文 sidecar 与译文 PDF 随知识库同步；版面解析结果始终同步。关闭时译文缓存只保存在本机，删除论文或应用时一并清理。"
-			},
-			"tip": "关闭后译文缓存不再上传，但仍在本机生成和复用。",
+			"tip": "关闭开关只停止写入新文件，已有缓存仍会复用。译文 PDF 是否随知识库同步在「同步范围」中设置。",
 			"reset": "还原默认",
 			"dictionary": {
 				"label": "查词缓存",
@@ -760,10 +754,6 @@
 			"baseUrl": {
 				"label": "端点（可选）"
 			},
-			"region": {
-				"label": "区域",
-				"placeholder": "例如 eastasia"
-			},
 			"model": {
 				"label": "模型",
 				"placeholder": "服务商模型 ID"
@@ -780,8 +770,6 @@
 		},
 		"providerDesc": {
 			"deepl": "DeepL 神经机器翻译，使用官方 API Key。",
-			"azure": "微软翻译，使用 Azure 订阅密钥。",
-			"googleCloud": "谷歌云翻译 API，使用服务账号密钥。",
 			"openaiCompatible": "兼容 OpenAI Chat Completions 的接口。填写 Base URL，如 https://api.openai.com/v1；Agentero 会自动追加 /chat/completions。"
 		},
 		"agentId": {
@@ -1352,6 +1340,7 @@
 		"scopePdf": "PDF 文件",
 		"scopeSource": "LaTeX 源码",
 		"scopeAttachments": "支撑材料",
+		"scopeTranslation": "译文",
 		"scopeInk": "手写笔迹"
 	},
 	"cloudSync": {

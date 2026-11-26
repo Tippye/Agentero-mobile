@@ -1,5 +1,6 @@
 import fontkit from "@pdf-lib/fontkit";
 import {
+	cleanText,
 	PDFArray,
 	PDFDict,
 	PDFDocument,
@@ -13,6 +14,7 @@ import {
 } from "pdf-lib";
 import { visiblePageBox } from "../page-box";
 import type { ReflowFontBytes } from "./fonts";
+import { drawFormulaGlyph, embedFormulaPages } from "./formula-write";
 import { layoutReflowDocument, type ReflowFonts } from "./layout";
 import { relocateReflowLinks } from "./links";
 import type { FontKey, PageLayout, ReflowDocument } from "./types";
@@ -24,6 +26,10 @@ const parsedFonts = new WeakMap<
 	Uint8Array,
 	ReturnType<typeof fontkit.create>
 >();
+const reflowFontOptions = {
+	subset: false,
+	features: { liga: false, clig: false },
+};
 const cachingFontkit = {
 	...fontkit,
 	create(bytes: Uint8Array) {
@@ -59,11 +65,49 @@ async function loadMetrics(
 		await Promise.all(
 			entries.map(async ([key, source]) => [
 				key,
-				await pdf.embedFont(source, { subset: false }),
+				await pdf.embedFont(source, reflowFontOptions),
 			]),
 		),
 	) as ReflowFonts;
 }
+
+async function embedUsedFonts(
+	pdf: PDFDocument,
+	pages: readonly PageLayout[],
+	sources: ReturnType<typeof fontSources>,
+) {
+	const used = new Map<FontKey, Set<number>>();
+	for (const page of pages)
+		for (const paragraph of page.paragraphs)
+			for (const unit of paragraph.units) {
+				if (unit.formula) continue;
+				const text = cleanText(unit.text);
+				if (!text) continue;
+				let codePoints = used.get(unit.font);
+				if (!codePoints) {
+					codePoints = new Set<number>();
+					used.set(unit.font, codePoints);
+				}
+				for (const character of text) {
+					const codePoint = character.codePointAt(0);
+					if (codePoint !== undefined) codePoints.add(codePoint);
+				}
+			}
+	pdf.registerFontkit(fontkit);
+	const embedded = new Map<FontKey, ReflowFonts[FontKey]>();
+	for (const [key, codePoints] of used) {
+		const source = sources[key];
+		if (source instanceof Uint8Array) {
+			const { subsetReflowFont } = await import("./font-subset");
+			const subset = await subsetReflowFont(source, codePoints);
+			embedded.set(key, await pdf.embedFont(subset, reflowFontOptions));
+		} else {
+			embedded.set(key, await pdf.embedFont(source));
+		}
+	}
+	return embedded;
+}
+
 export type ReflowOutput = { bytes: Uint8Array; pages: PageLayout[] };
 export type ReflowWriteTimings = {
 	layoutMs?: number;
@@ -86,7 +130,7 @@ export async function writeReflowPdf(
 	ir: ReflowDocument,
 	translations: ReadonlyMap<string, string>,
 	cjkFont: Uint8Array | ReflowFontBytes,
-	formulaPdfs: ReadonlyMap<string, Uint8Array>,
+	formulaSource: Uint8Array | undefined,
 	commonScale: boolean,
 	onProgress?: (ratio: number) => void,
 	timings?: ReflowWriteTimings,
@@ -95,12 +139,10 @@ export async function writeReflowPdf(
 	const layoutStart = performance.now();
 	const pages = await layoutReflowPdf(ir, translations, cjkFont, commonScale);
 	if (timings) timings.layoutMs = performance.now() - layoutStart;
-	pdf.registerFontkit(cachingFontkit);
-	const sources = fontSources(cjkFont);
-	const usedFonts = new Map<
-		FontKey,
-		Awaited<ReturnType<PDFDocument["embedFont"]>>
-	>();
+	const usedFonts = await embedUsedFonts(pdf, pages, fontSources(cjkFont));
+	const formulaPages = formulaSource
+		? await embedFormulaPages(pdf, pages, await PDFDocument.load(formulaSource))
+		: undefined;
 	const sourcePages = new Map(ir.pages.map((page) => [page.index, page]));
 	onProgress?.(0.1);
 	for (const [pageIndex, page] of pages.entries()) {
@@ -133,34 +175,19 @@ export async function writeReflowPdf(
 				if (unit.formula) {
 					const f = unit.formula.box;
 					if (f.w <= 0 || f.h <= 0) continue;
-					const fragment = formulaPdfs.get(
-						`${paragraph.id}:${unit.formula.id}`,
+					const glyph = formulaPages?.get(page.index)?.get(unit);
+					if (!glyph) throw new Error(`Missing formula glyph: ${paragraph.id}`);
+					drawFormulaGlyph(
+						target,
+						glyph,
+						unit,
+						f,
+						crop.x + unit.x,
+						crop.y + crop.height - unit.y,
 					);
-					if (!fragment)
-						throw new Error(`Missing formula fragment: ${paragraph.id}`);
-					const fragmentDoc = await PDFDocument.load(fragment);
-					const fragmentPage = fragmentDoc.getPage(0);
-					const fragmentBox = visiblePageBox(fragmentPage);
-					const snippet = await pdf.embedPage(fragmentPage, {
-						left: fragmentBox.x + f.x,
-						bottom: fragmentBox.y + fragmentBox.height - f.y - f.h,
-						right: fragmentBox.x + f.x + f.w,
-						top: fragmentBox.y + fragmentBox.height - f.y,
-					});
-					target.drawPage(snippet, {
-						x: crop.x + unit.x,
-						y: crop.y + crop.height - unit.y,
-						width: unit.width,
-						height: unit.height,
-					});
 				} else {
-					let font = usedFonts.get(unit.font);
-					if (!font) {
-						font = await pdf.embedFont(sources[unit.font], {
-							subset: false,
-						});
-						usedFonts.set(unit.font, font);
-					}
+					const font = usedFonts.get(unit.font);
+					if (!font) continue;
 					target.drawText(unit.text, {
 						x: crop.x + unit.x,
 						y: crop.y + crop.height - unit.y,

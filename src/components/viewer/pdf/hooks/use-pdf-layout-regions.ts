@@ -11,6 +11,7 @@ import { useMemo } from "react";
 import { useStore } from "zustand";
 import { EMPTY_LAYOUT_REGIONS_BY_PAGE } from "@/components/viewer/pdf/constants";
 import {
+	LAYOUT_SIDEBAR_MIN_SCORE,
 	layoutAnalysisStore,
 	layoutDocumentKey,
 	type PdfLayoutRegion,
@@ -26,8 +27,8 @@ export type PdfLayoutRegions = {
 	/** Pre-merge detections, flat: the bulk-translate source. */
 	layoutRawRegions: PdfLayoutRegion[] | null;
 	/**
-	 * Post-merge element-selection targets, every kind, bucketed by 0-based
-	 * page index. Largest first. Not the figures-rail subset.
+	 * Element-selection targets, bucketed by 0-based page index, largest first.
+	 * Includes display formulas without a numbered sidebar host.
 	 */
 	selectableRegionsByPage: ReadonlyMap<number, PdfLayoutRegion[]>;
 	/** Pre-merge detections for the debug Eye overlay, bucketed by page. */
@@ -65,9 +66,13 @@ export function usePdfLayoutRegions(docId: string): PdfLayoutRegions {
 	const selectableRegionsByPage = useMemo(
 		() =>
 			layoutDocRegions
-				? selectableLayoutRegionsByPage(layoutDocRegions)
+				? selectableLayoutRegionsByPage(
+						layoutDocRegions,
+						LAYOUT_SIDEBAR_MIN_SCORE,
+						layoutRawRegions,
+					)
 				: EMPTY_LAYOUT_REGIONS_BY_PAGE,
-		[layoutDocRegions],
+		[layoutDocRegions, layoutRawRegions],
 	);
 	const rawRegionsByPage = useMemo(
 		() =>

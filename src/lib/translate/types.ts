@@ -17,11 +17,7 @@ export type FreeTranslateProviderId =
 	| "indextranslate2b";
 
 /** Commercial BYOK engines called directly by the Tauri Host. */
-export type CommercialTranslateProviderId =
-	| "deepl"
-	| "azure"
-	| "googleCloud"
-	| "openaiCompatible";
+export type CommercialTranslateProviderId = "deepl" | "openaiCompatible";
 
 export type HostTranslateProviderId =
 	| FreeTranslateProviderId
@@ -84,19 +80,12 @@ export type TranslateSettings = {
 	 */
 	cacheReflowIr: boolean;
 	/**
-	 * Persist the finished translated PDF under the paper's `translated/`
+	 * Persist the finished translated PDF under the paper's `translations/`
 	 * directory (default on: each final is ~25 MB) so reopening a translated
-	 * paper reuses the built PDF instead of typesetting it again.
+	 * paper reuses the built PDF instead of typesetting it again. Whether the
+	 * file travels with vault sync is the Sync scope's `translation` opt-in.
 	 */
 	cacheReflowFinal: boolean;
-	/**
-	 * Sync translation artifacts with the vault: the translation sidecar and
-	 * the finished translated PDF. On by default so every translation artifact
-	 * is available on other devices; turning it off keeps the sidecar out of
-	 * sync and final PDFs in the app cache. Layout files always sync as paper
-	 * metadata.
-	 */
-	cacheTranslationSync: boolean;
 	/**
 	 * Translate a paper's full text in the background once it is imported and
 	 * its layout analysis succeeds (default off: it spends provider quota).
@@ -119,8 +108,6 @@ export type TranslateProviderConfig = {
 	apiKey: string;
 	/** Optional API base URL / endpoint override. */
 	baseUrl: string;
-	/** Azure subscription region; ignored by most providers. */
-	region: string;
 	/** OpenAI-compatible model id. */
 	model: string;
 	/** JSON object replacing automatic request options; blank uses model defaults. */
@@ -208,8 +195,6 @@ export const FREE_MT_PROVIDER_IDS: FreeTranslateProviderId[] = [
 /** Ordered list for settings UI (commercial BYOK engines). */
 export const COMMERCIAL_MT_PROVIDER_IDS: CommercialTranslateProviderId[] = [
 	"deepl",
-	"azure",
-	"googleCloud",
 	"openaiCompatible",
 ];
 
@@ -223,8 +208,6 @@ export const COMMERCIAL_MT_DEFAULT_BASE_URLS: Record<
 	string
 > = {
 	deepl: "https://api-free.deepl.com",
-	azure: "https://api.cognitive.microsofttranslator.com",
-	googleCloud: "https://translation.googleapis.com",
 	openaiCompatible: "https://api.openai.com/v1",
 };
 
@@ -234,9 +217,5 @@ export const COMMERCIAL_MT_DOCS_URLS: Record<
 	string
 > = {
 	deepl: "https://www.deepl.com/pro-api",
-	azure:
-		"https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/TextTranslation",
-	googleCloud:
-		"https://console.cloud.google.com/apis/library/translate.googleapis.com",
 	openaiCompatible: "https://platform.openai.com/api-keys",
 };

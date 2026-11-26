@@ -62,10 +62,11 @@ pub struct ConfigureArgs {
     /// opt in separately.
     pub allow_degraded_sync: Option<String>,
     /// Bulky asset categories to keep out of sync (comma list of
-    /// pdf,source,attachments,ink,translated). Notes, sidecars and highlights
-    /// always sync.
+    /// pdf,source,attachments,translation,ink). Notes, sidecars and highlights
+    /// always sync. `translation` is off unless Settings turns it on; listing
+    /// it here keeps it off.
     pub exclude: Vec<String>,
-    /// Categories to opt in that are off by default (`translated`).
+    /// Categories to opt in that are off by default (`translation`).
     pub include: Vec<String>,
 }
 
@@ -480,11 +481,11 @@ fn scope_from_lists(include: &[String], exclude: &[String]) -> Result<SyncScope,
             "pdf" => scope.pdf = enabled,
             "source" => scope.source = enabled,
             "attachments" => scope.attachments = enabled,
+            "translation" => scope.translation = enabled,
             "ink" => scope.ink = enabled,
-            "translated" => scope.translated = enabled,
             other => {
                 return Err(CliError::usage(format!(
-                    "unknown scope category '{other}' (expected pdf | source | attachments | ink | translated)"
+                    "unknown scope category '{other}' (expected pdf | source | attachments | translation | ink)"
                 )))
             }
         }

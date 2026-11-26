@@ -8,6 +8,7 @@ import {
 	isPapersRoot,
 	isUnderPapers,
 	type PaperMetadata,
+	paperDeleteDescent,
 	paperDirFromPath,
 	sortFileTreeNodes,
 } from "@/lib/paper";
@@ -72,6 +73,12 @@ describe("paper folder minimal unit", () => {
 			),
 		).toBe("/vault/papers/nlp/transformers/1706.03762");
 		expect(paperDirFromPath("papers/a/b/marks/hl-1.json")).toBe("papers/a/b");
+		expect(paperDirFromPath("papers/a/b/translations/translated.pdf")).toBe(
+			"papers/a/b",
+		);
+		expect(
+			paperDirFromPath("/vault/papers/a/b/translations/bilingual.pdf"),
+		).toBe("/vault/papers/a/b");
 		expect(paperDirFromPath("/vault/notes/idea.md")).toBe(null);
 		// Main PDF on the paper root (citation links like …/id.pdf#page=1).
 		expect(paperDirFromPath("papers/vla/2504.16054/2504.16054.pdf")).toBe(
@@ -186,6 +193,52 @@ describe("paper folder minimal unit", () => {
 			"/v/papers/rubric/2601.04171",
 			"/v/papers/rubric/2601.15808",
 		]);
+	});
+
+	it("splits a delete into paper folders and directories still to walk", () => {
+		const paper = "/v/papers/demo";
+		expect(
+			paperDeleteDescent(paper, [
+				{ path: `${paper}/NOTES.md`, name: "NOTES.md", kind: "file" },
+				{ path: `${paper}/source`, name: "source", kind: "directory" },
+				{ path: `${paper}/paper.pdf`, name: "paper.pdf", kind: "file" },
+				{
+					path: `${paper}/translations`,
+					name: "translations",
+					kind: "directory",
+				},
+			]),
+		).toEqual({ papers: [paper], descend: [] });
+
+		const org = "/v/papers/rubric";
+		const nested = `${org}/2601.04171`;
+		expect(
+			paperDeleteDescent(org, [
+				{ path: `${org}/NOTES.md`, name: "NOTES.md", kind: "file" },
+				{
+					path: nested,
+					name: "2601.04171",
+					kind: "directory",
+					children: [
+						{ name: "NOTES.md", kind: "file" },
+						{ name: "metadata.json", kind: "file" },
+					],
+				},
+				{
+					path: `${org}/translations`,
+					name: "translations",
+					kind: "directory",
+				},
+			]),
+		).toEqual({ papers: [], descend: [nested] });
+
+		expect(
+			paperDeleteDescent("/vault", [
+				{ path: "/vault/notes", name: "notes", kind: "directory" },
+				{ path: "/vault/papers", name: "papers", kind: "directory" },
+				{ path: "/vault/readme.md", name: "readme.md", kind: "file" },
+			]),
+		).toEqual({ papers: [], descend: ["/vault/papers"] });
 	});
 });
 

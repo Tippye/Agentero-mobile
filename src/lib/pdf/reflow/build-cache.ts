@@ -2,19 +2,19 @@
  * Persistent cache for the finished translated document.
  *
  * The document-level build repeats the same expensive work on every restart:
- * PDFium text redaction, formula fragment extraction, full CJK font embedding
- * (each embedded copy is ~20 MB), and pdf-lib serialization. The bytes depend
+ * PDFium text redaction, vector formula placement, font subsetting, and
+ * pdf-lib serialization. The bytes depend
  * only on the source geometry IR, the exact translations, the font bytes, and
- * the reflow schema — so the finished PDF is stored and reused verbatim.
- * Local papers keep it in `papers/<id>/translated/` so vault sync can carry the
- * file to other devices; remote/pathless sessions fall back to the app cache.
- * Per-page preview builds are deliberately NOT cached: each embeds the full CJK
- * font pair, so caching them would cost ~20 MB per page for a marginal win over
- * the single final entry.
+ * the reflow schema — so the finished PDF is stored under the app cache
+ * directory and reused verbatim. Per-page preview builds are not persisted.
  *
- * The file is named by a SHA-256 content key and re-read through
- * `pdf-lib.load`, which validates PDF structure. A truncated or corrupt file
- * simply fails the load and the caller rebuilds.
+ * With a paper folder, the finished PDF is `translations/translated.pdf`
+ * next to a `translated.key` sidecar. The sidecar is the same identity
+ * `keyForFinal` returns; a mismatch is a miss, so a newer translation is
+ * not stuck behind an older file. Without a paper folder, the PDF stays in
+ * the app cache, named by a SHA-256 content key. Either file is re-read
+ * through `pdf-lib.load`, which validates PDF structure. A truncated or
+ * corrupt file simply fails the load and the caller rebuilds.
  */
 
 import { appCacheDir, join } from "@tauri-apps/api/path";
@@ -34,7 +34,6 @@ import { gunzipBytes, paperSlug, pdfSha256, sha256Bytes } from "./cache-utils";
 import type { ReflowFontBytes } from "./fonts";
 import type { ReflowDocument } from "./types";
 
-/** Fallback for remote/pathless sessions; local papers use `<paper>/translated/`. */
 const CACHE_DIR = "reflow-build";
 /** Font content pins the parser version too: new font bytes invalidate entries. */
 const FONT_ASSET_REVISION = "1eeeec2a63b05fe6fe7a1f45f0955a8fa98793c4";
@@ -44,7 +43,7 @@ const REFLOW_BUILD_CACHE_VERSION = 1;
  * + fonts (the built bytes are reused verbatim, so layout.ts or export.ts
  * changes must invalidate old entries even when the IR schema is unchanged).
  */
-const REFLOW_BUILD_PIPELINE_VERSION = 4;
+const REFLOW_BUILD_PIPELINE_VERSION = 5;
 /**
  * Translation state churns with every page-level hide/restore, so one paper
  * can legitimately produce several distinct finals in a row. Keep the newest
@@ -65,22 +64,15 @@ export type TranslationCacheIdentity = {
 export type ReflowBuildCacheSource = {
 	/** Stable paper identifier, usually the vault-relative paper folder. */
 	paperKey: string | null | undefined;
-	/**
-	 * Absolute local paper folder. Finished PDFs live in its `translated/`
-	 * directory so vault sync can carry them to other devices. Remote handles,
-	 * untitled sessions and local-only translation caches fall back to the app
-	 * cache.
-	 */
+	/** Absolute paper folder. Present builds write `translations/translated.pdf`. */
 	paperAbsPath?: string | null;
 	/** Viewer bytes; keyed by content so a changed PDF never reuses old builds. */
 	pdfBytes: ArrayBuffer | Uint8Array | null | undefined;
 	/**
-	 * Keep the finished PDF in the app cache instead of the paper's
-	 * `translated/` directory. Used when the translation-cache sync switch is
-	 * off: the file stays local and is never picked up by the sync snapshot.
+	 * Mobile fast-preview identity. When present, a small metadata sidecar is
+	 * written beside each final so `findCachedTranslatedPdf` can match the
+	 * target language/service before layout analysis finishes.
 	 */
-	localOnly?: boolean;
-	/** Identity written beside each final so a fast preview can match it. */
 	identity?: () => TranslationCacheIdentity;
 };
 
@@ -189,14 +181,9 @@ async function resolveBase(
 ): Promise<BuildBase | null> {
 	if (!isTauri() || !source.pdfBytes) return null;
 	try {
-		const pdfHash = await pdfSha256(source.pdfBytes);
-		const paper = source.paperAbsPath;
-		if (paper && !source.localOnly && !isRemoteVaultHandle(paper)) {
-			return { dir: await join(paper, "translated"), pdfSha256: pdfHash };
-		}
 		return {
 			dir: await join(await appCacheDir(), CACHE_DIR),
-			pdfSha256: pdfHash,
+			pdfSha256: await pdfSha256(source.pdfBytes),
 		};
 	} catch (error) {
 		logger.warn("pdf.reflow.buildCache key failed", {
@@ -311,32 +298,38 @@ export function createReflowBuildCache(
 			`${cacheBase.pdfSha256.slice(0, 16)}-${fingerprint.slice(0, 32)}.pdf`,
 		);
 	};
-	const alternateEntryPath = async (
-		fingerprint: string,
+
+	const finalIdentity = async (
+		document: ReflowDocument,
+		translations: ReadonlyMap<string, string>,
+		fonts: ReflowFontBytes,
 	): Promise<string | null> => {
-		const cacheBase = await baseIdentity();
-		if (!cacheBase) return null;
-		let dir: string;
-		if (source.localOnly) {
-			if (!source.paperAbsPath || isRemoteVaultHandle(source.paperAbsPath)) {
-				return null;
-			}
-			dir = await join(source.paperAbsPath, "translated");
-		} else {
-			try {
-				dir = await join(await appCacheDir(), CACHE_DIR);
-			} catch {
-				return null;
-			}
-		}
-		return join(
-			dir,
-			`${cacheBase.pdfSha256.slice(0, 16)}-${fingerprint.slice(0, 32)}.pdf`,
-		);
+		if (!source.pdfBytes) return null;
+		const [pdf, build] = await Promise.all([
+			pdfSha256(source.pdfBytes),
+			documentFingerprint(document, translations, fonts),
+		]);
+		return `${pdf}-${build}`;
 	};
-	const writeMetadata = async (
-		path: string,
-		cacheBase: BuildBase,
+
+	const paperProduct = async (): Promise<{
+		pdf: string;
+		key: string;
+	} | null> => {
+		const paperDir = source.paperAbsPath?.trim();
+		// Remote vault handles are not local filesystem paths; those sessions
+		// keep the final in the app cache (mobile).
+		if (!paperDir || isRemoteVaultHandle(paperDir)) return null;
+		return {
+			pdf: await join(paperDir, "translations", "translated.pdf"),
+			key: await join(paperDir, "translations", "translated.key"),
+		};
+	};
+
+	/** Mobile fast-preview sidecar; best-effort like the cache itself. */
+	const writePreviewMetadata = async (
+		pdfPath: string,
+		pdfSha256Value: string,
 	): Promise<void> => {
 		const identity = source.identity?.();
 		if (!identity) return;
@@ -344,7 +337,7 @@ export function createReflowBuildCache(
 			schemaVersion: 1,
 			paperKey: source.paperKey ?? null,
 			paperAbsPath: source.paperAbsPath ?? null,
-			pdfSha256: cacheBase.pdfSha256,
+			pdfSha256: pdfSha256Value,
 			sourceLang: identity.sourceLang,
 			targetLang: identity.targetLang,
 			providerId: identity.providerId,
@@ -353,22 +346,25 @@ export function createReflowBuildCache(
 			generatedAt: new Date().toISOString(),
 		};
 		await writeCacheEntry(
-			path.replace(/\.pdf$/i, ".json"),
+			pdfPath.replace(/\.pdf$/i, ".json"),
 			new TextEncoder().encode(JSON.stringify(metadata)),
 		);
 	};
 
 	return {
 		writesEnabled: canWrite,
-		async keyForFinal(document, translations, fonts) {
-			if (!source.pdfBytes) return null;
-			const [pdf, build] = await Promise.all([
-				pdfSha256(source.pdfBytes),
-				documentFingerprint(document, translations, fonts),
-			]);
-			return `${pdf}-${build}`;
-		},
+		keyForFinal: finalIdentity,
 		async readFinal(document, translations, fonts) {
+			const identity = await finalIdentity(document, translations, fonts);
+			const product = await paperProduct();
+			if (product) {
+				const stored = await readCacheEntry(product.pdf);
+				if (stored) {
+					const sidecar = await readCacheEntry(product.key);
+					const key = sidecar ? new TextDecoder().decode(sidecar).trim() : "";
+					return identity && key === identity ? stored : null;
+				}
+			}
 			const fingerprint = await documentFingerprint(
 				document,
 				translations,
@@ -376,32 +372,23 @@ export function createReflowBuildCache(
 			);
 			const path = await entryPath(`final-${fingerprint}`);
 			if (!path) return null;
-			const cacheBase = await baseIdentity();
-			const primary = await readCacheEntry(path);
-			if (primary) {
-				// Legacy finals predate the metadata sidecar; certify the hit so
-				// the next click can show it before layout analysis.
-				if (cacheBase) await writeMetadata(path, cacheBase);
-				return primary;
-			}
-			// Read the other location so a paper keeps its translated PDF after
-			// the sync switch flips (paper folder ↔ app cache).
-			const alternate = await alternateEntryPath(`final-${fingerprint}`);
-			if (!alternate || alternate === path) return null;
-			const bytes = await readCacheEntry(alternate);
-			if (!bytes) return null;
-			if (cacheBase) await writeMetadata(alternate, cacheBase);
-			if (!source.localOnly && cacheBase) {
-				// The switch is on: promote a final that was built while sync was
-				// off into the paper folder so the next sync publishes it.
-				await writeCacheEntry(path, bytes);
-				await writeMetadata(path, cacheBase);
-				await pruneBuildDir(cacheBase.dir, cacheBase.pdfSha256.slice(0, 16));
-			}
-			return bytes;
+			return readCacheEntry(path);
 		},
 		async writeFinal(document, translations, fonts, bytes) {
 			if (!canWrite()) return;
+			const product = await paperProduct();
+			if (product) {
+				const identity = await finalIdentity(document, translations, fonts);
+				if (!identity) return;
+				await writeCacheEntry(product.pdf, bytes);
+				await writeCacheEntry(
+					product.key,
+					new TextEncoder().encode(`${identity}\n`),
+				);
+				// `identity` is `<pdf sha256>-<build fingerprint>`.
+				await writePreviewMetadata(product.pdf, identity.slice(0, 64));
+				return;
+			}
 			const fingerprint = await documentFingerprint(
 				document,
 				translations,
@@ -411,9 +398,10 @@ export function createReflowBuildCache(
 			if (!path) return;
 			await writeCacheEntry(path, bytes);
 			const cacheBase = await baseIdentity();
-			if (cacheBase) await writeMetadata(path, cacheBase);
-			if (cacheBase)
+			if (cacheBase) {
+				await writePreviewMetadata(path, cacheBase.pdfSha256);
 				await pruneBuildDir(cacheBase.dir, cacheBase.pdfSha256.slice(0, 16));
+			}
 		},
 	};
 }
@@ -455,10 +443,10 @@ function cacheIdentityMatches(
  * Locate one finished translated PDF for the current target language/service.
  *
  * This runs before layout analysis so the reader can show the cached result
- * immediately. It deliberately requires the metadata sidecar written next to
- * each final: the content hash alone cannot tell two target languages apart.
- * Paper-local finals are checked first, then the app cache used when
- * translation-cache sync is off.
+ * immediately (mobile). It deliberately requires the metadata sidecar written
+ * beside each final: the content hash alone cannot tell two target languages
+ * apart. The upstream `translations/` product is checked first, then the
+ * legacy mobile `translated/` directory and the app-cache fallback.
  */
 export async function findCachedTranslatedPdf(opts: {
 	paperAbsPath?: string | null;
@@ -471,6 +459,7 @@ export async function findCachedTranslatedPdf(opts: {
 	const dirs: string[] = [];
 	if (opts.paperAbsPath && !isRemoteVaultHandle(opts.paperAbsPath)) {
 		try {
+			dirs.push(await join(opts.paperAbsPath, "translations"));
 			dirs.push(await join(opts.paperAbsPath, "translated"));
 		} catch {
 			// Ignore path failures; the app cache is still worth checking.
@@ -492,7 +481,11 @@ export async function findCachedTranslatedPdf(opts: {
 		}
 		for (const entry of entries) {
 			if (!entry.isFile || !entry.name.endsWith(".json")) continue;
-			if (!entry.name.includes("-final-")) continue;
+			// Upstream single final writes `translated.json`; legacy mobile
+			// entries are content-keyed `*-final-*.json`.
+			if (entry.name !== "translated.json" && !entry.name.includes("-final-")) {
+				continue;
+			}
 			const metadataPath = await join(dir, entry.name);
 			let metadata: TranslationCacheMetadata;
 			try {
@@ -502,9 +495,7 @@ export async function findCachedTranslatedPdf(opts: {
 			} catch {
 				continue;
 			}
-			if (!cacheIdentityMatches(metadata, opts.identity)) {
-				continue;
-			}
+			if (!cacheIdentityMatches(metadata, opts.identity)) continue;
 			if (
 				opts.pdfSha256 &&
 				metadata.pdfSha256 &&
@@ -554,9 +545,10 @@ export async function findCachedTranslatedPdf(opts: {
 }
 
 /**
- * Remove the app-cache side of a deleted paper: local-only final PDFs and their
- * metadata, plus the reflow IR pages. Paper-local files are deleted with the
- * paper itself; this keeps the cache from outliving it when sync is off.
+ * Remove the app-cache side of a deleted paper: final PDFs and their metadata,
+ * plus the reflow IR pages. Paper-local files are deleted with the paper
+ * itself; this keeps the cache from outliving it when a mobile shell deletes
+ * permanently instead of trashing.
  */
 export async function clearLocalTranslationCaches(
 	rels: readonly string[],
@@ -616,9 +608,10 @@ export async function clearLocalTranslationCaches(
 }
 
 /**
- * Sweep local-only finals whose paper no longer exists. Recycle-bin purges do
- * not carry the original vault paths, so this runs after a purge and only
- * removes entries that cannot belong to a live paper.
+ * Sweep app-cache finals whose paper no longer exists (mobile). Recycle-bin
+ * purges do not carry the original vault paths, so this runs after a purge and
+ * only removes entries that cannot belong to a live paper. Paper-folder
+ * products are deleted with the paper itself.
  */
 export async function clearOrphanedTranslationCaches(
 	vaultPath: string,

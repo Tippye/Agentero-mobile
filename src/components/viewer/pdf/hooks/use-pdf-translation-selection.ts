@@ -19,6 +19,8 @@ import {
 	rectBottomCenterScreen,
 } from "@/components/viewer/pdf/coords";
 import {
+	type ClippedTranslationRange,
+	clippedPartsFor,
 	translationPageFrames,
 	useTranslationSelectionBands,
 } from "@/components/viewer/pdf/hooks/use-translation-selection-bands";
@@ -26,6 +28,7 @@ import {
 	clearDomSelectionInside,
 	isEditableClipboardTarget,
 } from "@/components/viewer/pdf/host-dom";
+import { layoutElementActionStore } from "@/components/viewer/pdf/layout-element-action-store";
 import {
 	holdLayoutSentenceHover,
 	releaseHeldLayoutSentenceHover,
@@ -40,6 +43,16 @@ import {
 	createSelectionContext,
 	selectionStore,
 } from "@/lib/agent/selection-store";
+import { LAYOUT_REGION_CLICK_MOVE_TOLERANCE_PX } from "@/lib/pdf/layout/click-guard";
+import {
+	clipElementDragHits,
+	elementDragAnchorAt,
+	elementDragBoxFromPoints,
+	elementDragHitKey,
+	elementDragSelectionRanges,
+	elementDragTargetsFromDom,
+	trimRangeToParts,
+} from "@/lib/pdf/layout/element-drag-clip";
 import {
 	bboxToPageRect,
 	locateSelectionGlyphs,
@@ -49,6 +62,7 @@ import {
 	translationSelectionFromHits,
 	translationTextFromRange,
 } from "@/lib/pdf/layout/layout-sentence-selection";
+import { layoutSentenceScope } from "@/lib/pdf/layout/store";
 import { clearTranslationSelectionBands } from "@/lib/pdf/layout/translation-selection-bands";
 import type { LayoutTranslateItem } from "@/lib/pdf/layout/types";
 import {
@@ -91,6 +105,13 @@ function caretInsideLayoutItem(host: HTMLElement | null): boolean {
 	if (!node) return false;
 	const el = node instanceof Element ? node : node.parentElement;
 	return Boolean(el && host.contains(el) && el.closest("[data-layout-item]"));
+}
+
+function elementSelectionActive(docId: string): boolean {
+	return (
+		layoutElementActionStore.getState().selectionDocumentId ===
+		layoutSentenceScope(docId)
+	);
 }
 
 function hostRange(host: HTMLElement): Range | null {
@@ -229,7 +250,8 @@ export function usePdfTranslationSelection({
 		setSelectionMenu(null);
 	}, [docId, hostRef, clearPublished, setSelectionMenu]);
 
-	useTranslationSelectionBands(docId, hostRef, enabled);
+	const clippedRef = useRef<ClippedTranslationRange | null>(null);
+	useTranslationSelectionBands(docId, hostRef, enabled, clippedRef);
 
 	useEffect(() => {
 		if (!enabled || !selectionMenu) return;
@@ -261,12 +283,22 @@ export function usePdfTranslationSelection({
 		let disposed = false;
 		let visible = true;
 		let pointerDown = false;
+		let pointerId: number | null = null;
+		let strokeOrigin: { x: number; y: number } | null = null;
+		let dragClip: {
+			box: ReturnType<typeof elementDragBoxFromPoints>;
+			down: { x: number; y: number };
+		} | null = null;
 		let releaseDrag: (() => void) | null = null;
 		let releaseFrame = 0;
 		const inflight = new Set<number>();
 		const reset = () => {
 			genRef.current += 1;
 			pointerDown = false;
+			pointerId = null;
+			strokeOrigin = null;
+			dragClip = null;
+			clippedRef.current = null;
 			inflight.clear();
 			if (releaseFrame) cancelAnimationFrame(releaseFrame);
 			releaseFrame = 0;
@@ -304,8 +336,9 @@ export function usePdfTranslationSelection({
 			if (!visible) return;
 			const root = hostRef.current;
 			if (!root) return;
-			const range = hostRange(root);
+			let range = hostRange(root);
 			if (!range) {
+				clippedRef.current = null;
 				// Do not bump the generation. A focus move collapses the range
 				// after pointerup, and that must not cancel the locate already
 				// started for the text the reader just selected.
@@ -314,12 +347,52 @@ export function usePdfTranslationSelection({
 				}
 				return;
 			}
-			const selectedText = range.toString();
+			if (clippedPartsFor(range, clippedRef.current)) return;
 			const generation = ++genRef.current;
 			const alive = () => genRef.current === generation;
-			const hits = translationHitsFromRange(range, root);
-			if (!hits.length) return;
 			const items = [...itemsRef.current.values()].flat();
+			let hits = translationHitsFromRange(range, root);
+			let clippedParts: Range[] | undefined;
+			if (dragClip && elementSelectionActive(docId) && hits.length > 0) {
+				const targets = elementDragTargetsFromDom(root, items, range);
+				const clipped = clipElementDragHits(
+					hits,
+					targets,
+					dragClip.box,
+					elementDragAnchorAt(targets, dragClip.down),
+				);
+				clippedParts = elementDragSelectionRanges(
+					range,
+					root,
+					new Set(clipped.map(elementDragHitKey)),
+				);
+				if (clipped.length < hits.length) {
+					const selection = window.getSelection();
+					const backward = selectionSideFromSelection(selection) === "above";
+					const trimmed = range.cloneRange();
+					if (trimRangeToParts(trimmed, clippedParts) && selection) {
+						if (trimmed.collapsed) {
+							selection.removeAllRanges();
+						} else {
+							const start = [
+								trimmed.startContainer,
+								trimmed.startOffset,
+							] as const;
+							const end = [trimmed.endContainer, trimmed.endOffset] as const;
+							const [base, focus] = backward ? [end, start] : [start, end];
+							selection.setBaseAndExtent(...base, ...focus);
+						}
+						range = trimmed;
+					}
+				}
+				clippedRef.current = { range: range.cloneRange(), parts: clippedParts };
+				hits = clipped;
+			}
+			if (!hits.length) {
+				if (dragClip && elementSelectionActive(docId)) closeSelectionMenu();
+				return;
+			}
+			const selectedText = range.toString();
 			const lastHit = hits.at(-1);
 			const preferredPageIndex = items.find(
 				(item) => item.id === lastHit?.itemId,
@@ -332,7 +405,9 @@ export function usePdfTranslationSelection({
 				hits,
 				items,
 				targetLang,
-				translationTextFromRange(range, root),
+				clippedParts
+					? clippedParts.map((part) => part.toString()).join(" ")
+					: translationTextFromRange(range, root),
 			);
 			if (!resolved) return;
 			void (async () => {
@@ -380,7 +455,9 @@ export function usePdfTranslationSelection({
 					};
 					const frames = translationPageFrames(root);
 					const visiblePages = visiblePagesFromClientRects(
-						translatedSelectionLineRects(root, live),
+						(clippedParts ?? [live]).flatMap((part) =>
+							translatedSelectionLineRects(root, part),
+						),
 						frames,
 					);
 					const pageEl = pageElByIndex(root, pageIndex);
@@ -452,30 +529,64 @@ export function usePdfTranslationSelection({
 
 		const onPointerDown = (event: PointerEvent) => {
 			if (!visible || event.button !== 0) return;
-			const target = event.target;
-			const el =
-				target instanceof Element
-					? target
-					: target instanceof Node
-						? target.parentElement
-						: null;
-			if (!el?.closest("[data-layout-item]")) return;
+			dragClip = null;
+			clippedRef.current = null;
+			strokeOrigin = null;
 			pointerDown = true;
-			if (!releaseDrag) {
-				releaseDrag = holdLinkPreviewDrag();
+			pointerId = event.pointerId;
+			const target =
+				event.target instanceof Element
+					? event.target
+					: event.target instanceof Node
+						? event.target.parentElement
+						: null;
+			if (!target) return;
+			const onTranslation = target.closest("[data-layout-item]");
+			if (
+				elementSelectionActive(docId) &&
+				(onTranslation ||
+					(target.closest(`[${EMBED_PAGE_ATTR}]`) &&
+						!target.closest(
+							"[data-pdf-chrome], [data-layout-element], button",
+						)))
+			) {
+				strokeOrigin = { x: event.clientX, y: event.clientY };
 			}
+			if (onTranslation && !releaseDrag) releaseDrag = holdLinkPreviewDrag();
 		};
-		// A drag can end outside the viewport. Let the release reach other handlers.
-		const onPointerUp = () => {
-			if (!pointerDown) return;
+		const onPointerUp = (event: PointerEvent) => {
+			if (!pointerDown || event.pointerId !== pointerId) return;
 			pointerDown = false;
+			pointerId = null;
+			if (strokeOrigin && event.type === "pointerup") {
+				const end = { x: event.clientX, y: event.clientY };
+				const distance = Math.hypot(
+					end.x - strokeOrigin.x,
+					end.y - strokeOrigin.y,
+				);
+				if (distance > LAYOUT_REGION_CLICK_MOVE_TOLERANCE_PX) {
+					dragClip = {
+						box: elementDragBoxFromPoints(strokeOrigin, end),
+						down: strokeOrigin,
+					};
+				}
+			}
+			strokeOrigin = null;
 			commit();
 			scheduleReleaseDrag();
 		};
 		const onPointerCancel = () => {
 			if (!pointerDown) return;
+			dragClip = null;
+			clippedRef.current = null;
+			strokeOrigin = null;
+			pointerDown = false;
+			pointerId = null;
 			reset();
 			closeSelectionMenu();
+		};
+		const onKeyDown = () => {
+			if (!pointerDown) dragClip = null;
 		};
 		const onCopy = (event: ClipboardEvent) => {
 			if (
@@ -511,6 +622,8 @@ export function usePdfTranslationSelection({
 				event.clientY,
 			);
 			if (!sentence || !host.contains(sentence)) return;
+			dragClip = null;
+			clippedRef.current = null;
 			event.preventDefault();
 			event.stopPropagation();
 			const item = sentence.closest<HTMLElement>("[data-layout-item]");
@@ -542,6 +655,7 @@ export function usePdfTranslationSelection({
 		host.addEventListener("pointerdown", onPointerDown);
 		document.addEventListener("pointerup", onPointerUp, true);
 		document.addEventListener("pointercancel", onPointerCancel, true);
+		document.addEventListener("keydown", onKeyDown, true);
 		document.addEventListener("selectionchange", onSelectionChange);
 		document.addEventListener("copy", onCopy);
 		return () => {
@@ -553,6 +667,7 @@ export function usePdfTranslationSelection({
 			host.removeEventListener("pointerdown", onPointerDown);
 			document.removeEventListener("pointerup", onPointerUp, true);
 			document.removeEventListener("pointercancel", onPointerCancel, true);
+			document.removeEventListener("keydown", onKeyDown, true);
 			document.removeEventListener("selectionchange", onSelectionChange);
 			document.removeEventListener("copy", onCopy);
 		};

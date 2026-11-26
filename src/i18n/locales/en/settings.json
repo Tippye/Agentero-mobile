@@ -690,8 +690,6 @@
 			"indextranslate": "Bilibili Translate 35B-A3B",
 			"indextranslate2b": "Bilibili Translate 2B",
 			"deepl": "DeepL API",
-			"azure": "Microsoft Translator",
-			"googleCloud": "Google Cloud Translate",
 			"openaiCompatible": "OpenAI-compatible",
 			"agent": "Agent",
 			"probeIdle": "Not checked yet",
@@ -735,11 +733,7 @@
 			"final": {
 				"label": "Cache translated PDF"
 			},
-			"translation": {
-				"label": "Translation cache",
-				"help": "On by default: the translation sidecar and translated PDFs sync with the vault; layout analysis always syncs. When off, translation caches stay on this device and are removed with the paper or the app."
-			},
-			"tip": "Turning it off stops uploads; this device still creates and reuses the cache.",
+			"tip": "Turning a switch off only stops new writes; existing entries keep being reused. Whether translated PDFs travel with vault sync is set in Sync scope.",
 			"reset": "Restore defaults",
 			"dictionary": {
 				"label": "Word lookup cache",
@@ -760,10 +754,6 @@
 			"baseUrl": {
 				"label": "Endpoint (optional)"
 			},
-			"region": {
-				"label": "Region",
-				"placeholder": "e.g. eastasia"
-			},
 			"model": {
 				"label": "Model",
 				"placeholder": "Provider model id"
@@ -780,8 +770,6 @@
 		},
 		"providerDesc": {
 			"deepl": "DeepL neural machine translation, configured with an official API key.",
-			"azure": "Microsoft Translator, configured with an Azure subscription key.",
-			"googleCloud": "Google Cloud Translation API, configured with a service-account key.",
 			"openaiCompatible": "OpenAI Chat Completions-compatible endpoint. Enter the Base URL, e.g. https://api.openai.com/v1; Agentero appends /chat/completions."
 		},
 		"agentId": {
@@ -1352,6 +1340,7 @@
 		"scopePdf": "PDFs",
 		"scopeSource": "LaTeX sources",
 		"scopeAttachments": "Attachments",
+		"scopeTranslation": "Translations",
 		"scopeInk": "Ink annotations"
 	},
 	"cloudSync": {
