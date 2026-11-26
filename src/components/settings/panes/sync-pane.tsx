@@ -1469,6 +1469,26 @@ function VaultSyncForm({
 						/>
 					</span>
 				</SyncSettingsRow>
+				<SyncSettingsRow
+					mobile={mobile}
+					label={t("sync.scopeTranslation")}
+					htmlFor="sync-scope-translation"
+				>
+					<span className="flex items-center gap-2">
+						{scopeSizes ? (
+							<span className="text-muted-foreground text-xs tabular-nums">
+								{formatBytes(scopeSizes.translation ?? 0)}
+							</span>
+						) : null}
+						<Switch
+							disabled={scopeDisabled}
+							className={mobile ? "after:-inset-y-3.5" : undefined}
+							id="sync-scope-translation"
+							checked={scope.translation}
+							onCheckedChange={(checked) => patchScope("translation", checked)}
+						/>
+					</span>
+				</SyncSettingsRow>
 				{mobile ? (
 					<SyncSettingsRow
 						mobile

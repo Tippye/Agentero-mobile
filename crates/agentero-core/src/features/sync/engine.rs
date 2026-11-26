@@ -1480,7 +1480,7 @@ fn visible_files(
     mut files: BTreeMap<String, FileEntry>,
     sync_scope: &SyncScope,
 ) -> BTreeMap<String, FileEntry> {
-    if !sync_scope.is_all() {
+    if sync_scope.has_exclusions() {
         let roots = scope::paper_roots(files.keys().map(String::as_str));
         files.retain(|path, _| !scope::excluded(sync_scope, path, &roots));
     }
@@ -1609,10 +1609,10 @@ fn merge_with_paper_presence(
         .collect();
     paths.sort();
     paths.dedup();
-    let roots = if local_scope.is_all() && remote_scope.is_all() {
-        Default::default()
-    } else {
+    let roots = if local_scope.has_exclusions() || remote_scope.has_exclusions() {
         scope::paper_roots(paths.iter().map(|path| path.as_str()))
+    } else {
+        Default::default()
     };
 
     for path in paths {
@@ -3143,6 +3143,24 @@ mod tests {
         assert_eq!(plan.merged["papers/x/x.pdf"].hash, "h0");
         assert!(plan.delete_local.is_empty());
         assert!(plan.downloads.is_empty());
+    }
+
+    #[test]
+    fn merge_closed_translation_is_inert_when_the_other_categories_are_on() {
+        let path = "papers/x/translations/translated.pdf";
+        let base = map(&[(path, entry("h0", 1))]);
+        let local = map(&[]);
+        let remote = map(&[(path, entry("hr", 2))]);
+        let plan = merge(
+            &base,
+            &local,
+            &remote,
+            &snapshot::SyncScope::all(),
+            &snapshot::SyncScope::all(),
+        );
+        assert_eq!(plan.merged[path].hash, "hr");
+        assert!(plan.downloads.is_empty());
+        assert!(plan.delete_local.is_empty());
     }
 
     #[test]

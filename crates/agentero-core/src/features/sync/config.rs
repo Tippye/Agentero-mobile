@@ -111,8 +111,9 @@ pub struct SyncBackendConfig {
     /// Phase 1: WebDAV only. See `docs/development/sync-degraded-mode.md`.
     #[serde(default)]
     pub allow_degraded_sync: bool,
-    /// Which bulky paper assets (PDF / LaTeX source / attachments) take part
-    /// in sync. Notes, sidecars and marks always sync. Default: everything.
+    /// Which bulky paper assets take part in sync. Notes, sidecars and marks
+    /// always sync. PDF, source, and attachments default on. Translations
+    /// default off.
     #[serde(default)]
     pub scope: SyncScope,
     /// Divergent-edit handling: `auto` keeps mtime last-writer-wins with
@@ -877,7 +878,7 @@ mod tests {
         // Missing scope = product default: ink on, translated PDFs opt-in.
         assert!(cfg.scope.pdf && cfg.scope.source && cfg.scope.attachments);
         assert!(cfg.scope.ink);
-        assert!(!cfg.scope.translated);
+        assert!(!cfg.scope.translation);
     }
 
     #[test]
@@ -1069,7 +1070,7 @@ mod tests {
         // Mobile product default: translated PDFs are opt-in (off), so the
         // default scope is not "all"; the other bulky categories stay on.
         assert!(cfg.scope.pdf && cfg.scope.source && cfg.scope.attachments && cfg.scope.ink);
-        assert!(!cfg.scope.translated);
+        assert!(!cfg.scope.translation);
         assert_eq!(
             cfg.remote_identity(),
             r#"["git","https://github.com/u/papers.git","main"]"#
@@ -1225,8 +1226,8 @@ mod tests {
             pdf: false,
             source: true,
             attachments: false,
+            translation: false,
             ink: false,
-            translated: false,
         };
         let scope = cfg.scope;
         assert_eq!(cfg.normalized().scope, scope);

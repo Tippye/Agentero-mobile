@@ -6864,8 +6864,9 @@ export type SyncBackendConfig_Deserialize = {
 	 */
 	allowDegradedSync?: boolean,
 	/**
-	 *  Which bulky paper assets (PDF / LaTeX source / attachments) take part
-	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
+	 *  Which bulky paper assets take part in sync. Notes, sidecars and marks
+	 *  always sync. PDF, source, and attachments default on. Translations
+	 *  default off.
 	 */
 	scope?: SyncScope,
 	/**
@@ -6948,8 +6949,9 @@ export type SyncBackendConfig_Serialize = {
 	 */
 	allowDegradedSync: boolean,
 	/**
-	 *  Which bulky paper assets (PDF / LaTeX source / attachments) take part
-	 *  in sync. Notes, sidecars and marks always sync. Default: everything.
+	 *  Which bulky paper assets take part in sync. Notes, sidecars and marks
+	 *  always sync. PDF, source, and attachments default on. Translations
+	 *  default off.
 	 */
 	scope: SyncScope,
 	/**
@@ -7138,9 +7140,9 @@ export type SyncResolveConflictsArgs = {
 /**
  *  Which bulky, re-derivable paper assets participate in sync. Notes,
  *  metadata sidecars, highlights and embedded images always sync — they are
- *  small and not recoverable from any upstream source. Ink strokes and
- *  translated PDFs are optional because only some devices produce them or need
- *  them.
+ *  small and not recoverable from any upstream source. Translation PDFs are
+ *  opt-in (upstream default off); ink strokes are a mobile optional category
+ *  that has always travelled implicitly, so they stay on by default.
  */
 export type SyncScope = {
 	/**  Paper-root PDFs: `papers/<id>/<id>.pdf`. */
@@ -7149,10 +7151,16 @@ export type SyncScope = {
 	source?: boolean,
 	/**  Supplementary material: `papers/<id>/attachments/`. */
 	attachments?: boolean,
-	/**  Handwritten ink sidecars: `papers/<id>/marks/ink/`. */
+	/**
+	 *  Finished translation PDFs: `papers/<id>/translations/`.
+	 *  Missing on older configs. Off — not `Default::all()`.
+	 */
+	translation?: boolean,
+	/**
+	 *  Handwritten ink sidecars: `papers/<id>/marks/ink/`.
+	 *  Mobile optional category; missing on older configs means on.
+	 */
 	ink?: boolean,
-	/**  Finished translated PDFs: `papers/<id>/translated/`. */
-	translated?: boolean,
 };
 
 /**  Local disk usage per bulky-asset category (bytes), for the sync-scope UI. */
@@ -7160,10 +7168,9 @@ export type SyncScopeSizes = {
 	pdf: number,
 	source: number,
 	attachments: number,
+	translation: number,
 	/**  Handwritten ink sidecars (mobile optional category). */
 	ink: number,
-	/**  Finished translated PDFs (mobile optional category). */
-	translated: number,
 };
 
 /**
@@ -7252,7 +7259,6 @@ export type TerminalAppStatus = {
 export type TranslateProviderConfig = {
 	apiKey?: string,
 	baseUrl?: string,
-	region?: string,
 	model?: string,
 	extraRequestBody?: string,
 	/**
@@ -7288,18 +7294,13 @@ export type TranslateSettings = {
 	/**  Persist extracted reflow character IR pages in the app cache (default on). */
 	cacheReflowIr?: boolean,
 	/**
-	 *  Persist the finished translated PDF in the paper's `translated/`
+	 *  Persist the finished translated PDF in the paper's `translations/`
 	 *  directory (default on; each final is roughly 25 MB) so reopening a
 	 *  translated paper reuses the built PDF instead of typesetting again.
+	 *  Whether it travels with vault sync is the Sync scope's `translation`
+	 *  opt-in.
 	 */
 	cacheReflowFinal?: boolean,
-	/**
-	 *  Sync translation artifacts with the vault: the translation sidecar and the
-	 *  finished translated PDF. On by default so every translation artifact is
-	 *  available on the other devices; turning it off keeps them local (app
-	 *  cache) instead. Layout files always sync as paper metadata.
-	 */
-	cacheTranslationSync?: boolean,
 	/**
 	 *  Full-document translation runs in the background after a paper is
 	 *  imported and its layout lands (default off: it spends provider quota).
@@ -7332,8 +7333,6 @@ export type TranslateTextArgs = {
 	apiKey?: string | null,
 	/**  Commercial BYOK base URL / endpoint override. */
 	baseUrl?: string | null,
-	/**  Azure subscription region. */
-	region?: string | null,
 	/**  OpenAI-compatible model id. */
 	model?: string | null,
 	/**

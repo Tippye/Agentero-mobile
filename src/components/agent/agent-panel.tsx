@@ -1,3 +1,4 @@
+import { PencilLine } from "lucide-react";
 import type {
 	KeyboardEvent as ReactKeyboardEvent,
 	PointerEvent as ReactPointerEvent,
@@ -17,11 +18,17 @@ import {
 	isAskUserSurfaceActive,
 } from "@/components/agent/agent-ask-user-surface";
 import { AgentComposer } from "@/components/agent/agent-composer";
-import { AgentConfigBar } from "@/components/agent/agent-config-bar";
+import {
+	AgentConfigBar,
+	ComposerCollaborationSelector,
+	ComposerFastToggle,
+} from "@/components/agent/agent-config-bar";
 import { SidebarHistoryTrailing } from "@/components/agent/agent-history";
 import { AgentPermissionDialog } from "@/components/agent/agent-permission-dialog";
 import { AgentSwitcher } from "@/components/agent/agent-switcher";
 import { ChatTranscript } from "@/components/agent/chat-transcript";
+import { ComposerModelSelector } from "@/components/agent/composer/composer-model-selector";
+import { ConversationWidthHandles } from "@/components/agent/conversation-width-handles";
 import { PiProjectTrustNotice } from "@/components/agent/pi-project-trust-notice";
 import type { AgentPanelProps } from "@/components/agent/types";
 import { useAgentPanel } from "@/components/agent/use-agent-panel";
@@ -32,6 +39,10 @@ import {
 	createAgentSessionStore,
 } from "@/lib/agent/agent-session-store";
 import type { AgentOption } from "@/lib/agent/chat-state";
+import {
+	setConversationWidth,
+	useConversationWidth,
+} from "@/lib/agent/conversation-width";
 import { cn } from "@/lib/core/utils";
 import { RemoteAgentTransport } from "@/lib/remote-agent/agent-transport";
 
@@ -173,10 +184,12 @@ function AgentPanelContent({
 	remotePaperSource,
 	regionContext,
 	onRegionContextHandled,
+	workspace = false,
 }: AgentPanelContentProps) {
 	const remoteSelected = transport !== undefined;
 	const remoteReady = !remoteSelected || transport !== null;
 	const { t } = useTranslation("agent");
+	const conversationWidth = useConversationWidth();
 	const [excludedPaperKey, setExcludedPaperKey] = useState<string | null>(null);
 	const remotePaper =
 		remoteSelected &&
@@ -499,6 +512,41 @@ function AgentPanelContent({
 			onOpenAgentSettings={onOpenAgentSettings}
 		/>
 	);
+	const workspaceFooterStart = workspace ? (
+		<ComposerCollaborationSelector
+			options={collaborationOptions}
+			value={collaborationModeId}
+			selectedName={selectedCollaborationName}
+			onPick={pickCollaborationMode}
+			labelPrefix={false}
+			icon={<PencilLine className="size-3.5 shrink-0" aria-hidden />}
+		/>
+	) : null;
+	const workspaceFooterEnd = workspace ? (
+		<div className="flex min-w-0 shrink items-center gap-1">
+			<ComposerFastToggle
+				fastAvailable={fastAvailable}
+				fastEnabled={fastEnabled}
+				onToggle={toggleFastEnabled}
+			/>
+			<ComposerModelSelector
+				open={modelSelectorOpen}
+				onOpenChange={setModelSelectorOpen}
+				models={models}
+				groupedModels={groupedModels}
+				modelId={modelId}
+				selectedModelName={selectedModelName}
+				favoriteIds={favoriteIds}
+				warming={warming}
+				onPickModel={handlePickModel}
+				onToggleFavorite={toggleFavorite}
+				effortOptions={effortOptions}
+				reasoningEffort={reasoningEffort}
+				onReasoningEffortChange={pickReasoningEffort}
+			/>
+		</div>
+	) : null;
+
 	return (
 		<section
 			data-agent-panel
@@ -508,66 +556,81 @@ function AgentPanelContent({
 			)}
 			aria-label={title}
 		>
-			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-				<PaneHeader
-					trailing={
-						remoteReady ? (
-							<SidebarHistoryTrailing
-								historyOpen={historyOpen}
-								onHistoryOpenChange={setHistoryOpen}
-								activeTabId={activeTabId}
-								submitting={submitting}
-								headerActions={headerActions}
-								onNewConversation={newConversation}
-								onOpenSession={openHistorySession}
-								onDeleteSession={removeHistorySession}
-							/>
-						) : (
-							headerActions
-						)
+			<div className="flex min-h-0 min-w-0 flex-1 justify-center">
+				<div
+					className="relative flex h-full min-h-0 w-full flex-col"
+					style={
+						workspace
+							? {
+									width: `min(${conversationWidth}px, calc(100% - 4rem))`,
+								}
+							: undefined
 					}
 				>
-					{backendSwitcher}
-					{remoteControls && (
-						<div
-							className="flex min-w-0"
-							inert={hasRunningSessions || submitting}
-						>
-							{remoteControls}
-						</div>
+					{workspace ? null : (
+						<>
+							<PaneHeader
+								trailing={
+									remoteReady ? (
+										<SidebarHistoryTrailing
+											historyOpen={historyOpen}
+											onHistoryOpenChange={setHistoryOpen}
+											activeTabId={activeTabId}
+											submitting={submitting}
+											headerActions={headerActions}
+											onNewConversation={newConversation}
+											onOpenSession={openHistorySession}
+											onDeleteSession={removeHistorySession}
+										/>
+									) : (
+										headerActions
+									)
+								}
+							>
+								{backendSwitcher}
+								{remoteControls && (
+									<div
+										className="flex min-w-0"
+										inert={hasRunningSessions || submitting}
+									>
+										{remoteControls}
+									</div>
+								)}
+							</PaneHeader>
+
+							{remoteSetup}
+							{remoteReady && (
+								<AgentConfigBarMemo
+									modelDropdown={remoteSelected}
+									modelSelectorOpen={modelSelectorOpen}
+									onModelSelectorOpenChange={setModelSelectorOpen}
+									models={models}
+									groupedModels={groupedModels}
+									modelId={modelId}
+									selectedModelName={selectedModelName}
+									favoriteIds={favoriteIds}
+									warming={
+										warming ||
+										(remoteSelected && (activeTabIsRunning || submitting))
+									}
+									onPickModel={handlePickModel}
+									onToggleFavorite={toggleFavorite}
+									collaborationOptions={collaborationOptions}
+									collaborationModeId={collaborationModeId}
+									selectedCollaborationName={selectedCollaborationName}
+									onPickCollaborationMode={pickCollaborationMode}
+									effortOptions={effortOptions}
+									reasoningEffort={reasoningEffort}
+									onReasoningEffortChange={pickReasoningEffort}
+									fastAvailable={fastAvailable}
+									fastEnabled={fastEnabled}
+									onFastEnabledToggle={toggleFastEnabled}
+								/>
+							)}
+						</>
 					)}
-				</PaneHeader>
 
-				{remoteSetup}
-				{remoteReady && (
-					<>
-						<AgentConfigBarMemo
-							modelDropdown={remoteSelected}
-							modelSelectorOpen={modelSelectorOpen}
-							onModelSelectorOpenChange={setModelSelectorOpen}
-							models={models}
-							groupedModels={groupedModels}
-							modelId={modelId}
-							selectedModelName={selectedModelName}
-							favoriteIds={favoriteIds}
-							warming={
-								warming ||
-								(remoteSelected && (activeTabIsRunning || submitting))
-							}
-							onPickModel={handlePickModel}
-							onToggleFavorite={toggleFavorite}
-							collaborationOptions={collaborationOptions}
-							collaborationModeId={collaborationModeId}
-							selectedCollaborationName={selectedCollaborationName}
-							onPickCollaborationMode={pickCollaborationMode}
-							effortOptions={effortOptions}
-							reasoningEffort={reasoningEffort}
-							onReasoningEffortChange={pickReasoningEffort}
-							fastAvailable={fastAvailable}
-							fastEnabled={fastEnabled}
-							onFastEnabledToggle={toggleFastEnabled}
-						/>
-
+					{(workspace || remoteReady) && (
 						<div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
 							<ChatTranscript
 								wide={wide}
@@ -631,6 +694,9 @@ function AgentPanelContent({
 
 									<AgentComposer
 										wide={wide}
+										seamless={workspace}
+										footerStart={workspaceFooterStart}
+										footerEnd={workspaceFooterEnd}
 										remotePaper={remotePaper}
 										onRemotePaperPdfChange={(include) =>
 											setExcludedPaperKey(
@@ -718,8 +784,14 @@ function AgentPanelContent({
 								</>
 							) : null}
 						</div>
-					</>
-				)}
+					)}
+					{workspace ? (
+						<ConversationWidthHandles
+							width={conversationWidth}
+							onChange={setConversationWidth}
+						/>
+					) : null}
+				</div>
 			</div>
 
 			<AgentPermissionDialog

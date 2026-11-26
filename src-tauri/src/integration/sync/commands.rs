@@ -519,20 +519,9 @@ async fn perform_sync_task(
     let mut binding = credentials::load(app, vault_key)
         .await?
         .ok_or_else(|| AppError::message("sync is not configured"))?;
-    // The translation-cache switch owns sync eligibility for the translation
-    // sidecar and finished translated PDFs. It lives in the app settings
-    // (default off) rather than the per-vault scope form so the same control
-    // governs desktop and mobile. Layout files stay always-synced paper
-    // metadata for figures, citations and deferred-paper availability.
-    let translation_cache_sync = app
-        .state::<crate::features::system::settings::AppSettingsStore>()
-        .get()
-        .map(|snapshot| snapshot.settings.translate.cache_translation_sync)
-        .unwrap_or(true);
-    binding.primary.scope.translated = translation_cache_sync;
-    for mirror in &mut binding.mirrors {
-        mirror.scope.translated = translation_cache_sync;
-    }
+    // Translation-PDF sync eligibility follows the upstream per-vault scope
+    // (`scope.translation`, opt-in from Settings -> Sync). The former
+    // translation-cache master switch no longer overrides the stored scope.
     attach_agentero_session(app, &mut binding.primary).await;
     emit_state(app, vault_key, "syncing", None, None);
     let progress_app = app.clone();

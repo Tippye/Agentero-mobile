@@ -1,7 +1,7 @@
 {
 	"name": "agentero",
 	"private": true,
-	"version": "0.18.3",
+	"version": "0.18.4",
 	"type": "module",
 	"packageManager": "pnpm@11.5.3",
 	"scripts": {
@@ -35,7 +35,7 @@
 		"deps:check": "depcruise --config .dependency-cruiser.cjs src",
 		"openui:catalog": "node scripts/generate-openui-catalog.mjs",
 		"dictionary:stage": "node scripts/prepare-dictionary.mjs",
-    "fonts:stage": "node scripts/prepare-fonts.mjs",
+		"fonts:stage": "node scripts/prepare-fonts.mjs",
 		"dictionary:verify": "node scripts/prepare-dictionary.mjs --verify"
 	},
 	"dependencies": {
@@ -135,6 +135,7 @@
 		"dockview-react": "^7.0.4",
 		"dompurify": "3.4.17",
 		"driver.js": "^1.8.0",
+		"harfbuzzjs": "1.6.1",
 		"html-react-parser": "^6.1.9",
 		"html-to-image": "^1.11.13",
 		"i18next": "^26.3.6",

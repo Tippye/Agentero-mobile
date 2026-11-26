@@ -52,64 +52,85 @@ pub fn is_ignored_name(name: &str) -> bool {
         || crate::features::vault::tree::is_sync_store_artifact(name)
 }
 
+fn legacy_scope_on() -> bool {
+    true
+}
+
+fn translation_scope_off() -> bool {
+    false
+}
+
 /// Which bulky, re-derivable paper assets participate in sync. Notes,
 /// metadata sidecars, highlights and embedded images always sync — they are
-/// small and not recoverable from any upstream source. Ink strokes and
-/// translated PDFs are optional because only some devices produce them or need
-/// them.
+/// small and not recoverable from any upstream source. Translation PDFs are
+/// opt-in (upstream default off); ink strokes are a mobile optional category
+/// that has always travelled implicitly, so they stay on by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SyncScope {
     /// Paper-root PDFs: `papers/<id>/<id>.pdf`.
+    #[serde(default = "legacy_scope_on")]
     pub pdf: bool,
     /// LaTeX / e-print trees: `papers/<id>/source/`.
+    #[serde(default = "legacy_scope_on")]
     pub source: bool,
     /// Supplementary material: `papers/<id>/attachments/`.
+    #[serde(default = "legacy_scope_on")]
     pub attachments: bool,
+    /// Finished translation PDFs: `papers/<id>/translations/`.
+    /// Missing on older configs. Off — not `Default::all()`.
+    #[serde(default = "translation_scope_off")]
+    pub translation: bool,
     /// Handwritten ink sidecars: `papers/<id>/marks/ink/`.
+    /// Mobile optional category; missing on older configs means on.
+    #[serde(default = "legacy_scope_on")]
     pub ink: bool,
-    /// Finished translated PDFs: `papers/<id>/translated/`.
-    pub translated: bool,
 }
 
 impl Default for SyncScope {
-    /// Product defaults. Ink has always travelled implicitly, so it stays on;
-    /// translated PDFs are ~25 MB per paper and are opt-in.
+    /// A missing scope object means the original three categories are on and
+    /// ink stays on. `translation` stays off so an old manifest is not
+    /// rewritten as partial and does not start syncing translation PDFs.
     fn default() -> Self {
         Self {
             pdf: true,
             source: true,
             attachments: true,
+            translation: false,
             ink: true,
-            translated: false,
         }
     }
 }
 
 impl SyncScope {
-    /// Every category included. Used for legacy manifests/state that predate
-    /// the scope field, and by Git's full-vault mirror.
+    /// Historical full scope: PDF, source, attachments and ink. Translations
+    /// stay off. Used for legacy manifests/state that predate the scope field.
     pub fn all() -> Self {
-        Self {
-            pdf: true,
-            source: true,
-            attachments: true,
-            ink: true,
-            translated: true,
-        }
+        Self::default()
     }
 
+    /// Original three categories plus ink. A manifest that predates
+    /// `translation` still counts as full, so it is not rewritten just because
+    /// the field is absent. Ink participates because a publisher with ink off
+    /// must advertise the filter: absent ink files are "not synced", not
+    /// "deleted".
     pub fn is_all(&self) -> bool {
-        self.pdf && self.source && self.attachments && self.ink && self.translated
+        self.pdf && self.source && self.attachments && self.ink
+    }
+
+    /// Closed categories still need a path filter. Translation stays closed
+    /// when `is_all()` is true, and that must not fall through to "sync everything".
+    pub fn has_exclusions(&self) -> bool {
+        !self.is_all() || !self.translation
     }
 
     /// Whether the scope still carries every path that can prove a paper
-    /// folder exists. `translated/` is deliberately ignored: a finished
+    /// folder exists. `translations/` is deliberately ignored: a finished
     /// translated PDF is derived from a paper that was already in the library,
     /// so it never establishes paper presence on its own. Paper-level deletion
     /// proofs use this instead of [`Self::is_all`] to stay conservative when a
     /// publisher filters PDF/source/attachment/ink, but not when only the
-    /// optional translated-PDF category is off.
+    /// optional translation-PDF category is off.
     pub fn is_all_for_paper_presence(&self) -> bool {
         self.pdf && self.source && self.attachments && self.ink
     }
@@ -123,15 +144,17 @@ pub fn scope_category(rel: &str) -> Option<&'static str> {
     let (_, tail) = rest.split_once('/')?;
     // Reading layout (raw + sidebar index) is required for figures, citations and
     // deferred-paper availability, so it always travels. The translation sidecar
-    // belongs to the translation cache and follows the switch.
+    // follows upstream and travels with `source`.
     if tail == "source/layout.json" || tail == "source/layout-index.json" {
         return None;
     }
-    if tail == "source/layout-translate.json" {
-        return Some("translated");
+    if tail == "translations" || tail.starts_with("translations/") {
+        return Some("translation");
     }
+    // Legacy mobile location; same opt-in category until the vault migration
+    // renames it to `translations/`.
     if tail == "translated" || tail.starts_with("translated/") {
-        return Some("translated");
+        return Some("translation");
     }
     if tail == "marks/ink" || tail.starts_with("marks/ink/") {
         return Some("ink");
@@ -153,8 +176,8 @@ pub fn is_scope_excluded(scope: &SyncScope, rel: &str) -> bool {
         Some("pdf") => !scope.pdf,
         Some("source") => !scope.source,
         Some("attachments") => !scope.attachments,
+        Some("translation") => !scope.translation,
         Some("ink") => !scope.ink,
-        Some("translated") => !scope.translated,
         _ => false,
     }
 }
@@ -166,10 +189,9 @@ pub struct SyncScopeSizes {
     pub pdf: u64,
     pub source: u64,
     pub attachments: u64,
+    pub translation: u64,
     /// Handwritten ink sidecars (mobile optional category).
     pub ink: u64,
-    /// Finished translated PDFs (mobile optional category).
-    pub translated: u64,
 }
 
 pub fn scope_sizes(vault: &Path) -> Result<SyncScopeSizes, AppError> {
@@ -192,8 +214,8 @@ pub fn scope_sizes(vault: &Path) -> Result<SyncScopeSizes, AppError> {
                 Category::Pdf => sizes.pdf += size,
                 Category::Source => sizes.source += size,
                 Category::Attachments => sizes.attachments += size,
+                Category::Translation => sizes.translation += size,
                 Category::Ink => sizes.ink += size,
-                Category::Translated => sizes.translated += size,
             }
         }
     }
@@ -237,10 +259,10 @@ pub fn scan_vault(
     let files = vault_files(vault, "")
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AppError::message(format!("scan vault: {e}")))?;
-    let roots = if scope.is_all() {
-        Default::default()
-    } else {
+    let roots = if scope.has_exclusions() {
         scope::paper_roots(files.iter().map(|(rel, _)| rel.as_str()))
+    } else {
+        Default::default()
     };
     for (rel, entry) in files {
         if scope::excluded(scope, &rel, &roots) {
@@ -361,15 +383,16 @@ mod tests {
         fs::write(vault.join("papers/x/source/layout-translate.json"), b"{}").unwrap();
         fs::write(vault.join("papers/x/attachments/supp.pdf"), b"%PDF").unwrap();
         fs::write(vault.join("papers/x/marks/ink/p1.json"), b"{}").unwrap();
-        fs::write(vault.join("papers/x/translated/out.pdf"), b"%PDF").unwrap();
+        fs::create_dir_all(vault.join("papers/x/translations")).unwrap();
+        fs::write(vault.join("papers/x/translations/translated.pdf"), b"%PDF").unwrap();
         fs::write(vault.join("loose.pdf"), b"%PDF").unwrap(); // outside papers/
 
         let scope = SyncScope {
             pdf: false,
             source: false,
             attachments: true,
+            translation: false,
             ink: false,
-            translated: false,
         };
         let files = scan_vault(&vault, &Manifest::default(), &scope).unwrap();
         let keys: Vec<&String> = files.keys().collect();
@@ -383,13 +406,15 @@ mod tests {
             ]
         );
 
-        // Both new categories travel independently of the TeX/attachment scope.
+        // Both optional categories travel independently of the TeX/attachment
+        // scope. The translation sidecar follows `source` (upstream) and stays
+        // excluded while source is off.
         let files = scan_vault(
             &vault,
             &Manifest::default(),
             &SyncScope {
                 ink: true,
-                translated: true,
+                translation: true,
                 ..scope
             },
         )
@@ -402,9 +427,8 @@ mod tests {
                 "papers/x/NOTES.md",
                 "papers/x/attachments/supp.pdf",
                 "papers/x/marks/ink/p1.json",
-                "papers/x/source/layout-translate.json",
                 "papers/x/source/layout.json",
-                "papers/x/translated/out.pdf"
+                "papers/x/translations/translated.pdf"
             ]
         );
 
@@ -419,7 +443,7 @@ mod tests {
         assert_eq!(scope_category("papers/x/source/layout.json"), None);
         assert_eq!(
             scope_category("papers/x/source/layout-translate.json"),
-            Some("translated")
+            Some("source")
         );
         assert_eq!(scope_category("papers/x/source"), Some("source"));
         assert_eq!(
@@ -429,10 +453,14 @@ mod tests {
         assert_eq!(scope_category("papers/x/marks/ink/p7.json"), Some("ink"));
         assert_eq!(scope_category("papers/x/marks/ink"), Some("ink"));
         assert_eq!(
-            scope_category("papers/x/translated/zh.pdf"),
-            Some("translated")
+            scope_category("papers/x/translations/zh.pdf"),
+            Some("translation")
         );
-        assert_eq!(scope_category("papers/x/translated"), Some("translated"));
+        assert_eq!(
+            scope_category("papers/x/translated/zh.pdf"),
+            Some("translation")
+        );
+        assert_eq!(scope_category("papers/x/translated"), Some("translation"));
         // PDFs nested in a category dir follow the enclosing category.
         assert_eq!(scope_category("papers/x/source/fig.pdf"), Some("source"));
         // Always-synced content and non-paper paths.
@@ -463,6 +491,20 @@ mod tests {
                 "papers/collection/topic/x/attachments/source/fig.pdf",
                 Some(Category::Attachments),
             ),
+            (
+                "papers/collection/topic/x/translations/translated.pdf",
+                Some(Category::Translation),
+            ),
+            (
+                "papers/collection/topic/x/translated/legacy.pdf",
+                Some(Category::Translation),
+            ),
+            (
+                "papers/x/translations/bilingual.pdf",
+                Some(Category::Translation),
+            ),
+            ("papers/x/translated.pdf", Some(Category::Pdf)),
+            ("papers/x/bilingual.pdf", Some(Category::Pdf)),
             ("papers/collection/topic/x/NOTES.md", None),
             ("papers/collection/topic/x/metadata.json", None),
             ("papers/collection/topic/x/marks/a.json", None),
@@ -488,9 +530,10 @@ mod tests {
         let json = serde_json::to_string(&full).unwrap();
         assert!(!json.contains("scope"));
 
-        // The product default (translated off) must travel explicitly.
+        // The historical default (translation off) is omitted on the wire:
+        // `is_all()` ignores translation so old manifests stay complete.
         let defaulted = serde_json::to_string(&Manifest::default()).unwrap();
-        assert!(defaulted.contains("\"translated\":false"));
+        assert!(!defaulted.contains("scope"));
 
         // Filtered scope travels with the manifest.
         let partial = Manifest {
@@ -500,18 +543,43 @@ mod tests {
                 pdf: false,
                 source: true,
                 attachments: true,
+                translation: false,
                 ink: true,
-                translated: false,
             },
         };
         let back: Manifest =
             serde_json::from_str(&serde_json::to_string(&partial).unwrap()).unwrap();
         assert!(!back.scope.pdf);
         assert!(back.scope.source && back.scope.attachments && back.scope.ink);
-        assert!(!back.scope.translated);
+        assert!(!back.scope.translation);
 
-        // Legacy manifests (no scope field) mean "everything synced".
+        // Ink off must travel even when the original three categories are on.
+        let ink_off = Manifest {
+            version: 1,
+            files: BTreeMap::new(),
+            scope: SyncScope {
+                ink: false,
+                ..SyncScope::all()
+            },
+        };
+        let ink_off_json = serde_json::to_string(&ink_off).unwrap();
+        assert!(ink_off_json.contains("\"ink\":false"));
+
+        // Legacy manifests (no scope field) keep the original three on and
+        // leave translations off, so the missing field is not "sync everything".
         let legacy: Manifest = serde_json::from_str(r#"{"version":1,"files":{}}"#).unwrap();
         assert!(legacy.scope.is_all());
+        assert!(!legacy.scope.translation);
+
+        let missing_field: SyncScope =
+            serde_json::from_str(r#"{"pdf":true,"source":true,"attachments":true}"#).unwrap();
+        assert!(missing_field.is_all());
+        assert!(!missing_field.translation);
+
+        let mut opted_in = SyncScope::all();
+        opted_in.translation = true;
+        assert!(opted_in.is_all());
+        assert!(opted_in.translation);
+        assert!(!opted_in.has_exclusions());
     }
 }

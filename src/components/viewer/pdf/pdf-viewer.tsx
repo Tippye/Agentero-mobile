@@ -572,8 +572,6 @@ function PdfViewerInner({
 	const { t } = useTranslation("viewer");
 	// Writing previews own the hover affordance via SyncTeX. The reading
 	// setting turns the sentence wash off without replacing that line hint.
-	// `readingSentenceLayer` stays on in the reader so the element layer does
-	// not start its own sentence tracking when the wash is disabled.
 	const pdfSentenceHover = useSettings((s) => s.pdfSentenceHover);
 	const readingSentenceLayer = syncTexScope !== "writing";
 	const [importBusy, setImportBusy] = useState(false);
@@ -2584,6 +2582,7 @@ function PdfViewerInner({
 			translationOnly,
 			plainViewer,
 			sentencePairing: readingSentenceLayer,
+			sentenceHover: pdfSentenceHover,
 		}),
 		[
 			regionSelecting,
@@ -2596,6 +2595,7 @@ function PdfViewerInner({
 			inkEditable,
 			inkMode,
 			readingSentenceLayer,
+			pdfSentenceHover,
 		],
 	);
 
@@ -3216,8 +3216,8 @@ function PdfViewerInner({
 					paperRelPath={paperRelPath}
 					paperAbsPath={paperAbsPath}
 					captureRegion={captureRegion}
-					onHighlight={(pages, color, quote, shape) =>
-						createHighlights(pages, color, quote, undefined, shape)
+					onHighlight={(pages, color, quote, shape, translatedPages) =>
+						createHighlights(pages, color, quote, translatedPages, shape)
 					}
 					onNote={beginSelectionComment}
 					onAsk={startFromAnchor}

@@ -16,6 +16,7 @@ import { createReflowIrCache } from "@/lib/pdf/reflow/cache";
 import { NO_REGIONS, ReflowPreviewSession } from "@/lib/pdf/reflow/preview";
 import { prepareReflowItems } from "@/lib/pdf/reflow/service";
 import { writeVaultBytes } from "@/lib/vault/fs";
+import { joinVaultPath } from "@/lib/vault/path";
 export type ReflowContext = () => {
 	engine: PdfEngine;
 	document: PdfDocumentObject;
@@ -32,13 +33,12 @@ export function usePdfReflow(
 	pageOnly = false,
 ) {
 	const { t } = useTranslation("viewer");
-	// Translation results are always cached locally now; the settings switch
-	// only decides whether the finished PDF lives in the paper folder (synced)
-	// or in the app cache (local-only).
-	const cacheTranslationSync = useSettings(
-		(s) => s.translate.cacheTranslationSync,
-	);
-	const cacheFlags = useRef({ ir: true, final: true });
+	// Cache persistence is user-controlled (Settings → Translate). The ref keeps
+	// a running session in sync without rebuilding it when a switch flips.
+	const cacheReflowIr = useSettings((s) => s.translate.cacheReflowIr);
+	const cacheReflowFinal = useSettings((s) => s.translate.cacheReflowFinal);
+	const cacheFlags = useRef({ ir: cacheReflowIr, final: cacheReflowFinal });
+	cacheFlags.current = { ir: cacheReflowIr, final: cacheReflowFinal };
 	const current = useRef({
 		context,
 		regions,
@@ -115,7 +115,6 @@ export function usePdfReflow(
 					paperKey: current.current.paperKey || current.current.paperAbsPath,
 					paperAbsPath: current.current.paperAbsPath,
 					pdfBytes: current.current.pdfBytes,
-					localOnly: !cacheTranslationSync,
 					identity: () => currentLayoutTranslateCacheKey(),
 				},
 				{ writesEnabled: () => cacheFlags.current.final },
@@ -126,7 +125,7 @@ export function usePdfReflow(
 			value.dispose();
 			if (session.current === value) session.current = null;
 		};
-	}, [engine, document, documentKey, t, cacheTranslationSync]);
+	}, [engine, document, documentKey, t]);
 	// Re-run when the owning session is recreated, even if inputs are unchanged.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: session lifetime dependencies
 	useEffect(() => {
@@ -151,8 +150,13 @@ export function usePdfReflow(
 			if (!value?.ready || current.current.running) return;
 			try {
 				const { save } = await import("@tauri-apps/plugin-dialog");
+				const fileName = dual ? "bilingual.pdf" : "translated.pdf";
+				// Default into translations/ so the export is not sorted as the paper PDF.
+				const paperDir = current.current.paperAbsPath;
 				const path = await save({
-					defaultPath: dual ? "bilingual.pdf" : "translated.pdf",
+					defaultPath: paperDir
+						? joinVaultPath(joinVaultPath(paperDir, "translations"), fileName)
+						: fileName,
 					filters: [{ name: "PDF", extensions: ["pdf"] }],
 				});
 				if (
