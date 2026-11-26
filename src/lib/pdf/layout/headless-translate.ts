@@ -429,10 +429,9 @@ async function buildFinalCache(opts: {
 				paperKey: opts.paperKey,
 				paperAbsPath: opts.paperAbsPath,
 				pdfBytes: opts.pdfBytes,
-				localOnly: !loadSettings().translate.cacheTranslationSync,
 				identity: () => opts.identity,
 			},
-			{ writesEnabled: () => true },
+			{ writesEnabled: () => loadSettings().translate.cacheReflowFinal },
 		);
 		const cached = await cache.readFinal(ir, translations, fonts);
 		opts.signal?.throwIfAborted();

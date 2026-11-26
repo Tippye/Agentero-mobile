@@ -429,6 +429,7 @@ export type PdfPageModeSlice = {
 	commentDisplay?: PdfCommentDisplay;
 	/** Dual-pane translation page paints the shared sentence wash. */
 	sentencePairing?: boolean;
+	sentenceHover?: boolean;
 };
 
 export type PdfPageHandlers = {
@@ -1314,6 +1315,9 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 			ref={pageShellRef}
 			data-annotation-pdf={docId}
 			data-annotation-source={annotationSource}
+			data-layout-element-selection={
+				(!immersiveReading && Boolean(selectableOnPage?.length)) || undefined
+			}
 			data-annotation-page={pageIndex + 1}
 			data-paper={tone}
 			className={cn(
@@ -1654,6 +1658,7 @@ export const PdfPageLayers = memo(function PdfPageLayers({
 						width={width}
 						height={height}
 						sentencePairing={mode.sentencePairing}
+						sentenceHover={mode.sentenceHover}
 					/>
 				) : null}
 				{/*

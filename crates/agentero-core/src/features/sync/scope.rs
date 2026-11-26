@@ -7,10 +7,10 @@ pub(super) enum Category {
     Pdf,
     Source,
     Attachments,
+    /// Finished translation PDFs (`translations/`); upstream opt-in category.
+    Translation,
     /// Handwritten ink sidecars (`marks/ink/`); mobile optional category.
     Ink,
-    /// Finished translated PDFs (`translated/`); mobile optional category.
-    Translated,
 }
 
 impl Category {
@@ -19,15 +19,15 @@ impl Category {
             Self::Pdf => scope.pdf,
             Self::Source => scope.source,
             Self::Attachments => scope.attachments,
+            Self::Translation => scope.translation,
             Self::Ink => scope.ink,
-            Self::Translated => scope.translated,
         }
     }
 
     pub(super) fn is_directory(self) -> bool {
         matches!(
             self,
-            Self::Source | Self::Attachments | Self::Ink | Self::Translated
+            Self::Source | Self::Attachments | Self::Translation | Self::Ink
         )
     }
 }
@@ -84,19 +84,19 @@ pub(super) fn classify<'a>(path: &'a str, roots: &PaperRoots) -> Option<(Categor
         match component {
             "source" => {
                 // Layout is required for figures, citations and deferred-paper availability:
-                // keep raw layout and the sidebar index always synced. The translation sidecar
-                // is cache output and follows the translation-cache switch.
+                // keep raw layout and the sidebar index always synced. The translation
+                // sidecar follows upstream and travels with `source`.
                 let tail = &path[end..];
                 if tail == "/layout.json" || tail == "/layout-index.json" {
                     return None;
                 }
-                if tail == "/layout-translate.json" {
-                    return Some((Category::Translated, path));
-                }
                 return Some((Category::Source, &path[..end]));
             }
             "attachments" => return Some((Category::Attachments, &path[..end])),
-            "translated" => return Some((Category::Translated, &path[..end])),
+            "translations" => return Some((Category::Translation, &path[..end])),
+            // Legacy mobile location; follows the same opt-in category until
+            // the vault migration renames it to `translations/`.
+            "translated" => return Some((Category::Translation, &path[..end])),
             "marks" => {
                 // Only the ink subtree is an optional category; annotations
                 // and other marks always sync.
@@ -124,5 +124,13 @@ pub(super) fn classify<'a>(path: &'a str, roots: &PaperRoots) -> Option<(Categor
 }
 
 pub(super) fn excluded(scope: &SyncScope, path: &str, roots: &PaperRoots) -> bool {
-    !scope.is_all() && classify(path, roots).is_some_and(|(category, _)| !category.enabled(scope))
+    let Some((category, _)) = classify(path, roots) else {
+        return false;
+    };
+    if category.enabled(scope) {
+        return false;
+    }
+    // `is_all()` ignores `translation`, so a closed translation directory is
+    // still excluded when PDF, source, and attachments are all on.
+    matches!(category, Category::Translation) || !scope.is_all()
 }

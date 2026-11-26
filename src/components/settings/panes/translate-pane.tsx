@@ -630,13 +630,14 @@ export function TranslatePane({
 						variant="outline"
 						size="xs"
 						disabled={
-							tr.cacheTranslationSync ===
-							DEFAULT_TRANSLATE_SETTINGS.cacheTranslationSync
+							tr.cacheReflowIr === DEFAULT_TRANSLATE_SETTINGS.cacheReflowIr &&
+							tr.cacheReflowFinal ===
+								DEFAULT_TRANSLATE_SETTINGS.cacheReflowFinal
 						}
 						onClick={() =>
 							patchTranslate({
-								cacheTranslationSync:
-									DEFAULT_TRANSLATE_SETTINGS.cacheTranslationSync,
+								cacheReflowIr: DEFAULT_TRANSLATE_SETTINGS.cacheReflowIr,
+								cacheReflowFinal: DEFAULT_TRANSLATE_SETTINGS.cacheReflowFinal,
 							})
 						}
 					>
@@ -665,16 +666,23 @@ export function TranslatePane({
 						</Button>
 					</SettingsRow>
 					<SettingsRow
-						label={t("translate.cache.translation.label")}
-						description={t("translate.cache.translation.help")}
-						htmlFor="translate-cache-translation"
+						label={t("translate.cache.ir.label")}
+						htmlFor="translate-cache-ir"
 					>
 						<Switch
-							id="translate-cache-translation"
-							checked={tr.cacheTranslationSync}
-							onCheckedChange={(v) =>
-								patchTranslate({ cacheTranslationSync: v })
-							}
+							id="translate-cache-ir"
+							checked={tr.cacheReflowIr}
+							onCheckedChange={(v) => patchTranslate({ cacheReflowIr: v })}
+						/>
+					</SettingsRow>
+					<SettingsRow
+						label={t("translate.cache.final.label")}
+						htmlFor="translate-cache-final"
+					>
+						<Switch
+							id="translate-cache-final"
+							checked={tr.cacheReflowFinal}
+							onCheckedChange={(v) => patchTranslate({ cacheReflowFinal: v })}
 						/>
 					</SettingsRow>
 				</SettingsGroup>
@@ -823,28 +831,6 @@ export function TranslatePane({
 											autoComplete="off"
 										/>
 									</ProviderFieldRow>
-									{id === "azure" ? (
-										<ProviderFieldRow
-											label={t("translate.providerConfig.region.label")}
-											htmlFor={`${inputPrefix}-region`}
-										>
-											<Input
-												id={`${inputPrefix}-region`}
-												value={effectiveCfg.region}
-												onChange={(e) =>
-													setDraftField(id, {
-														region: e.target.value,
-													})
-												}
-												placeholder={t(
-													"translate.providerConfig.region.placeholder",
-												)}
-												className={PROVIDER_INPUT_CLASS}
-												spellCheck={false}
-												autoComplete="off"
-											/>
-										</ProviderFieldRow>
-									) : null}
 									{id === "openaiCompatible" ? (
 										<>
 											<ProviderFieldRow

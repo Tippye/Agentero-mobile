@@ -319,6 +319,7 @@
 		"kindFormula": "Formula",
 		"kindFormulaNumber": "Eq. number",
 		"kindFigureTitle": "Caption",
+		"kindSentence": "Sentence",
 		"kindHeader": "Header",
 		"kindAbstract": "Abstract",
 		"kindText": "Text",

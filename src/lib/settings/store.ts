@@ -897,9 +897,6 @@ function normalizeTranslateSettings(
 	if (typeof raw.cacheReflowFinal === "boolean") {
 		base.cacheReflowFinal = raw.cacheReflowFinal;
 	}
-	if (typeof raw.cacheTranslationSync === "boolean") {
-		base.cacheTranslationSync = raw.cacheTranslationSync;
-	}
 	if (typeof raw.autoTranslateImport === "boolean") {
 		base.autoTranslateImport = raw.autoTranslateImport;
 	}
@@ -933,7 +930,6 @@ function normalizeTranslateProviderConfigs(
 		const cfg = value as {
 			apiKey?: unknown;
 			baseUrl?: unknown;
-			region?: unknown;
 			model?: unknown;
 			extraRequestBody?: unknown;
 			concurrency?: unknown;
@@ -944,7 +940,6 @@ function normalizeTranslateProviderConfigs(
 			// which would eat the "/" while typing e.g. ".../v1". Host and the
 			// settings UI onBlur already trim trailing slashes.
 			baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl.trim() : "",
-			region: typeof cfg.region === "string" ? cfg.region.trim() : "",
 			model: typeof cfg.model === "string" ? cfg.model.trim() : "",
 			extraRequestBody:
 				typeof cfg.extraRequestBody === "string"

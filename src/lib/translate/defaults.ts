@@ -18,7 +18,6 @@ export const DEFAULT_TRANSLATE_SETTINGS: TranslateSettings = {
 	customUser: "",
 	cacheReflowIr: true,
 	cacheReflowFinal: true,
-	cacheTranslationSync: true,
 	autoTranslateImport: false,
 	autoTranslateImportConcurrency: 1,
 	alwaysShowTranslateCard: false,
@@ -55,7 +54,6 @@ export function normalizeTranslateConcurrency(value: unknown): number {
 export const EMPTY_TRANSLATE_PROVIDER_CONFIG: TranslateProviderConfig = {
 	apiKey: "",
 	baseUrl: "",
-	region: "",
 	model: "",
 	extraRequestBody: "",
 	concurrency: DEFAULT_TRANSLATE_CONCURRENCY,
